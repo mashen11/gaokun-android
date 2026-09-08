@@ -11,8 +11,12 @@
 #   耳机   = PCM **0**（RX_CODEC_DMA_RX_0  ← MultiMedia1）
 # 自测：`tinyplay /data/local/tmp/tone.wav -D 0 -d 1`（2026-08-19 实机出声）
 #
-# ⚠️ 左功放（sdw:1:...:1）会卡在 Alert 状态刷 "Bus clash detected"，
-#    右功放正常；出声不受影响，但这是个待查项（docs/stage5-audio.md）。
+# ⚠️ 功放会卡在 SoundWire Alert 状态刷 "Bus clash detected"。
+#    ★ 2026-09-08 复查：**两颗都在 Alert**（sdw:1:...:1 与 :2），不是只有左边。
+#    出声不受影响，但同一次复查发现**同一组混音器设置在几分钟内电平漂移最多
+#    7.5 dB**（单次连测内只有 0.57 dB），即这条通路上有一个没人解释的增益变量。
+#    Alert = 从设备拉了中断没被清，而 WSA883x 的中断源就是保护事件。两件事
+#    可能同源，未证实。⚠️ 抬 PA 增益之前值得先把这个查清楚（docs #78 第 5 节）。
 
 # ⚠️ 必须把 PATH 钉在 /system/bin —— 与 smmu-nostall.sh 同一个坑。
 # 本脚本以 `#!/vendor/bin/sh` 起，PATH 默认优先 /vendor/bin，于是 log/sleep 每次都去
@@ -33,11 +37,20 @@ n=0
 while [ ! -e /dev/snd/controlC0 ] && [ $n -lt 60 ]; do sleep 1; n=$((n+1)); done
 [ -e /dev/snd/controlC0 ] || { log -t audioroute "等不到声卡（60s）"; exit 1; }
 
-# ⚠️ BOOST 保持 **关**：功放升压器一使能，每次流起停都会有明显爆音
-#    （2026-08-19 A/B 盲听实测：BOOST 关 = 无爆音，BOOST 开 = 明显爆音）。
-#    代价是最大声压低一些，对平板的小喇叭是划算的取舍。
-# ⚠️ PA Volume 用 UCM BootSequence 的原厂值 **12**（范围 0->17）。
-#    我一度设 17，结果起停削波很难听。
+# ⚠️ BOOST 保持 **关**：一使能，每次流起停都有明显爆音
+#    （2026-08-19 A/B 盲听定案）。
+#    ★ 但"代价是最大声压低一些"这句是错的，已实测推翻：BOOST 开/关对电平的
+#    影响是 +0.07 dB（档案录音）与 -0.28 dB（新测），即**零**。它是 SoundWire
+#    端口使能（wsa883x_set_swr_port(WSA883X_PORT_BOOST)），不是功放升压器开关。
+#    所以关掉它**不换来任何响度损失**，纯赚。详见 docs #78。
+#
+# ★★ 增益分配（2026-09-08 实测重排，docs #78）：
+#    数字级走**单位增益 84**，响度由 **PA** 出。
+#    此前是反过来的（数字 90 = +6 dB、PA 12 = -3 dB），那个组合在 -6 dBFS
+#    素材上实测 THD **-20 dB（约 10% 失真）** —— 数字级 +6 dB 把 -6 dBFS
+#    的内容顶到 0 dBFS，是**削波**，不是压缩器吃掉了增益
+#    （-20 dBFS 素材下同样两档给出满额 +9.07 dB 且 THD -52 dB，这是判据）。
+#    改成 84 之后没有任何混音器设置能削爆数字通路。
 set -- \
     "WSA_CODEC_DMA_RX_0 Audio Mixer MultiMedia2" 1 \
     "WSA RX0 MUX" AIF1_PB \
@@ -54,10 +67,10 @@ set -- \
     "SpkrRight BOOST Switch" 0 \
     "SpkrRight VISENSE Switch" 1 \
     "SpkrRight DAC Switch" 1 \
-    "SpkrLeft PA Volume" 12 \
-    "SpkrRight PA Volume" 12 \
-    "WSA_RX0 Digital Volume" 90 \
-    "WSA_RX1 Digital Volume" 90
+    "SpkrLeft PA Volume" 17 \
+    "SpkrRight PA Volume" 17 \
+    "WSA_RX0 Digital Volume" 84 \
+    "WSA_RX1 Digital Volume" 84
 
 apply() {
     while [ $# -ge 2 ]; do
@@ -67,7 +80,28 @@ apply() {
 }
 apply "$@"
 
-log -t audioroute "扬声器路由已应用（PCM1 / WSA / PA=12 / BOOST=off 防爆音）"
+# ★ PA 音量分两步写，好让**同一份 ROM 在新旧内核上都正确** ——
+#   本项目内核与 ROM 是分开发布的，不能假设两边同步。
+#   上面已写 17（= 0 dB，上游上限，任何内核都接受）。下面试着抬到 PA_TARGET：
+#   打了 patches/0015（上限 17 -> 23）的内核会成功，旧内核直接拒绝、17 留着。
+#   ⚠️ 顺序不能反 —— 先写 21 再写 17，新内核上会把音量又压回 0 dB。
+#   ⚠️ 单边成功、另一边失败时要把两边一起退回 17，否则左右声道增益不一致。
+#
+#   PA_TARGET=21 是 +6 dB（刻度：17=0 dB，之后每步 1.50 dB，实测 15->16->17
+#   为 +1.55/+1.43 dB）。上限给到 23（+9 dB）是留调音余量，不用重编内核就能
+#   在 18..23 之间扫。⚠️ 往上调之前先听起停爆音、并看一眼
+#   /sys/class/hwmon/*/temp1_input（实测连续正弦下功放到 41 °C）。
+PA_TARGET=21
+if $M "SpkrLeft PA Volume" $PA_TARGET >/dev/null 2>&1 &&
+   $M "SpkrRight PA Volume" $PA_TARGET >/dev/null 2>&1; then
+    PA_NOW=$PA_TARGET
+else
+    $M "SpkrLeft PA Volume" 17 >/dev/null 2>&1
+    $M "SpkrRight PA Volume" 17 >/dev/null 2>&1
+    PA_NOW=17
+fi
+
+log -t audioroute "扬声器路由已应用（PCM1 / WSA / 数字=84 单位增益 / PA=$PA_NOW / BOOST=off 防爆音）"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 耳机（PCM 0 / RX_CODEC_DMA_RX_0 ← MultiMedia1）
@@ -150,18 +184,23 @@ log -t audioroute "内置麦路由已应用（PCM3 / VA / DMIC0+1）"
 
 # ⚠️ 与上游 UCM 刻意不同的两处，记下来免得以后当成漏配：
 #   * `SpkrLeft/Right BOOST Switch` 我们是 0，上游是 1 ——
-#     功放升压器一使能，每次流起停都有明显爆音（2026-08-19 A/B 盲听定案）。
+#     一使能，每次流起停都有明显爆音（2026-08-19 A/B 盲听定案）。
+#     ★ 它**不是**功放升压器开关（这个叫法本仓沿用了很久，是错的），而是
+#     SoundWire 端口使能；对稳态电平的影响实测为 ±0.3 dB 以内，即零。
 #   * `SpkrLeft/Right VISENSE Switch` 我们是 1，上游是 0 ——
 #     现状实测出声正常、dmesg 无抱怨，故未动；但这是个未验证的偏离，
 #     若将来查扬声器功耗或保护逻辑，先看这里。
 #   另两处查过是【已经一致】的，不用设：`WSA MODE` 默认就是上游的 0；
-#   ⚠️★ `WSA_RXn Digital Volume` 那条旧注释已作废（原文："本机范围是 0->81
-#   且已在 81（最大），上游写的 84 在本机是超范围值"）。真相是：81 这个上限
-#   是【内核机器驱动故意设的】——sound/soc/qcom/sc8280xp.c 里
-#   snd_soc_limit_volume(card, "WSA_RX0 Digital Volume", 81)，注释写着
+#   ⚠️★ `WSA_RXn Digital Volume` 的上限是【内核机器驱动故意设的】——
+#   sound/soc/qcom/sc8280xp.c 里 snd_soc_limit_volume()，上游写 81，注释是
 #   "Set limit of -3 dB ... until we have active speaker protection in place"。
-#   控件刻度是 v-84 dB，所以 81 = -3 dB、124 = +40 dB，被锁掉的是 43 dB。
-#   本仓 patches/0015 把上限抬到 90（+6 dB），所以这里【必须显式设 90】：
-#   驱动默认是 84（0 dB），不设就白抬了。
-#   实测（内置麦克风、440 Hz Goertzel）：81 → -28.0 dBFS，90 → -22.3 dBFS，
-#   +5.7 dB（理论 +9，差额被 WSA883x 的压缩器吃掉）。详见 docs #67。
+#   控件刻度是 v-84 dB，所以 81 = -3 dB、84 = 单位增益、124 = +40 dB。
+#
+#   ⚠️★★ **这里此前写着"必须显式设 90"，那是错的，2026-09-08 实测推翻。**
+#   90 = +6 dB，而 -6 dBFS 的内容加 6 dB 正好是 0 dBFS —— 是削波。同一次
+#   测量里 dig90/PA12 的 THD 是 **-20.08 dB**，dig84/PA17 是 **-39.81 dB**，
+#   后者只低 2.12 dB 却干净 19.7 dB。旧注释把缺掉的增益归给"WSA883x 的
+#   压缩器"，也是错的：-20 dBFS 素材下 81->90 给出满额 **+9.07 dB** 且
+#   THD -52.8 dB，压缩器根本没参与，缺的那部分就是削波削掉的。
+#   patches/0015 已改成把上限压在 **84（单位增益）**，让任何混音器设置都
+#   削不爆数字通路；响度改由 PA 出（上限 17 -> 23）。详见 docs #78。

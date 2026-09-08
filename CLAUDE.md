@@ -7,6 +7,29 @@
 
 **当前阶段：Stage 6 M20 — ★★★★ 一次装机把两件大事落地（构建戳 `1787436126`，slot_a）：**① root 随 ROM 常驻**（ReSukiSU，`verify-root.sh` 8/8，postinstall 写进 slot_a 的内核与手工验过的 sha256 逐字节相同）；**② SELinux 四步走完** —— `init` 域里只剩 PID 1，`network_stack` 236→0、`hal_health_default` 235→0（**四条 genfscon，零 allow 规则**），第 4 步规则按真实主体写完并通过 `sepolicy_neverallows`。功能零回归（传感器/声卡/WiFi/root）。⚠️ **仍是 permissive**：转 enforcing 还卡在两个加规则解决不了的东西（hangdump 的 debugfs neverallow 无 userdebug 豁免；smmustall 要 `/dev/mem`，正解是先做 B6）。**★ Stage 7 M0 上机完成**：Alpine 救援系统 ssh 可达、WiFi 自动连上、分区工具齐全（squashfs 55 MiB + initramfs 2.7 MiB，替掉 24.6 GiB 的 Ubuntu）。真凶是**内建 ath11k 在 initramfs 阶段拿不到固件**（probe 在 t=1.19s，远早于 switch_root）。安装器后端已在真实磁盘上验过，**双系统方案算得出来**（63.9 GiB 空闲区 → /data 50.7 GiB）；图形安装器七屏已编译并离线渲染检查。⬜ 欠 `gk3_apply`（真写盘）与 DRM 后端。（每次开工时更新这一行）
 
+> ## ⚠️★★★★ 开工前先读：设备处于非默认状态（2026-09-08 夜遗留）
+>
+> **① 机器可能是黑屏/关着的。** 上机测音量补丁内核失败，需要**长按电源键
+> 强制关机再开机**。会自动回到能用的内核（`default = *-android-b.conf`，
+> `LoaderEntryOneShot` 已被 systemd-boot 消耗）。现役 `slot_b/Image` 全程
+> 没动过（sha `7ec8bf2cec625d5e`）。
+>
+> **② ⬜ 要复原一处**：`ESP/.../android/slot_a/recovery-ramdisk.img` 被搬到了
+> `/data/local/tmp/slot_a-recovery-ramdisk.img`（腾空间用，没删），**搬回去**。
+>
+> **③ ⬜ 待查**：新内核为什么起不来 —— 先看 `efi_pstore` 和
+> `LoaderEntrySelected`。产物在设备 `ESP/.../android/slot_b_audio/Image`，
+> 内核树保留在构建机 `~/gk3-kernel`（Azure VM `CICD`，已 deallocate）。
+>
+> **④ ⚠️★★ A/B 回落网【不存在】** —— super 里只有 `_b` 一套逻辑分区，
+> `android-a.conf` 是死条目；`bootctl` 报 slot 0 bootable 是 misc 里的陈旧
+> 标志位，**不可信，要用 `lpdump` 判**。全项目"另一个槽就是备份"的说法
+> 在事实上是空的。
+>
+> **⑤** ESP 只剩 5.7 MB（99%）。音量结论与已落地的改动见
+> `docs/stage4-findings.md` #78，本次上机失败的完整记录见 #79。
+
+
 > **★★★★ Stage 6 M20（2026-08-23 夜，用户睡觉期间）：root 进 ROM + SELinux 四步走完。**
 > 完整案卷 [#76](docs/stage4-findings.md) / [#77](docs/stage4-findings.md)。
 > - ★★ **第 3 步（sysfs 打标签）是本轮性价比最高的一击**：
