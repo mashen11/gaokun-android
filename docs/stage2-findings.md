@@ -621,6 +621,6 @@ USB_F_FS），bool 子项的 =y 不代表代码进了内核。**
 ### 8.4 顺带确认的两件事
 
 - **`androidboot.usbcontroller` 现代 AOSP 已不读取** —— `strings` 在 AOSP 16 的
-  init 里找不到这个串。stage2-plan.md §6 标的"[待确认]"到此有答案：不需要，已删。
+  init 里找不到这个串。`archive/stage2-plan.md` §6 标的"[待确认]"到此有答案：不需要，已删。
 - **Android 的 DTB 与 `dtb-otg.dtb` 字节相同** —— `dr_mode="otg"` +
   `usb-role-switch` 在位，且无 ramoops 节点。adb 的硬件前提没问题。

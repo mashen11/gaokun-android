@@ -1,9 +1,14 @@
 # Stage 7 设计：LiveCD 图形安装器 + 轻量救援系统
 
-> 状态：**M0 构建链跑通，initramfs 与自救路径已在硬件上验过；
-> 完整启动（switch_root → OpenRC → WiFi → ssh）还没做。**
-> 产物实测大小：`gaokun3-rescue.squashfs` **55 MiB** ／ `initramfs.img` **648 KiB**
-> ／ 可启动 U 盘镜像 **152 MiB** —— 它要替掉的是 24.6 GiB 的 Ubuntu 分区。
+> 状态：**M0 上机完成 —— 完整启动跑通，ssh 可达、WiFi 自动连上、分区工具齐全。**
+> ⏸ 2026-08-23 起用户决定暂缓（TODO B4），⬜ 欠 `gk3_apply`（真写盘）与 DRM 后端。
+> 产物实测大小：`gaokun3-rescue.squashfs` **55 MiB** ／ `initramfs.img` **2.7 MiB**
+> ／ 可启动 U 盘镜像约 **152 MiB** —— 它要替掉的是 24.6 GiB 的 Ubuntu 分区。
+>
+> ⚠️★ **本段此前写着"完整启动还没做、initramfs 648 KiB"，已过时**
+> （2026-09-10 对账更正）。initramfs 从 648 KiB 涨到 2.7 MiB 是**故意的**：
+> 真凶是**内建 ath11k 在 initramfs 阶段就 probe（t=1.19s，远早于 switch_root）
+> 却拿不到固件**，所以固件必须打进 initramfs。
 > 构建脚本与踩到的六个坑见 [`scripts/live/README.md`](../scripts/live/README.md)。
 > 下面凡是标"实测"的都有出处，其余是设计选择。
 > 目标由用户在 2026-08-23 定下：①用更轻的系统替掉 24.6 GiB 的 Ubuntu 救援；

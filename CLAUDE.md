@@ -5,7 +5,7 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M21 — 音量翻案，但上机未完成。**★★ 实测查明**出厂配置一直在削波**：dig90/PA12 在 −6 dBFS 素材上 THD **−20 dB（约 10% 失真）**，而 dig84/PA17 只低 2.12 dB 却干净 **19.7 dB**。机制由阴性对照定死（−20 dBFS 下 81→90 给满额 +9.07 dB 且 THD −52.8）⇒ **是削波，不是压缩器吃增益**。#67 诊断对了但**抬错了那一级**：数字级在 DAC 前、抬它吃余量；**响度要从 PA 出**。已落地：`patches/0015` 重写（数字上限 81→**84 单位增益**、PA 上限 17→**23**）、`audio-route.sh` 改成 dig 84 / PA 17→试 21（两步写，新旧内核都对，回退分支实机验过）。⚠️ **新内核上机起不来，未查明**；顺带发现 **A/B 回落网根本不存在**（super 里只有 `_b`）。详见 [#78](docs/stage4-findings.md) / [#79](docs/stage4-findings.md)，设备遗留状态见下方方框。（每次开工时更新这一行）
+**当前阶段：Stage 6 M21 — 音量翻案，但上机未完成。**★★ 实测查明**出厂配置一直在削波**：dig90/PA12 在 −6 dBFS 素材上 THD **−20 dB（约 10% 失真）**，而 dig84/PA17 只低 2.12 dB 却干净 **19.7 dB**。机制由阴性对照定死（−20 dBFS 下 81→90 给满额 +9.07 dB 且 THD −52.8）⇒ **是削波，不是压缩器吃增益**。#67 诊断对了但**抬错了那一级**：数字级在 DAC 前、抬它吃余量；**响度要从 PA 出**。已落地：`patches/0015` 重写（数字上限 81→**84 单位增益**、PA 上限 17→**23**）、`audio-route.sh` 改成 dig 84 / PA 17→试 21（两步写，新旧内核都对，回退分支实机验过）。⚠️ **新内核上机起不来，未查明**；顺带确认**平时没有可随时启动的另一个槽**（Virtual A/B 的设计如此，别信 `bootctl`，要用 `lpdump` 判）。详见 [#78](docs/stage4-findings.md) / [#79](docs/stage4-findings.md)，设备遗留状态见下方方框。（每次开工时更新这一行）
 
 > ## ⚠️★★★★ 开工前先读：设备处于非默认状态（2026-09-08 夜遗留）
 >
@@ -21,14 +21,29 @@
 > `LoaderEntrySelected`。产物在设备 `ESP/.../android/slot_b_audio/Image`，
 > 内核树保留在构建机 `~/gk3-kernel`（Azure VM `CICD`，已 deallocate）。
 >
-> **④ ⚠️★★ A/B 回落网【不存在】** —— super 里只有 `_b` 一套逻辑分区，
-> `android-a.conf` 是死条目；`bootctl` 报 slot 0 bootable 是 misc 里的陈旧
-> 标志位，**不可信，要用 `lpdump` 判**。全项目"另一个槽就是备份"的说法
-> 在事实上是空的。
+> **④ ⚠️★ 平时没有"可以随时启动的另一个槽"** —— super 里只有 `_b` 一套
+> 逻辑分区，所以 `android-a.conf` **此刻**不可启动。⚠️ 这是 **Virtual A/B
+> 的设计如此**（`PRODUCT_VIRTUAL_AB_OTA := true`，见 `lineage_gaokun3.mk:171`）：
+> 目标槽的分区在 OTA 时才创建，不是谁忘了灌。回滚保护在**更新窗口内**有效。
+> ★ 但由此得到一条真判据：**`bootctl is-slot-bootable` 读的是 misc 里的标志位，
+> 不代表 super 里真有那套分区** —— 它报 slot 0 = YES 而 `lpdump` 里一个 `_a`
+> 都没有。**要拿另一个槽当回落网之前，先用 `lpdump` 查。**
 >
 > **⑤** ESP 只剩 5.7 MB（99%）。音量结论与已落地的改动见
 > `docs/stage4-findings.md` #78，本次上机失败的完整记录见 #79。
 
+
+> **★★★ Stage 7 M0（2026-08-23）：轻量救援系统上机完成。**
+> Alpine 救援系统 **ssh 可达、WiFi 自动连上、分区工具齐全**
+> （squashfs **55 MiB** + initramfs **2.7 MiB**，替掉 24.6 GiB 的 Ubuntu）。
+> - ★ 真凶是**内建 ath11k 在 initramfs 阶段拿不到固件**
+>   （probe 在 t=1.19s，**远早于 switch_root**）—— 所以 initramfs 从 648 KiB
+>   涨到 2.7 MiB 是**故意的**：固件必须在 initramfs 里。
+> - 安装器后端已在**真实磁盘**上验过，双系统方案算得出来
+>   （63.9 GiB 空闲区 → /data 50.7 GiB）；图形安装器七屏已编译并离线渲染检查。
+> - ⬜ 欠 `gk3_apply`（真写盘）与 DRM 后端。⏸ 用户 2026-08-23 决定暂缓（TODO B4）。
+> - ⚠️ 详细设计见 `docs/stage7-live-installer.md`，构建脚本与六个坑见
+>   `scripts/live/README.md` —— **那两份的"状态"段落比本条旧**，以本条为准。
 
 > **★★★★ Stage 6 M20（2026-08-23 夜，用户睡觉期间）：root 进 ROM + SELinux 四步走完。**
 > 完整案卷 [#76](docs/stage4-findings.md) / [#77](docs/stage4-findings.md)。
@@ -1172,7 +1187,8 @@ Android 相关知识。因此：
 | 存储 | NVMe（**不是 UFS**，不是手机那套分区布局） |
 | 引导 | **UEFI，不是 fastboot**。可关 Secure Boot。GRUB/systemd-boot 加载 |
 | 虚拟化 | KVM/EL2 可用 |
-| 已知不支持 | 指纹（FocalTech FTE7001）、TPM。**s2idle 已实测：挂得下去、醒不回来、约 20–40s 后整机复位；Ubuntu 同样复现 → 内核/EC 缺陷**（M4 定性）。深度休眠(S4)仍未测 |
+| 已知不支持 | 指纹（FocalTech FTE7001）、TPM。深度休眠 (S4) 仍未测 |
+| 待机 (s2idle) | ✅ **已修复**（M16，v0.3.0-alpha）。⚠️ 本表此前写着"挂得下去、醒不回来、内核/EC 缺陷"，**两句都错**：M15 证明复位发生在**挂起进入**而非唤醒，M16 查出真凶是我们 Stage 2 自己加的 `dr_mode="otg"`，与内核和 EC 都无关 |
 
 ## 关键约束（每次都要记住）
 
@@ -1198,15 +1214,27 @@ Android 相关知识。因此：
 
 ## 环境
 
-- **编译机：Dell G15（x86_64 Linux）** —— AOSP 编译需要 ~16GB+ RAM、250–400GB 磁盘。
-  不要在 Ego 上编译 AOSP。
-- **目标机 A：** 保持可用状态（Windows 或稳定 Linux），作为参照和日常用
-- **目标机 B：** 随便刷的实验机
-- 两台机器的意义：A 永远能开机，用来对比"正常应该是什么样"
+- **编译机：Azure VM `CICD`**（资源组 `AIROUTER_GROUP`，Standard_D32as_v5，
+  32 vCPU / 125 GB RAM / 504 GB 盘，静态公网 IP）。**按分钟计费，用完
+  `az vm deallocate`**（盘保留，下次 `az vm start` 约 1 分钟起来）。
+  crDroid 源码树在 `~/crdroid`，内核树在 `~/gk3-kernel`。
+  ⚠️ **沙箱代理会掐断到它的 ssh** —— 长任务与大流量一律绕沙箱。
+  ⚠️ 直连回家只有约 1.3 MB/s，大文件走 **R2 中转**（41 MB/s，出站免费）。
+  ⚠️ NSG 的 22 端口目前对 `*` 开放 —— M6 说过要锁到自己出口 IP，**没落地**。
+- **目标机：只有一台**（`gaokun3`）。⚠️ 本节此前写着"目标机 A 保留 Windows
+  作参照 / 目标机 B 随便刷"，**那个设定 2026-08-20 就不成立了**：Windows
+  已抹除、整机归 Android（M6）。**没有对照机** —— "正常应该是什么样"只能
+  靠救援 Linux、案卷和实测，不能靠比对另一台。
+- ⚠️ 本机自己**编不了 AOSP**（要 16 GB+ 内存、250–400 GB 盘）。
 
 ---
 
 ## 本地参考树（clone 到 `refs/` 下，供 AI 直接读源码）
+
+> ⚠️★ **`refs/` 不在版本库里，新 checkout 上它并不存在** —— 而上面第 1、4 条
+> 强制规则要求"从本地源码树 grep 出来、给出文件路径和行号"。
+> 开工前先跑 **`bash scripts/clone-refs.sh`**，否则那两条规则无法执行，
+> 只能退回"凭记忆给名字"，而那正是规则要禁的事。
 
 ```
 refs/linux-gaokun/           github.com/right-0903/linux-gaokun          本机内核核心
@@ -1250,8 +1278,15 @@ qcom/sc8280xp/HUAWEI/gaokun3/qcslpi8280.mbn              SLPI
 | **1** ✅ | 内核转 Android 配置 | 全部通过（UDC 出现，主机端 `configured` 枚举）|
 | **2** ✅ | 引导链 + AOSP 启动 | **全部通过**（2026-08-17）：adb shell 通，keystore2/zygote/adbd 稳定运行。12 个问题的完整记录见 `docs/stage2-findings.md` |
 | **3** ✅ | 图形栈（minigbm + drm_hwcomposer + swangle） | **全部通过**（2026-08-17）：桌面完整渲染。freedreno 留待 Phase B |
-| **4** | 输入 / 音频 / WiFi / 电源 | 触摸可用、有声音、能联网 |
-| **5** | 游戏适配 | 目标游戏能启动并稳定运行 |
+| **4** ✅ | 输入 / 音频 / WiFi / 电源 | **全部通过**：触摸（gpio174）、WiFi 免干预自动连、扬声器+耳机+双麦、蓝牙、待机。案卷 `docs/stage4-findings.md` |
+| **5** ✅ | GPU：freedreno + turnip 硬件 Vulkan | **全部通过**（2026-08-19）：SMMU fault 0，22 分钟浸泡零错误。案卷 `docs/stage5-freedreno.md` |
+| **6** | 转 crDroid 16.0 + 产品化 | 主体完成：OTA / root / SELinux 四步 / 传感器 / 硬解。案卷 `docs/stage6-crdroid.md` |
+| **7** | LiveCD 图形安装器 + 轻量救援系统 | M0 完成，⏸ 用户暂缓。`docs/stage7-live-installer.md` |
+
+> ⚠️★ **本表编号一度与实际里程碑脱节**：原表写"5 = 游戏适配"，而实际
+> Stage 5 做的是 GPU、Stage 6/7 表里压根没有。**游戏适配已经达成**
+> （原神极高画质流畅，见 README 状态表），它不是一个独立阶段，
+> 而是 Stage 5 GPU 打通后的结果。
 
 **Stage 0 必须采集并记录在 `docs/hw-inventory.md` 的东西：**
 - `.config` 中所有 QCOM / ath11k / hid 相关项
@@ -1274,7 +1309,11 @@ qcom/sc8280xp/HUAWEI/gaokun3/qcslpi8280.mbn              SLPI
   空闲 IRQ 速率是状态指纹：≈显示扫描率=正常；0=IC 停摆；乱=模式错乱。
 - **`timeout N getevent > 文件` 会因块缓冲丢光全部输出**——采集 evdev 要用
   `cat /dev/input/eventX` 录二进制再离线解码。见 `docs/stage4-findings.md` #26 方法论。
-- EC 挂起/恢复：Android 的 suspend 模型比 Linux 激进，预期这里会先炸
+- ~~EC 挂起/恢复：Android 的 suspend 模型比 Linux 激进，预期这里会先炸~~
+  ⚠️★ **这条预言错了，M4 实测推翻**：把 EC 驱动整个解绑，挂起照样失败 ⇒
+  与 EC 无关；真凶是我们自己加的 `dr_mode="otg"`（M16）。留着它是因为
+  它从 Stage 3 起误导了好几轮排查 —— **写进"已知坑"的预测，要和实测结论
+  一样接受复查。**
 - ~~DSI panel 的 KMS plane 数量少时 drm_hwcomposer 会 fallback 到 GPU 合成~~
   ✅ **担心不成立。** 实测 **25 个 plane / 6 个 CRTC**，硬件合成资源充裕。
   modifier 只有 `LINEAR` 和 `QCOM_COMPRESSED`(UBWC, `0x500000000000001`)，

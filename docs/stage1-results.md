@@ -111,7 +111,7 @@ ucsi_huawei_gaokun.ucsi ...: ucsi connector is not initialized yet
 **但 USB 枚举照样完全成功。** 原因：`dr_mode = "otg"` 在没有 role 源时落到 device 侧，
 PHY 的数据方向不依赖 UCSI 的 PPM 初始化。
 
-> 这推翻了 `docs/stage1-kernel-plan.md` 第 5.3 节的担心
+> 这推翻了 `docs/archive/stage1-kernel-plan.md` 第 5.3 节的担心
 > （「可能出现 UDC 出来了但主机端枚举不到，因为 EC 没把数据方向切过去」）。
 >
 > **对 Stage 2 的意义：adb 通路不依赖那个有已知缺陷的 UCSI 子系统**
