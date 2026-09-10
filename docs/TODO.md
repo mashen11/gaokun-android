@@ -151,7 +151,11 @@ URL 是 **36.9 MB/s**。对"用户走系统内 OTA 升级"有实际影响（1 GB
   里那行竞态 `BUG_ON`。[#58](stage4-findings.md) / [#62](stage4-findings.md)
 * **硬件视频解码** ✅ v0.4.0-alpha。[#41](stage4-findings.md)
 * **亮度调节** ✅ 真 lights HAL 取代了只接受数值不干活的 stub。
-* **扬声器音量偏小** ✅ WSA 数字音量上限 81→90，实测 +5.7 dB。
+* **扬声器音量偏小** ⚠️ **返工中，别当已解决。** 原修法（WSA 数字上限 81→90，
+  +5.7 dB）**抬错了那一级** —— 数字级在 DAC 之前，+6 dB 把 −6 dBFS 的内容顶到
+  0 dBFS，实测 THD **−20 dB（约 10% 失真）**。现改为数字压在单位增益 84、
+  响度由 PA 出（上限 17→23，运行时 17→试 21）。⬜ **新内核上机起不来，未查明。**
+  [#78](stage4-findings.md) / [#79](stage4-findings.md)
 * **插着键盘时屏幕键盘不弹** ✅ `show_ime_with_hard_keyboard` 默认置 1。
   ⚠️ 键盘开关**不是**这条的解药（Android 看键盘设备存不存在，不看 inhibited）。
 

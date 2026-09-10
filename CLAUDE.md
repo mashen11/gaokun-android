@@ -5,7 +5,7 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M20 — ★★★★ 一次装机把两件大事落地（构建戳 `1787436126`，slot_a）：**① root 随 ROM 常驻**（ReSukiSU，`verify-root.sh` 8/8，postinstall 写进 slot_a 的内核与手工验过的 sha256 逐字节相同）；**② SELinux 四步走完** —— `init` 域里只剩 PID 1，`network_stack` 236→0、`hal_health_default` 235→0（**四条 genfscon，零 allow 规则**），第 4 步规则按真实主体写完并通过 `sepolicy_neverallows`。功能零回归（传感器/声卡/WiFi/root）。⚠️ **仍是 permissive**：转 enforcing 还卡在两个加规则解决不了的东西（hangdump 的 debugfs neverallow 无 userdebug 豁免；smmustall 要 `/dev/mem`，正解是先做 B6）。**★ Stage 7 M0 上机完成**：Alpine 救援系统 ssh 可达、WiFi 自动连上、分区工具齐全（squashfs 55 MiB + initramfs 2.7 MiB，替掉 24.6 GiB 的 Ubuntu）。真凶是**内建 ath11k 在 initramfs 阶段拿不到固件**（probe 在 t=1.19s，远早于 switch_root）。安装器后端已在真实磁盘上验过，**双系统方案算得出来**（63.9 GiB 空闲区 → /data 50.7 GiB）；图形安装器七屏已编译并离线渲染检查。⬜ 欠 `gk3_apply`（真写盘）与 DRM 后端。（每次开工时更新这一行）
+**当前阶段：Stage 6 M21 — 音量翻案，但上机未完成。**★★ 实测查明**出厂配置一直在削波**：dig90/PA12 在 −6 dBFS 素材上 THD **−20 dB（约 10% 失真）**，而 dig84/PA17 只低 2.12 dB 却干净 **19.7 dB**。机制由阴性对照定死（−20 dBFS 下 81→90 给满额 +9.07 dB 且 THD −52.8）⇒ **是削波，不是压缩器吃增益**。#67 诊断对了但**抬错了那一级**：数字级在 DAC 前、抬它吃余量；**响度要从 PA 出**。已落地：`patches/0015` 重写（数字上限 81→**84 单位增益**、PA 上限 17→**23**）、`audio-route.sh` 改成 dig 84 / PA 17→试 21（两步写，新旧内核都对，回退分支实机验过）。⚠️ **新内核上机起不来，未查明**；顺带发现 **A/B 回落网根本不存在**（super 里只有 `_b`）。详见 [#78](docs/stage4-findings.md) / [#79](docs/stage4-findings.md)，设备遗留状态见下方方框。（每次开工时更新这一行）
 
 > ## ⚠️★★★★ 开工前先读：设备处于非默认状态（2026-09-08 夜遗留）
 >
@@ -889,7 +889,8 @@
 > **全程不需要有人在机器边。**"默认启动项永远留 Ubuntu"这条纪律兑现了价值。
 >
 > **音频**：`tinymix` 首次真的编进来了（M3 只是排了队）。硬件路径**实测通**：
-> 291 个混音器控件、路由回读正确（`>AIF1_PB`/`>RX0`/DAC on/BOOST off/PA=12）、
+> 291 个混音器控件、路由回读正确（`>AIF1_PB`/`>RX0`/DAC on/BOOST off/PA=12
+> —— ⚠️ `PA=12` 已于 2026-09-08 改为 17/试 21，见 #78）、
 > `tinyplay` 让 `/proc/asound/card0/pcm1p/sub0/status` 变成 **`state: RUNNING`**
 > 且 DMA 实时消耗。★**2026-08-20 用户实机确认：音频可用（听到声音）**。
 > 框架路径于此确证 —— 此前 `Total writes: 0` 只是因为这个 ROM 里没有任何应用
@@ -1044,7 +1045,9 @@
 > 三个 `=m` 断点（LPASS pinctrl ×2 + LPASS 时钟）+ 未编的 `SND_SOC_WSA883X`
 > + 拓扑固件路径名 + `RT_GROUP_SCHED=y`（挡住蓝牙的 SCHED_FIFO）——
 > 全部记在 `docs/stage4-findings.md` #33–#36。
-> ⚠️ 起停爆音源是功放 BOOST 升压器（A/B 实听定案），默认已关。
+> ⚠️ 起停爆音在 `BOOST Switch` 打开时出现（A/B 实听定案），默认已关。
+> ⚠️★ 更正（#78）：它**不是功放升压器**，是 SoundWire 端口使能；
+> 关掉它**不损失任何响度**（实测 ±0.3 dB 以内）。
 
 > **Stage 5 GPU 战况（2026-08-19 凌晨）：★GPU 攻坚完成 —— Android 用硬件
 > turnip 启动进桌面，SMMU fault 归零，帧读回正常。** 案卷
