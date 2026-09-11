@@ -250,6 +250,43 @@ OUT="${1:?用法: $0 <kernel-out-dir>}"
 #    但看到它出现在 .config 里不要当成配错了。
 ./scripts/config --file "$OUT/.config"     --enable MEDIA_SUPPORT     --enable MEDIA_PLATFORM_SUPPORT     --enable VIDEO_DEV     --enable V4L_MEM2MEM_DRIVERS     --enable VIDEOBUF2_DMA_CONTIG     --enable V4L2_MEM2MEM_DEV     --enable SM_VIDEOCC_8350     --enable VIDEO_QCOM_VENUS
 
+# ─── Stage 6 M22: 相机（CAMSS + 前摄 hi846）───
+# 目标是【前摄】。上游作者自己在 camera.dtsi:158-166 写明后摄 s5k3l6 "画质差、
+# 不打算提取下游寄存器配置……前摄够开会用了"，而且 "This sensor has never been
+# detected on 2023 model"。
+#
+# ⚠️★ 又是"=m 坑"，这次 5 个（实测于设备正在跑的 .config）：
+#      I2C_QCOM_CCI=m  LEDS_GPIO=m  SC_CAMCC_8280XP=m  VIDEO_HI846=m
+#      VIDEO_QCOM_CAMSS=m
+#   Android 不加载任何模块，所以 =m 等于不存在。
+#   （VIDEOBUF2_DMA_SG 不用手动开 —— CAMSS 会 select 它，跟着变 =y。）
+#
+# 门禁本来就齐（实测全是 =y，不用动）：MEDIA_CAMERA_SUPPORT / V4L_PLATFORM_DRIVERS
+# / VIDEO_CAMERA_SENSOR / MEDIA_CONTROLLER / V4L2_FWNODE / VIDEO_V4L2_SUBDEV_API
+# / IOMMU_DMA / LEDS_CLASS。
+#
+# 依赖与 select（源码原文，带行号）：
+#   drivers/media/platform/qcom/camss/Kconfig:1  VIDEO_QCOM_CAMSS
+#       depends on V4L_PLATFORM_DRIVERS / VIDEO_DEV / (ARCH_QCOM && IOMMU_DMA)
+#       select MEDIA_CONTROLLER / VIDEO_V4L2_SUBDEV_API / VIDEOBUF2_DMA_SG / V4L2_FWNODE
+#   drivers/media/i2c/Kconfig:122                VIDEO_HI846（在 :28 的
+#       menuconfig VIDEO_CAMERA_SENSOR 之下，该菜单 depends on MEDIA_CAMERA_SUPPORT
+#       && I2C && HAVE_CLK）
+#   drivers/i2c/busses/Kconfig:1050              I2C_QCOM_CCI
+#   drivers/clk/qcom/Kconfig:819                 SC_CAMCC_8280XP（select SC_GCC_8280XP）
+#   drivers/leds/Kconfig:402                     LEDS_GPIO（privacy LED，
+#       camera.dtsi 里两个 sensor 节点都 `leds = <&privacy_led>`）
+#
+# ★ hi846 驱动的四个修复 buildbot 已经带了（patches/upstream/0020-0023：
+#   write_reg_16 / link frequency / 6MP+8MP 模式 / 不同 lane 数下的模式处理），
+#   我们的配方本来就打这 13 个 upstream 补丁，所以不用额外做什么。
+./scripts/config --file "$OUT/.config" \
+    --enable VIDEO_QCOM_CAMSS \
+    --enable VIDEO_HI846 \
+    --enable I2C_QCOM_CCI \
+    --enable SC_CAMCC_8280XP \
+    --enable LEDS_GPIO
+
 # ─── 电源管理调试（★留着，它是 s2idle 那一仗的决胜工具）───
 # 历史：s2idle 曾被判成"挂得下去、醒不回来的内核/EC 缺陷"，而当时卡死在
 # 没法二分 —— /sys/power/pm_test 需要 CONFIG_PM_DEBUG，默认没开。
@@ -340,6 +377,8 @@ FUSE_FS IIO QCOM_SPMI_ADC5 QCOM_FASTRPC
 CPUSETS_V1 MEMCG_V1 UCLAMP_TASK UCLAMP_TASK_GROUP EFI_ZBOOT EFI_STUB EFI_GENERIC_STUB
 MEDIA_SUPPORT MEDIA_PLATFORM_SUPPORT VIDEO_DEV V4L_MEM2MEM_DRIVERS
 VIDEOBUF2_DMA_CONTIG V4L2_MEM2MEM_DEV SM_VIDEOCC_8350 VIDEO_QCOM_VENUS
+VIDEO_QCOM_CAMSS VIDEO_HI846 I2C_QCOM_CCI SC_CAMCC_8280XP LEDS_GPIO
+VIDEOBUF2_DMA_SG MEDIA_CAMERA_SUPPORT V4L_PLATFORM_DRIVERS VIDEO_CAMERA_SENSOR
 EXPERT PM_DEBUG PM_SLEEP_DEBUG PM_ADVANCED_DEBUG DPM_WATCHDOG
 SQUASHFS NTFS3_FS NLS_UTF8
 "

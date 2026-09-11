@@ -1,5 +1,8 @@
 # 相机半成品（**只归档，不应用**）
 
+> ✅ 2026-09-11：前摄已在 V4L2 层打通（彩条从原始拜耳解出，#81）。
+> 这里剩下的只是**后摄驱动**，仍未验证、仍不应用。
+
 ⚠️ **这里的补丁不在 `scripts/kernel-apply-patches.sh` 的 KPATCHES 里，
 也不应该被加进去。** 它们是 2026-08-30/31 那次相机实验的残骸，
 **从未验证过**，结果如何当时也没人记录。
@@ -18,7 +21,9 @@
 | 文件 | 是什么 |
 |---|---|
 | `media-i2c-s5k3l6xx.patch` | Samsung S5K3L6XX 后摄驱动（48 KB 新文件）+ `drivers/media/i2c/` 的 Kconfig/Makefile 接线 |
-| `camera-dtsi-only.patch` | `sc8280xp-huawei-gaokun3-camera.dtsi` 的改动 |
+
+~~`camera-dtsi-only.patch`~~ ✅ **2026-09-11 已提升为正式补丁 `patches/0018`**
+—— 它就是"去掉后摄节点"，A/B 实测证明前摄要工作非它不可，已进 KPATCHES。
 
 ⚠️ **`sc8280xp.dtsi` 的改动没有收进来** —— 那份 diff 里 335 行**全是本仓
 已入库的 venus（`upstream-venus/0019`）与 cooling maps（`0009`）**，

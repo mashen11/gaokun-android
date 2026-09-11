@@ -5,7 +5,7 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M21 — ★★ 内核可重建性修好并上机通过；音量还差一版 ROM。**★★ 音量翻案：实测查明**出厂配置一直在削波**（dig90/PA12 在 −6 dBFS 素材上 THD **−20 dB ≈ 10% 失真**），机制由阴性对照定死 ⇒ **是削波不是压缩器吃增益**；#67 抬错了那一级，**响度要从 PA 出**。`patches/0015` 已重写并**上机验实**（`tinymix` 查到 PA 范围 `0->23`、数字 `0->84`，写 24/90 都被钳住）。★★ 09-08 那次起不来与音量无关：重建内核缺两份**从未入库的树外源码**（`ashmem` / `xt_quota2`，本仓 Stage 3 自己从 ACK 移植的），已入库为 `patches/0016`/`0017`；⚠️ 过程中还查出 **`kernel-apply-patches.sh` 的指纹判据有假阳性**，已让 `patches/0009`（CPU 温控降频）静默漏打 —— **正是 M17 写它要防的那个补丁**，判据已加固。✅ **新内核 `#3` 上机一次成功并已提升为常驻**（37 秒起来，ashmem/quota2/8 个 CPU 温区/WiFi/蓝牙/传感器/GPU/Venus/root 全绿，pstore 零记录）。⬜ **只剩一件：构建一版带新 `audio-route.sh` 的 ROM** —— 设备上的 ROM 还是 08-24 那版，开机仍按旧结论设 PA=12，**所以用户暂时还听不到音量改善**。详见 [#78](docs/stage4-findings.md) / [#79](docs/stage4-findings.md) / [#80](docs/stage4-findings.md)。（每次开工时更新这一行）
+**当前阶段：Stage 6 M22 — ★★★ 前摄在 V4L2 层打通（据我们所知 sc8280xp 上 Android 侧首次让 camss 出帧）；音量还差一版 ROM。**★★★ 相机：hi846 → CSIPHY3 → CSID0 → VFE0 RDI0 → DMA 端到端验实 —— 判据是传感器彩条从 SGBRG10P 原始拜耳按 GBRG 解出**黄 青 绿 品 红 蓝**、R/G/B 满量程 1023/0、上下行逐像素差 0，与环境光无关。又是「=m 坑」（5 个），DTS 早齐了；★ 后摄节点必须去掉（同内核换 dtb 的 A/B：subdev 0 → 45），已入库 `patches/0018`。⚠️★★ 两个前提未修所以**相机内核没提升为常驻**：① camss 下电缺陷 —— 开机后 STREAMON 只有第一次成功，之后 `runtime_error` 锁死、报的错全是假的，只有重启能救；② camss 抢走 video0–31、Venus 被挤到 32/33，而 `v4l2_codec2` 只扫 0–9 ⇒ 硬解静默消失（`crdroid-tree-fixes.py` 第 7 条已修，须随相机进 ROM）。⬜ 下一大块是相机 HAL（libcamera 路线）。工具在 `scripts/camera/`。★★ 音量翻案已定并上机验实（PA `0->23`、数字 `0->84`），可重建性已修好（`patches/0016`/`0017` + 防漏脚本假阳性），新内核 `#3` 常驻。⬜ 音量要用户听得到还差一版带新 `audio-route.sh` 的 ROM。详见 [#78](docs/stage4-findings.md) / [#79](docs/stage4-findings.md) / [#80](docs/stage4-findings.md) / [#81](docs/stage4-findings.md)。（每次开工时更新这一行）
 
 > ## ★★★ 开工前先读：内核可重建性已修好并上机通过（2026-09-11）
 >
@@ -46,6 +46,12 @@
 > 开机仍设 `Digital Volume 90`（**被新内核拒**，这反倒证明新上限生效）与 `PA=12`。
 > ⇒ **内核与 ROM 在本项目是分开发布的，"补丁已入库"≠"用户听得到"。**
 > ⬜ 待办：构建一版带新 `audio-route.sh` 的 ROM。
+>
+> ★★★ **相机（M22，2026-09-11 夜）：前摄在 V4L2 层出帧了，但没进常驻内核。**
+> 设备仍跑 `#3`（无 camss）。测试内核 `#4`（camss + hi846）与去掉后摄的 dtb 留在
+> ESP `android/slot_cam/` + `…-cam.conf`（15.7 MB）。要复现：oneshot 到它，
+> 开机后**只跑一次** `/data/local/tmp/camtest`（第二次必失败并锁死 `runtime_error`，
+> 只有重启能救）。两个必须先修的前提见 TODO A7；完整案卷 [#81](docs/stage4-findings.md)。
 >
 > ⚠️★ **Alpine 救援的 squashfs 在 Ubuntu 救援分区上**（`p3:/gaokun3/rescue.squashfs`）
 > —— Stage 7 提的"给 Ubuntu 瘦身/换掉"要先把它挪走，否则两个救援一起废。

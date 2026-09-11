@@ -139,6 +139,48 @@ def patch_v4l2_input_size(tree: pathlib.Path) -> str:
     return "已改为传最小分辨率（原来传的是 ui::Size() = -1 x -1）"
 
 
+def patch_v4l2_device_scan_range(tree: pathlib.Path) -> str:
+    """—— 修补 7：v4l2_codec2 只扫 /dev/video0..9，开了 camss 之后就找不到 Venus 了 ——
+
+    症状：硬件视频编解码**静默消失**（组件名还在 MediaCodecList 里，因为那是
+    media_codecs_c2.xml 驱动的，但底下一个设备都没匹配上），一切回落软解。
+
+    ★ 根因：`V4L2Device::getDeviceInfosForType()` 里写死
+        for (int i = 0; i < 10; ++i)        // v4l2/V4L2Device.cpp:2565
+      只探 /dev/video0..video9。而 Stage 6 M22 把 camss 编进内核之后，
+      **camss 一家就占了 32 个 video 节点**（msm_vfeN_videoM，实测 video0-31），
+      Venus 被挤到 **video32 / video33**（实测 `cat /sys/class/video4linux/*/name`）。
+      于是扫描范围内全是 camss 的 capture 节点，而解码器要的是
+      V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE —— camss 不提供 ⇒ deviceInfos 为空。
+
+    ⚠️★ 编号还**不是稳定的**：谁先 probe 谁拿低号。所以"把 Venus 钉在 video0/1"
+      这种做法靠不住，正解就是把扫描范围放宽。
+
+    修法：上界 10 -> 64。多出来的 open() 全部立即失败、只在首次调用时发生一次
+    （结果有 sDeviceInfosCache 缓存），代价可以忽略。
+    """
+    p = tree / "external/v4l2_codec2/v4l2/V4L2Device.cpp"
+    if not p.exists():
+        return f"跳过（找不到 {p}）"
+    s = io.open(p, encoding="utf-8").read()
+    if "kMaxVideoDeviceIndex" in s:
+        return "已打过（幂等，无需改动）"
+    anchor = "    for (int i = 0; i < 10; ++i) {"
+    if s.count(anchor) != 1:
+        return "⚠️ 锚点不唯一或找不到，上游可能改了 getDeviceInfosForType()"
+    NL = chr(10)
+    new = (
+        "    // 只扫 video0..9 在本机是不够的：camss 一家就占 32 个节点" + NL
+        + "    // （实测 video0-31 = msm_vfeN_videoM），Venus 被挤到 video32/33。" + NL
+        + "    // 编号取决于 probe 先后，不稳定，所以放宽范围而不是钉死编号。" + NL
+        + "    static constexpr int kMaxVideoDeviceIndex = 64;" + NL
+        + "    for (int i = 0; i < kMaxVideoDeviceIndex; ++i) {"
+    )
+    s = s.replace(anchor, new, 1)
+    io.open(p, "w", encoding="utf-8", newline="").write(s)
+    return "扫描上界 10 -> 64（camss 占了 video0-31，Venus 在 video32/33）"
+
+
 def patch_gapps_conflicts(tree: pathlib.Path) -> str:
     """—— 修补 4：MindTheGapps 与 crDroid 树的三处冲突 ——
 
@@ -373,6 +415,7 @@ def main():
     print("  [4] GApps 冲突: " + patch_gapps_conflicts(tree))
     print("  [5] v4l2_codec2 初始输出队列: " + patch_v4l2_initial_output(tree))
     print("  [6] 关闭桌面窗口模式: " + patch_disable_desktop_mode(tree))
+    print("  [7] v4l2_codec2 设备扫描范围: " + patch_v4l2_device_scan_range(tree))
 
 if __name__ == "__main__":
     main()

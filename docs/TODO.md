@@ -1,6 +1,6 @@
 # 待办清单
 
-最后更新：2026-09-11（可重建性修好 + 新内核上机通过；音量还差一版 ROM）
+最后更新：2026-09-11（前摄 V4L2 层出帧；可重建性修好；音量还差一版 ROM）
 
 这份清单的排序原则是**用户能不能感觉到**，而不是有趣程度。每条都尽量写出
 **具体的第一步** —— 没有第一步的条目只是愿望，不是待办。
@@ -167,21 +167,32 @@ URL 是 **36.9 MB/s**。对"用户走系统内 OTA 升级"有实际影响（1 GB
 再换一个不同 CDN 的大文件对照 —— 先分清是"到 Cloudflare 这条路"还是
 "设备的 TCP 行为"。
 
-### A7. 摄像头
-基本没碰 —— 但**不是"完全没碰"**：08-31 编过一个相机内核并在 ESP 上留了
-启动条目（`camss`/`cci`/`hi846`/`s5k3l6xx` 从 `=m` 翻成 `=y`），
-**结果如何没有任何记录**，案卷和 git 里都查不到。那个二进制已于 09-11 删除，
-删前把配方挖出来存进了 [#79](stage4-findings.md) 第四节 ——
-要重来的话从那 8 个符号开始，不用再摸一遍。
+### A7. 摄像头 —— ★★ 前摄在 V4L2 层已打通，缺 HAL
 
-★★ **而且当时已经查到了后摄不工作的真凶**（09-11 从构建机旧树捞出来的，
-见 `patches/camera-wip/README.md`）：**后摄的 `vdda`(l2b) 被 DSI 的 `vddi`
-钉在 1.8 V，而 S5K3L6 要 2.8 V** —— sensor 在 CCI 上直接 NAK（i2c `-6`）。
-且 v7.2 的 camss 用 `fwnode_graph_for_each_endpoint` 遍历端点**不检查可用性**，
-一个"接了但永远绑不上"的 sensor 会**卡死整个 v4l2-async notifier**，
-**连前摄也拿不到 `/dev/v4l-subdev*`**。
-⇒ **后摄不是驱动问题，是供电轨被显示占了。第一步是查 l2b 能不能独立，
-不是继续调驱动。** 驱动与 dtsi 已归档在 `patches/camera-wip/`（不应用）。
+**2026-09-11 前摄 hi846 端到端出帧**（[#81](stage4-findings.md)）：传感器彩条从
+SGBRG10P 原始拜耳解出 **黄 青 绿 品 红 蓝**，R/G/B 满量程 1023/0，上下行逐像素差 0。
+据我们所知是 sc8280xp 上第一次在 Android 侧让 camss 出帧。
+已入库：5 个 config（`kernel-config-android.sh` + MUST_Y）、`patches/0018`
+（去掉后摄节点，A/B 实测非它不可）、`scripts/camera/`（两个静态诊断工具）。
+
+**⬜ 第一步：相机 HAL。** `cameraserver` 在跑但 0 个相机设备，`/vendor/lib64/hw` 无 camera HAL。
+AOSP 的 ExternalCamera HAL 只认 UVC 风格节点，RDI 出的是裸拜耳，走不通。
+现实路线是 **libcamera 的 Android HAL 适配层**（`simple` pipeline handler 走
+media-controller），mesa 那套 meson→bp 工具链可复用。hi846 的完整控件表在 #81 第六节。
+
+**⬜ 两个必须先修的前提**：
+1. ⚠️★★ **camss 下电缺陷**：开机后 STREAMON 只有第一次成功，第二次失败并把
+   `runtime_error` 锁死，之后一律 -EINVAL（假错误），只有重启能救。
+   kretprobe 已定位到 `csiphy_set_power → pm_runtime_resume_and_get(camss->dev)`，
+   `genpd:4:ac5a000.camss`（顶层域）= error。**查下电路径谁没收干净。**
+2. ⚠️★★ **camss 抢走 video0–31，Venus 被挤到 video32/33**，而 `v4l2_codec2` 只扫 0–9
+   ⇒ 硬解静默回落软解。`crdroid-tree-fixes.py` 第 7 条已修（上界 10→64），
+   **必须随相机一起进 ROM**。相机内核因此**没有提升为常驻**，设备仍跑 `#3`。
+
+**后摄**：上游作者自己判"画质差、不值得"，08-31 还记着供电轨冲突（l2b 被 DSI 钉在 1.8V，
+S5K3L6 要 2.8V）。驱动归档在 `patches/camera-wip/`，不应用，不追。
+
+测试条目 `…-cam.conf` + `android/slot_cam/` 留在 ESP 上供继续实验（15.7 MB）。
 
 ---
 

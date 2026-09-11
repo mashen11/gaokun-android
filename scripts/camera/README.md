@@ -1,0 +1,46 @@
+# 相机诊断工具（V4L2 / media-controller 层）
+
+设备上没有 `media-ctl` / `v4l2-ctl`，也没有相机 HAL。这两个小工具是 2026-09-11
+把前摄通路打通时写的，**全部结构体来自内核树的 uapi 头，不手抄偏移**。
+
+| 工具 | 干什么 |
+|---|---|
+| `mediatopo` | `media-ctl -p` 的最小替代：转储 `/dev/media0` 的实体、pad、链路及启用状态 |
+| `camtest` | 接链 → 沿链传格式 → S_FMT → 抓帧；四轮对照（默认 / 满增益 / 彩条 / 分辨率图案）|
+
+编译：`bash scripts/camera/build.sh ~/gk3-kernel`（构建机上），产物静态链接，
+`adb push` 到 `/data/local/tmp/` 直接跑（要 root）。
+
+## ⚠️★★ 用之前必须知道的三件事
+
+1. **开机后 STREAMON 只有第一次能成功。** 第二次会失败，并把 camss 的
+   `runtime_error` 锁死（`/sys/devices/platform/soc@0/ac5a000.camss/power/runtime_status`
+   变成 `error`），之后所有尝试一律 `-EINVAL`，**报的错和真正的失败原因毫无关系**。
+   解绑重绑 camss 也救不回来（`bind` 直接失败），**只有重启**。
+   所以 `camtest` 把所有对照条件塞进【同一次流】里。
+   ⇒ 这是 camss 下电路径的一个缺陷，见 `docs/stage4-findings.md` #81 第五节，待查。
+
+2. **video 节点的像素格式必须与传感器总线码同族**（RDI 是裸转储，不转换）。
+   选错了 STREAMON 报 `EPIPE`，错误信息完全不提"格式"。映射表出处
+   `drivers/media/platform/qcom/camss/camss-vfe.c:59`，已抄进 `camtest.c` 的 `kBusToPix`。
+
+3. **camss 用 multiplanar API。** 用单平面 `V4L2_BUF_TYPE_VIDEO_CAPTURE` 查它，
+   `ENUM_FMT` 返回空、`S_FMT` 报 `EINVAL`，看起来像节点坏了 —— 其实只是问错了接口。
+
+## 通路（前摄 hi846，实测）
+
+```
+hi846 2-0020 :0 → msm_csiphy3 :0    [DT 硬连，不可变]
+msm_csiphy3  :1 → msm_csid0   :0    ← camtest 启用
+msm_csid0    :1 → msm_vfe0_rdi0 :0  ← camtest 启用
+msm_vfe0_rdi0:1 → msm_vfe0_video0   [不可变]  ⇒ /dev/video0（或被 Venus 挤开后的编号）
+```
+
+传感器只报一种总线码 `0x300e`（SGBRG10_1X10），尺寸 1280x720 / 1632x1224 /
+3264x1836 / 3264x2448 —— **没有 640x480**。对应像素格式 `pGAA`（SGBRG10P）。
+
+## 判据
+
+`camtest` 第三轮打开传感器彩条（Test Pattern 2），从原始拜耳解出的序列应为
+**黄 青 绿 品 红 蓝**，R/G/B 满量程 1023 或 0，上下行逐像素差 0 —— 与环境光无关。
+2026-09-11 实测逐字命中，见 #81。

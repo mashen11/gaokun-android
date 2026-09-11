@@ -4975,3 +4975,153 @@ I audioroute: 扬声器路由已应用（PCM1 / WSA / PA=12 / BOOST=off 防爆�
 * ⚠️ 现在 `slot_b/Image` 是 `#3`，而 `rescue-alpine.conf` 也指着它 ——
   救援与 Android 共用内核这条（与安装器同设计）**仍然成立**，
   独立回落网还是 `int-ubuntu`（自带内核）。
+
+---
+
+## #81 ★★★★★ 前摄在 V4L2 层打通：彩条从原始拜耳解出（2026-09-11 夜）
+
+**结论先说：前摄 hi846 → CSIPHY3 → CSID0 → VFE0 RDI0 → DMA → 用户态，端到端验实。**
+判据是传感器自己生成的 100% 彩条，从 SGBRG10P 原始帧按 GBRG 相位解出
+**黄 青 绿 品 红 蓝**，R/G/B 满量程 **1023 或 0**，第 100 行与第 600 行
+逐像素差 **0.00** —— 与环境光无关，也顺带证明拜耳相位对。
+据我们所知这是 sc8280xp 上第一次在 Android 侧让 camss 出帧。
+
+### 一、起点：配置全是 `=m`，DTS 早就齐了
+
+TODO A7 写着相机"完全没碰"，实际 buildbot 的 `0099` 早把 `camera.dtsi` 带进来了，
+设备现役 dtb 里 `hynix,hi846` / `samsung,s5k3l6xx` / `qcom,sc8280xp-camss` /
+`dongwoon,dw9714` 全在（对 dtb 二进制 grep 字符串确认）。**缺的只是内核 config**
+—— 又是「=m 坑」，这次 5 个（实测于设备 `/proc/config.gz`）：
+
+```
+I2C_QCOM_CCI=m  LEDS_GPIO=m  SC_CAMCC_8280XP=m  VIDEO_HI846=m  VIDEO_QCOM_CAMSS=m
+```
+
+门禁本来就齐（`MEDIA_CAMERA_SUPPORT` / `V4L_PLATFORM_DRIVERS` / `VIDEO_CAMERA_SENSOR`
+/ `IOMMU_DMA` / `LEDS_CLASS` 全 `=y`）。翻成 `=y` 后 olddefconfig 的 diff **正好 6 行**
+（`VIDEOBUF2_DMA_SG` 被 CAMSS 的 select 带上），没有别的东西被动。
+★ hi846 驱动的四个修复 buildbot 本来就带（`patches/upstream/0020-0023`），我们的配方
+打这 13 个，所以什么都不用加。已写进 `kernel-config-android.sh` 并进 MUST_Y。
+
+### ★★ 二、后摄节点必须去掉 —— 用 A/B 测出来的，不是照抄 08-31 的注释
+
+同一内核（`#4`），换两份 dtb 各启动一次：
+
+| | dtb 带后摄（设备现役）| dtb 去掉后摄 |
+|---|---|---|
+| `/dev/media0` | ✅ | ✅ |
+| `hi846 -> 2-0020` 绑定 | ✅ | ✅ |
+| `camss` / `cci`×2 / `camcc` 绑定 | ✅ | ✅ |
+| **`/dev/v4l-subdev*`** | **0 个** | **45 个**（`hi846 2-0020` = subdev44）|
+| `camcc sync_state()` | `pending due to 1-0010` | 正常 |
+| i2c 设备 | `1-000c 1-0010 2-0020` | `1-000c 2-0020` |
+
+⇒ 08-31 那条注释**逐字正确**："a wired-but-never-binding sensor blocks the whole
+v4l2-async notifier - the front camera would get no /dev/v4l-subdev*"。
+⚠️ 我在 #80 里把它复述成"前摄也起不来"是**我读过头了** —— hi846 自己绑得好好的
+（probe 时读到了芯片 ID），卡住的是 camss 的 media 流水线收尾。
+后摄那句"vdda(l2b) 被 DSI vddi 钉在 1.8V、sensor 在 CCI 上 NAK"**本轮没有验**
+（没带 s5k3l6xx 驱动），保留为 08-31 的原始记录。
+已提升为 `patches/0018`（内容 = 08-31 旧树上的改动原样）。
+
+### ⚠️★★ 三、副作用：camss 抢走 video0–31，Venus 被挤到 video32/33，硬解静默消失
+
+开了 camss 之后 `/dev/video0` = `msm_vfe0_video0`，Venus 变成 **video32 / video33**
+（32 个 VFE 节点 + 2 个 Venus = 34）。而 `external/v4l2_codec2/v4l2/V4L2Device.cpp:2565`
+写死 **`for (int i = 0; i < 10; ++i)`** 只扫 video0–9。
+从源码能确定地推出后果：扫描范围内全是 camss 的 capture 节点，而解码器要的是
+`V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE`，camss 不提供 ⇒ `deviceInfos` 必然为空
+⇒ **硬解静默回落软解**（`c2.v4l2.*` 组件名还在 MediaCodecList 里，因为那是 XML 驱动的）。
+⚠️ 编号还**不稳定**（谁先 probe 谁拿低号），所以"把 Venus 钉在 video0/1"靠不住。
+修法：`scripts/crdroid-tree-fixes.py` 新增第 7 条，上界 10 → 64，构建机 AOSP 树已打上。
+**⇒ 相机进 ROM 之前，这个修补必须先进 ROM。**
+
+### ★★ 四、从 EPIPE 到出帧：三个各自独立的坑
+
+没有 `media-ctl`/`v4l2-ctl`，写了两个静态工具（`scripts/camera/`，结构体全部来自
+内核树 uapi 头）。抓帧之前撞了三个坑，**每个的错误信息都不指向真正原因**：
+
+1. **`STREAMON` → `EPIPE`**：video 节点像素格式选了列表第一个（`UYVY`），而 RDI 是
+   裸转储、不做转换，必须与传感器总线码同族。映射出处 `camss-vfe.c:59`：
+   `{ MEDIA_BUS_FMT_SGBRG10_1X10, 10, V4L2_PIX_FMT_SGBRG10P, ... }` ⇒ `pGAA`。
+   改后 bytesperline **1600** = 1280×10/8，sizeimage **1,152,000**，对得上。
+2. **`ENUM_FMT` 返回空、`S_FMT` → `EINVAL`**：camss 是 **multiplanar**
+   （`caps=0x25201000`），用单平面 type 问它就是这副样子，看起来像节点坏了。
+3. **`STREAMON` → `ETIMEDOUT`，之后永远 `-EINVAL`** —— 见下一节，这个最贵。
+
+传感器只报一种总线码 `0x300e`，尺寸 1280x720 / 1632x1224 / 3264x1836 / 3264x2448，
+**没有 640x480**（驱动会静默改成 1280x720，下游 pad 得跟着传实际协商值）。
+
+### ⚠️★★★ 五、camss 的 `runtime_error` 会锁死，之后报的错全是假的
+
+用 kretprobe 定位（`r:ret_X X $retval`，`CONFIG_KPROBE_EVENTS=y` 本机有）：
+
+```
+ret___pm_runtime_resume: (csiphy_set_power+0x44 <- __pm_runtime_resume) arg1=0xffffffea
+```
+
+`csiphy_set_power` 第一步 `pm_runtime_resume_and_get(camss->dev)` 就返 **-EINVAL**，
+`csid`/`vfe` 的 `s_power` 压根没被调用。`rpm_check_suspend_allowed()` 只在
+**`dev->power.runtime_error` 已置位**时返 -EINVAL（`disable_depth>0` 返的是 -EACCES）
+—— sysfs 确认：`ac5a000.camss/power/runtime_status = error`，
+`pm_genpd_summary` 里 **`genpd:4:ac5a000.camss`（顶层域，CCI 也挂在它下面）= error**，
+`genpd:0–3`（四个 `ife_N_gdsc`）正常。
+
+⇒ 错误码的演变序列因此看懂了：第 1 次 `EPIPE`（格式，还没到 PM）→ 第 2 次
+**`ETIMEDOUT` = 真正的首次失败** → 之后全是锁存后的 `-EINVAL`。
+**真凶被余波永久掩盖，重试越多离真相越远。**
+
+⚠️★ **而且它是可复现的下电缺陷**：重启后**第一次** STREAMON 必成功、抓到帧；
+**第二次**就失败并锁死。解绑重绑 camss 也不行（`unbind` 成功、`bind` 直接失败，
+`/dev/media0` 消失），**只有重启**。
+⬜ 待查：`csiphy_set_power(0)` / `v4l2_pipeline_pm_put` 那条下电路径里谁没收干净。
+★ 工程对策已落地：`camtest` 把所有对照条件塞进**同一次流**里，一次开机拿到全部数据。
+
+另记：dmesg 提示 `v4l2_get_link_freq_ctrl: Link frequency estimated using pixel rate`
+—— hi846 驱动没实现 `V4L2_CID_LINK_FREQ`（控件表里确实没有，只有 `Pixel Rate` = 144 MHz），
+camss 用像素率估的。能工作，但 DT 里那两个 `link-frequencies` 实际没被消费。
+
+### ✅ 六、四轮对照，一次流内完成
+
+| 轮 | 条件 | 帧均值（字节）| 说明 |
+|---|---|---|---|
+| 0 | 传感器默认 | 28.1 / 28.2 / 28.2 | 解包后像素 min 61 max 67 均值 64.1 = **10 位黑电平 + 读噪**，深夜桌面上镜头前是黑的，正常 |
+| 1 | 曝光 840 + 模拟增益 240 + 数字增益 8191（全拉满）| 28.0 → **38.3** → **17.4** | **数据随控件动** ⇒ 活的传感器读出 |
+| 2 | Test Pattern 2（100% 彩条）| 17.6 → **127.5 / 127.5** | 均值恰为半量程，帧间完全一致 |
+| 3 | Test Pattern 9（分辨率图案）| 127.5 → **146.7 / 146.7** | 换图案均值就变 |
+
+彩条那帧按 16 个横向区段解出的 R/G/B：
+
+```
+段  R     G     B    颜色        段  R     G     B    颜色
+ 0 1023 1023  358   黄           8 1023    0 1023   品
+ 1 1023 1023    0   黄           9 1023    0 1023   品
+ 2  921 1023  102   黄          10 1023    0  563   品
+ 3    0 1023 1023   青          11 1023    0    0   红
+ 4    0 1023 1023   青          12 1023    0    0   红
+ 5    0 1023  460   绿          13  102    0  921   蓝
+ 6    0 1023    0   绿          14    0    0 1023   蓝
+ 7    0 1023    0   绿          15    0    0  665   蓝
+```
+
+（边界段的中间值是 80 像素区段跨过了条纹边界，不是错。）
+
+hi846 的完整控件表（以后写 HAL 直接照抄）：`Exposure [6..840]`、
+`Vertical Blanking [122..64815]`、`Horizontal Blanking [2520]`、
+`Analogue Gain [0..240]`、`Digital Gain [512..8191]`、`Pixel Rate 144000000`、
+`Test Pattern [0..9]`（Disabled / Solid Colour / 100% Colour Bars / Fade To Grey /
+PN9 / Gradient H / Gradient V / Check Board / Slant / Resolution）、
+`Camera Orientation` / `Camera Sensor Rotation`。
+
+### ⬜ 七、还欠什么
+
+* **Android 相机 HAL**：`cameraserver` 在跑但 **0 个相机设备**，`/vendor/lib64/hw`
+  下没有任何 camera HAL。AOSP 的 ExternalCamera HAL 只认 UVC 风格的 MJPEG/YUYV
+  节点，RDI 出的是裸拜耳 —— 走不通。现实路线是 **libcamera 的 Android HAL 适配层**
+  （它有 `simple` pipeline handler 走 media-controller），mesa 那套 meson→bp
+  的工具链可复用。这是下一个大块。
+* **camss 下电缺陷**（第五节）—— 不修的话 HAL 每次打开相机都得是"开机后第一次"。
+* **ROM 侧**：`crdroid-tree-fixes.py` 第 7 条必须随相机一起进 ROM，否则硬解静默消失。
+* 相机内核（`#4`，含 camss）**没有提升为常驻** —— 就是因为上面那条。
+  设备回到 `#3`；测试条目 `…-cam.conf` 与 `android/slot_cam/`（内核 + 去掉后摄的 dtb，
+  15.7 MB）**留在 ESP 上**供继续实验，ESP 89% / 35 MB 可用。

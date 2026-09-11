@@ -52,6 +52,8 @@ KPATCHES=(
     #    因此黑屏起不来 —— 见 docs/stage4-findings.md #79。别删。
     0016-staging-android-port-ashmem-from-ack.patch
     0017-netfilter-port-xt-quota2-from-ack.patch
+    # 0018：前摄要工作就得去掉后摄节点（A/B 实测，#81）。只动 camera.dtsi。
+    0018-arm64-dts-gaokun3-camera-drop-rear-s5k3l6.patch
 )
 
 # ★★ 指纹判据：补丁是否【已在树里】。
