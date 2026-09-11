@@ -4897,3 +4897,81 @@ printk.devkmsg=on`，否则再失败一次仍然只剩排除法。
 且 v7.2 的 camss 用 `fwnode_graph_for_each_endpoint` 遍历端点**不检查可用性**，
 一个"接了但永远绑不上"的 sensor 会**卡死整个 v4l2-async notifier**，
 连前摄也拿不到 `/dev/v4l-subdev*`。⇒ 后摄不是驱动问题，是**供电轨被显示占了**。
+
+### ✅ 七、上机成功（2026-09-11 22:12）
+
+新内核 `#3` **一次启动成功**：`adb reboot` 后 **37 秒**回来，
+`sys.boot_completed=1` 在 **uptime 34 秒**。
+`LoaderEntrySelected` 确认走的是测试条目，`LoaderEntryOneShot` 已被正确消耗。
+
+**部署方式**（与 09-08 失败那次同样的单变量做法，但这次布了取证）：
+新内核放独立目录 `android/slot_b_new/`，条目以 `android-b.conf` 为底**只改
+`linux` 一行**，另加三项：
+
+```
+androidboot.init_fatal_panic=true loglevel=7 panic=10
+```
+
+★ `panic=10` 是这次的安全阀：**init 炸了会在 10 秒后自动重启回 `default`
+（现役内核）自愈**，不需要按电源键；配合 `init_fatal_panic=true`，
+Android init 的 LOG(FATAL) 会变成真 panic 落进 pstore。
+结果没用上，但代价是零 —— **下次测内核照抄**。
+
+**逐项验收**：
+
+| 判据 | 结果 |
+|---|---|
+| `/dev/ashmem` | `crw-rw-rw- 10, 258` ✅ |
+| `xt_quota2` | `/proc/net/xt_quota/globalAlert` 存在 ⇒ **netd 已经在用了** ✅ |
+| CPU 温控（0009）| 8 个 `cpuN-thermal` **全部 trips=2 / cdev=1**，与 M7/M8 记的"cdev 0→1、trip 1→2"逐字吻合 ✅ |
+| pstore | **0 条记录、0 个 `dump-` 变量** ⇒ 本次没有 panic ✅ |
+| 框架 | surfaceflinger / system_server / zygote64 / audioserver / netd 全在跑 ✅ |
+| WiFi / 蓝牙 | 连上（`192.168.130.167`）/ `state: ON` ✅ |
+| 传感器 | SH3001 加速度计 + 陀螺仪经 SSC 注册 ✅ |
+| GPU / 硬解 | `ro.hardware.vulkan=freedreno`；`/dev/video0` + `/dev/video1` ✅ |
+| root | `context=u:r:ksu:s0`，`/data/adb/ksud` 在 ✅ |
+| 声卡 | `SC8280XP-HUAWEI-GAOKUN3` 注册 ✅ |
+
+**★★ 0015 的上限在硬件上验实了**（用 `tinymix` 单查控件会打出 range）：
+
+```
+SpkrLeft PA Volume:     23 (dsrange 0->23)     ← 原来是 17
+WSA_RX0 Digital Volume: 84 (dsrange 0->84)     ← 原来是 81
+写 PA 17/21/23 → 全部接受；写 24 → 钳到 23
+写 dig 84 → 接受；写 90 → 钳到 84
+```
+
+### ⚠️★★ 八、但音量只修好了一半：设备上的 ROM 还带着【旧的】`audio-route.sh`
+
+开机后读混音器：**PA=12、数字=84**，而不是预期的 PA 21 / 数字 84。
+查 `logcat -s audioroute` 看到真相：
+
+```
+I audioroute: 设置失败: WSA_RX0 Digital Volume -> 90
+I audioroute: 设置失败: WSA_RX1 Digital Volume -> 90
+I audioroute: 扬声器路由已应用（PCM1 / WSA / PA=12 / BOOST=off 防爆音）
+```
+
+⇒ 设备上 `/vendor/bin/audio-route.sh` 是 **08-24 那版 ROM 里的旧脚本**，
+还在照 #67 的老结论设 `Digital Volume 90`（削波值）和 `PA=12`。
+★ **而那两条"设置失败"恰恰是新内核生效的证据** —— 90 超过了新上限 84，被内核拒了。
+
+⚠️★ **教训：内核与 ROM 在本项目是分开发布的，所以"补丁已入库"≠"用户听得到"。**
+本仓 `bin/audio-route.sh` 早就改成 dig 84 / PA 17→试 21（还特意写了两步写法
+好让一份 ROM 在新旧内核上都对），但它**只有重新构建 ROM 才会到设备上**。
+
+⬜ **待办：构建一版带新 `audio-route.sh` 的 ROM。** 在那之前，
+本轮已手工把运行值设成 **PA 21 / 数字 84 / BOOST off** 供试听，
+但**重启就会被旧脚本改回 PA=12**。
+
+### ✅ 九、收尾
+
+* 新内核已**提升为常驻**：覆盖 `android/slot_b/Image`（sha `15ca6789…`，
+  覆盖后校验通过）。⇒ 以后正常开机走的就是它。
+* 测试脚手架 `slot_b_new/` 与 `…-android-b-new.conf` **已删**。
+* **ESP 上仍是 4 个条目**（`android-a` / `android-b` / `int-ubuntu` /
+  `rescue-alpine`），逐条验过引用的文件都在，`default = *-android-b.conf`，
+  **84% / 50 MB 可用**。
+* ⚠️ 现在 `slot_b/Image` 是 `#3`，而 `rescue-alpine.conf` 也指着它 ——
+  救援与 Android 共用内核这条（与安装器同设计）**仍然成立**，
+  独立回落网还是 `int-ubuntu`（自带内核）。

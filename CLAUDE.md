@@ -5,47 +5,54 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M21 — 音量翻案已定 + ★★ 内核可重建性修好，只差上机。**★★ 音量：实测查明**出厂配置一直在削波**（dig90/PA12 在 −6 dBFS 素材上 THD **−20 dB ≈ 10% 失真**，dig84/PA17 只低 2.12 dB 却干净 19.7 dB），机制由阴性对照定死 ⇒ **是削波不是压缩器吃增益**；#67 诊断对了但**抬错了那一级** —— 响度要从 PA 出。已落地 `patches/0015` 重写（数字 81→**84 单位增益**、PA 17→**23**）。★★ 09-08 那次上机失败与音量无关：重建的内核缺两份**从未入库的树外源码**（`ashmem` / `xt_quota2`，本仓 Stage 3 自己从 ACK 移植的）。**09-11 已补齐入库为 `patches/0016`/`0017` 并逐项验收**（config 与设备 `/proc/config.gz` 零差异、dtb 逐字节相同、补丁往返零 fuzz）。⚠️★★ 过程中查出 **`kernel-apply-patches.sh` 的指纹判据有假阳性**，已让 `patches/0009`（CPU 温控降频）静默漏打 —— **正是 M17 写它要防的那个补丁**，判据已加固。⬜ **只剩上机验证**（要先征得同意）。详见 [#78](docs/stage4-findings.md) / [#79](docs/stage4-findings.md) / [#80](docs/stage4-findings.md)。（每次开工时更新这一行）
+**当前阶段：Stage 6 M21 — ★★ 内核可重建性修好并上机通过；音量还差一版 ROM。**★★ 音量翻案：实测查明**出厂配置一直在削波**（dig90/PA12 在 −6 dBFS 素材上 THD **−20 dB ≈ 10% 失真**），机制由阴性对照定死 ⇒ **是削波不是压缩器吃增益**；#67 抬错了那一级，**响度要从 PA 出**。`patches/0015` 已重写并**上机验实**（`tinymix` 查到 PA 范围 `0->23`、数字 `0->84`，写 24/90 都被钳住）。★★ 09-08 那次起不来与音量无关：重建内核缺两份**从未入库的树外源码**（`ashmem` / `xt_quota2`，本仓 Stage 3 自己从 ACK 移植的），已入库为 `patches/0016`/`0017`；⚠️ 过程中还查出 **`kernel-apply-patches.sh` 的指纹判据有假阳性**，已让 `patches/0009`（CPU 温控降频）静默漏打 —— **正是 M17 写它要防的那个补丁**，判据已加固。✅ **新内核 `#3` 上机一次成功并已提升为常驻**（37 秒起来，ashmem/quota2/8 个 CPU 温区/WiFi/蓝牙/传感器/GPU/Venus/root 全绿，pstore 零记录）。⬜ **只剩一件：构建一版带新 `audio-route.sh` 的 ROM** —— 设备上的 ROM 还是 08-24 那版，开机仍按旧结论设 PA=12，**所以用户暂时还听不到音量改善**。详见 [#78](docs/stage4-findings.md) / [#79](docs/stage4-findings.md) / [#80](docs/stage4-findings.md)。（每次开工时更新这一行）
 
-> ## ★★★ 开工前先读：内核可重建性已修好，但**新内核还没上过机**（2026-09-11）
+> ## ★★★ 开工前先读：内核可重建性已修好并上机通过（2026-09-11）
 >
-> **✅ 本仓现在能重建出与现役 #38 对齐的内核了。** 09-08 那次黑屏起不来，
-> 原因是重建树缺两份**从未入库的树外源码** —— `ashmem` 与 `xt_quota2`，
-> 都是本仓 **Stage 3 自己从 ACK 移植**的（`docs/stage2-findings.md` 8.5 节第 18、20 条），
-> 当年都是"Android 起不来 / netd 起不来"级别的硬阻塞。
-> 09-11 从构建机旧树 `~/gaokun/mainline-linux` **原样捞回**（不是重新移植），
-> 入库为 `patches/0016` / `0017`。详见 [#79](docs/stage4-findings.md) / [#80](docs/stage4-findings.md)。
+> **✅ 本仓现在能重建出能启动的内核了，而且新内核已经在跑。**
+> 09-08 那次黑屏起不来，原因是重建树缺两份**从未入库的树外源码** ——
+> `ashmem` 与 `xt_quota2`，都是本仓 **Stage 3 自己从 ACK 移植**的
+> （`docs/stage2-findings.md` 8.5 节第 18、20 条）。09-11 从构建机旧树
+> `~/gaokun/mainline-linux` **原样捞回**（不是重新移植），入库为
+> `patches/0016` / `0017`。详见 [#79](docs/stage4-findings.md) / [#80](docs/stage4-findings.md)。
 >
-> ⚠️★★★ **顺带查出一个还活着的地雷：`scripts/kernel-apply-patches.sh` 的指纹
+> ⚠️★★★ **顺带拆掉一颗还活着的地雷：`scripts/kernel-apply-patches.sh` 的指纹
 > 判据有假阳性**，它把 `patches/0009`（CPU 温控降频）判成"已应用"而**静默跳过** ——
-> 原因是它挑的探针行 `polling-delay-passive = <250>;` 在**未打补丁的**
-> `sc8280xp.dtsi` 里本来就有一次（主线自带的 `gpu-thermal` 区）。
-> **这正是 M17 写这个脚本要防的那一个补丁** —— 防漏的工具自己漏了。
+> 探针行 `polling-delay-passive = <250>;` 在**未打补丁的** `sc8280xp.dtsi` 里
+> 本来就有一次（主线自带的 `gpu-thermal` 区）。
+> **这正是 M17 写这个脚本要防的那一个补丁 —— 防漏的工具自己漏了。**
 > 判据已加固（挑**最长**的 3 条新增行、要求**全部**命中）。
 > ⚠️ 后果本会很隐蔽：无风扇平板失去温控降频，要等某次长时间游戏后突然关机才发现。
 >
-> ⬜ **还没做的只有一件：上机。** 新内核（`#3`，构建于 2026-09-11 14:53 UTC）
-> 从未启动过。⚠️ **上机前先明说可能要按电源键并取得同意**，
-> 并在条目里加 `androidboot.init_fatal_panic=true loglevel=7 printk.devkmsg=on`
-> —— Android init 失败走的是 `reboot()` 不是 panic，**pstore 什么都抓不到**，
-> 上次只剩排除法就是因为没布这一道。
+> ★ **重建验收要两条，缺一不可**：① 设备 `/proc/config.gz` 与重建树 `.config`
+> 做 diff（差出的每个符号都是一份没入库的源码）；② 两个内核镜像做**全字符串差集**，
+> **外加 dtb 比 sha256**。⚠️ 字符串差集**看不见 DTS** —— 0009 漏打完全逃过了它。
 >
-> ★ **重建验收要两条，缺一不可**（09-11 实测出来的）：
-> ① 设备 `/proc/config.gz` 与重建树 `.config` 做 diff —— 差出的每个符号都是一份没入库的源码；
-> ② 两个内核镜像做**全字符串差集**，**外加 dtb 比 sha256**。
-> ⚠️ 字符串差集**看不见 DTS** —— 0009 漏打就完全逃过了它，是靠单独核 dtb 才抓到的。
+> ★ **测内核的安全阀（这次实战用过，代价为零，以后照抄）**：新内核放独立目录 +
+> oneshot + `default` 保持现役，条目里加
+> `androidboot.init_fatal_panic=true loglevel=7 panic=10`。
+> **`panic=10` 让 init 炸掉后自动重启回 `default` 自愈，不用按电源键**；
+> `init_fatal_panic` 把 init 的 LOG(FATAL) 转成真 panic 落 pstore
+> （Android init 失败默认走 `reboot()` 不是 panic，pstore 什么都抓不到）。
 >
-> ✅ **设备处于完全默认状态**：跑 `#38`、slot `_b`、default = `*-android-b.conf`。
-> **ESP 99% → 84%（50 MB 可用）**，只剩 4 个启动项：`android-b`（现役、default）/
-> `android-a`（A/B 另一槽，此刻不可启动但 OTA 要用，必须留）/
-> `int-ubuntu`（**唯一与 Android 内核解耦的回落网**）/ `rescue-alpine`（内核共用 `slot_b/`）。
+> ✅ **设备现状**：跑新内核 **`#3`**（已覆盖 `slot_b/Image`，sha `15ca6789…`），
+> `default = *-android-b.conf`。ESP **84% / 50 MB 可用**，只剩 4 个启动项：
+> `android-b`（现役、default）/ `android-a`（A/B 另一槽，此刻不可启动但 OTA 要用，
+> 必须留）/ `int-ubuntu`（**唯一与 Android 内核解耦的回落网**，自带内核）/
+> `rescue-alpine`（内核共用 `slot_b/`，与安装器同设计）。
+>
+> ⚠️★★ **音量只修好了一半**：内核上限已验实（PA `0->23`、数字 `0->84`），
+> 但设备上的 ROM 是 08-24 那版，`/vendor/bin/audio-route.sh` **还是旧脚本**，
+> 开机仍设 `Digital Volume 90`（**被新内核拒**，这反倒证明新上限生效）与 `PA=12`。
+> ⇒ **内核与 ROM 在本项目是分开发布的，"补丁已入库"≠"用户听得到"。**
+> ⬜ 待办：构建一版带新 `audio-route.sh` 的 ROM。
 >
 > ⚠️★ **Alpine 救援的 squashfs 在 Ubuntu 救援分区上**（`p3:/gaokun3/rescue.squashfs`）
 > —— Stage 7 提的"给 Ubuntu 瘦身/换掉"要先把它挪走，否则两个救援一起废。
 >
-> ⚠️★ **平时没有"可以随时启动的另一个槽"**：super 里只有 `_b` 一套逻辑分区。
+> ⚠️★ **平时没有"可以随时启动的另一个槽"**：super 里只有 `_b` 一套逻辑分区，
 > 这是 **Virtual A/B 的设计如此**（`PRODUCT_VIRTUAL_AB_OTA := true`，见
-> `lineage_gaokun3.mk:171`）。★ 但由此得到一条真判据：**`bootctl is-slot-bootable`
+> `lineage_gaokun3.mk:171`）。★ 由此得到一条真判据：**`bootctl is-slot-bootable`
 > 读的是 misc 里的标志位，不代表 super 里真有那套分区** —— 它报 slot 0 = YES 而
 > `lpdump` 里一个 `_a` 都没有。**要拿另一个槽当回落网之前，先用 `lpdump` 查。**
 
