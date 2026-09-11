@@ -74,6 +74,30 @@ AOSP 默认 `config_showNavigationBar=false`
 
 ⬜ **只剩上机验证**：随下一版 ROM 一起生效，装好后让用户试一次边缘侧滑。
 
+### A6b. ⬜ WiFi 连不上 WPA3（用户报告，2026-09-12）
+
+用户报告 WPA3 网络有问题。**仓库此前零记录**，现象细节也还没采集到。
+
+**已在构建机上排除的一层**：`wpa_supplicant` 编译时 SAE 是**全开**的 ——
+`external/wpa_supplicant_8/wpa_supplicant/android.config` 里
+`CONFIG_SAE=y` / `CONFIG_SAE_PK=y` / `CONFIG_OWE=y` / `CONFIG_DPP=y`，
+构建出的二进制里 `SAE-EXT-KEY` / `FT-SAE` / `sae_pwe` 字符串都在。
+**所以不是"没编进去"。**
+
+★ **第一嫌疑：`sae_pwe` 没设。** WPA3-Personal 的 PWE 推导有 hunt-and-peck 与
+H2E 两种，wpa_supplicant 默认只用前者，而**要求 H2E 的 AP 会直接拒**。
+本仓 `device/huawei/gaokun3/wifi/wpa_supplicant.conf` 只有三行
+（`disable_scan_offload` / `wowlan_triggers` / `ap_scan`），**没有 `sae_pwe`**。
+
+⚠️ 另一层还没查：ath11k **没有**声明 `NL80211_EXT_FEATURE_SAE_OFFLOAD`。
+那本身不是问题（STA 模式的 SAE 由用户态算、走 mgmt_tx），但**没有实测证实过**
+本机这条路通不通 —— 真判据是 supplicant 自己报的 `key_mgmt` 里有没有 `SAE`。
+
+**第一步**：设备回来后跑 `scripts/wifi/wpa3-probe.sh`（已入库，一次取齐四层证据：
+supplicant 能力 / 框架 `isWpa3SaeSupported` / 扫描结果里的安全类型 / 连接日志）。
+带 SSID+密码参数还会实连一次并抓失败点。
+临时验证 `sae_pwe` 的办法写在脚本第 6 节，**不用刷机**。
+
 ### A1. 音频与蓝牙长期运行后死锁 ⚠️ 次高优先
 用户实机报告，我未复现、未定位（[#38](stage4-findings.md)）。
 两者共用同一条到 DSP 的 QRTR/FastRPC 通路，而这条通路上**已经实测到过**
@@ -198,10 +222,17 @@ AOSP 的 ExternalCamera HAL 只认 UVC 风格节点，RDI 出的是裸拜耳，�
 media-controller），mesa 那套 meson→bp 工具链可复用。hi846 的完整控件表在 #81 第六节。
 
 **⬜ 两个必须先修的前提**：
-1. ⚠️★★ **camss 下电缺陷**：开机后 STREAMON 只有第一次成功，第二次失败并把
-   `runtime_error` 锁死，之后一律 -EINVAL（假错误），只有重启能救。
-   kretprobe 已定位到 `csiphy_set_power → pm_runtime_resume_and_get(camss->dev)`，
-   `genpd:4:ac5a000.camss`（顶层域）= error。**查下电路径谁没收干净。**
+1. ⚠️★★ **camss 电源域缺陷**（[#83](stage4-findings.md) 已把根因缩到一点）：
+   **只要 `titan_top_gdsc` 真的塌缩过，再上电就必失败** ——
+   `titan_top_gdsc status stuck at 'off'`（`gdsc.c:185` 的 WARN），STREAMON 报 −110。
+   连着跑不会失败（GDSC 来不及塌缩，6/6 全过），隔一会儿再跑必炸。
+   ⚠️ 原先记的"开机后只有第一次成功"是**错的模型**，已更正。
+   已排除：camcc 处于 runtime-suspend（钉成 active 照样 3/3 失败）、
+   `RETAIN_FF_ENABLE` 位（两种状态下都是 1）。
+   **下一步**：对比"从未上电"与"塌缩之后"的 GDSCR/CFG_GDSCR 全字段；
+   查上游 `gdsc.c` / `camcc-sc8280xp.c` 有没有相关修复。
+   ⚠️⚠️ **读那些寄存器之前先把 camcc 钉住**（`power/control=on`）——
+   否则 `devmem` 的【读】就能让内核静默死亡，2026-09-12 已经这么弄挂过一次。
 2. ⚠️★★ **camss 抢走 video0–31，Venus 被挤到 video32/33**，而 `v4l2_codec2` 只扫 0–9
    ⇒ 硬解静默回落软解。`crdroid-tree-fixes.py` 第 7 条已修（上界 10→64），
    **必须随相机一起进 ROM**。相机内核因此**没有提升为常驻**，设备仍跑 `#3`。

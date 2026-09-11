@@ -13,12 +13,22 @@
 
 ## ⚠️★★ 用之前必须知道的三件事
 
-1. **开机后 STREAMON 只有第一次能成功。** 第二次会失败，并把 camss 的
-   `runtime_error` 锁死（`/sys/devices/platform/soc@0/ac5a000.camss/power/runtime_status`
-   变成 `error`），之后所有尝试一律 `-EINVAL`，**报的错和真正的失败原因毫无关系**。
-   解绑重绑 camss 也救不回来（`bind` 直接失败），**只有重启**。
+1. ⚠️★ **只要 titan_top GDSC 真的塌缩过，再上电就会失败。**
+   （⚠️ 本节原先写的是"开机后只有第一次能成功"——**那个模型是错的**，
+   2026-09-12 用寄存器实测改正，见 `docs/stage4-findings.md` #83。）
+   * **连着跑**不会失败：GDSC 来不及塌缩，后面几次根本不需要上电，实测 6/6 全过。
+   * **隔一会儿再跑**必失败：`titan_top_gdsc status stuck at 'off'`
+     （`gdsc.c:185` 的 WARN），STREAMON 返回 `-110`。
+   失败后 GDSC 停在"请求了上电但没上电"的半状态（PWR_ON=0 而 SW_COLLAPSE=0），
+   genpd 同时锁死 `runtime_error`，**之后所有报错都是假的**（一律 `-EINVAL`）。
+   解绑重绑救不回来（`bind` 直接失败），**只有重启**。
    所以 `camtest` 把所有对照条件塞进【同一次流】里。
-   ⇒ 这是 camss 下电路径的一个缺陷，见 `docs/stage4-findings.md` #81 第五节，待查。
+
+   ⚠️⚠️ **别用 `devmem` 去读 camcc 的寄存器来排查这个** ——
+   camcc 一旦 runtime-suspend，它的寄存器块没时钟，**读**也会触发总线
+   external abort 导致内核静默死亡（2026-09-12 这么弄挂过一次，要人按电源键）。
+   非读不可时，先 `echo on > /sys/devices/platform/soc@0/ad00000.clock-controller/power/control`
+   把 camcc 钉住。
 
 2. **video 节点的像素格式必须与传感器总线码同族**（RDI 是裸转储，不转换）。
    选错了 STREAMON 报 `EPIPE`，错误信息完全不提"格式"。映射表出处

@@ -5262,3 +5262,92 @@ repo sync 出来的干净树，打不上就是上游动了，应当大声报错�
    `kernel-apply-patches.sh`、AOSP 侧 `crdroid-tree-fixes.py`。
 4. ⬜ **仍然没有自动化的防线**：构建机的树不是 git checkout，下次照样会漂。
    真正的解法是让构建机的设备树就是本仓的 checkout（TODO B 待办）。
+
+---
+
+## #83 ★★★★ camss 下电缺陷：查到确切的告警与条件，但模型改了两次，最后把机器弄挂了（2026-09-12）
+
+[#81](#81) 记的现象是"开机后 STREAMON 只有第一次成功"。**那个模型是错的。**
+本条把它改对，并记下两次我自己的判断失误 —— 其中第二次让设备停机等人按电源键。
+
+### ★★★ 一、真正的告警与真正的条件
+
+用 kretprobe 逐层定位（`csiphy_set_power` 返回 −22 → `__pm_runtime_resume` 返回 −22），
+再用一次干净复现拿到了**首次失败**（后续的 −22 全是 `runtime_error` 锁存后的假错误）：
+
+```
+titan_top_gdsc status stuck at 'off'
+WARNING: drivers/clk/qcom/gdsc.c:185 at gdsc_toggle_logic+0x1b8/0x1c0
+Call trace: gdsc_toggle_logic ← gdsc_enable ← _genpd_power_on ← genpd_power_on
+            ← genpd_runtime_resume ← rpm_get_suppliers ← csiphy_set_power
+            ← pipeline_pm_power_one ← v4l2_pipeline_pm_get ← video_prepare_streaming
+            ← vb2_ioctl_streamon
+qcom-camss ac5a000.camss: Failed to power up pipeline: -110
+```
+
+⇒ **camss 顶层电源域 `titan_top_gdsc` 上电超时**（`gdsc_poll_status` 等 PWR_ON 等不到）。
+
+★★ **条件不是"第几次"，是"GDSC 有没有真的塌缩过"**。直接读寄存器
+（GDSCR = camcc 基址 `0xad00000` + `0xc1bc`，bit31 = PWR_ON、bit0 = SW_COLLAPSE）：
+
+| 场景 | 跑之前 | 跑之后 | 结果 |
+|---|---|---|---|
+| 开机后第 1 次 | PWR_ON=0 COLLAPSE=1 | PWR_ON=1 COLLAPSE=0 | ✅ |
+| 紧接着连跑 2–6 次 | PWR_ON=**1** COLLAPSE=0 | 同左 | ✅ 6/6 |
+| 隔一会儿（已塌缩）再跑 | PWR_ON=0 COLLAPSE=1 | PWR_ON=0 **COLLAPSE=0** | ❌ stuck at 'off' |
+
+**连着跑全过，是因为 GDSC 根本来不及塌缩** —— 后面几次压根不需要上电。
+而一旦它真的掉电，再上电就必败。
+
+⚠️ 失败路径还**不恢复 SW_COLLAPSE**（`gdsc_toggle_logic` 超时直接返回），
+于是 GDSC 停在"请求了上电但没上电"的半状态，genpd 同时锁 `runtime_error`
+⇒ **之后所有报错都与真因无关**。解绑重绑救不回来（bind 直接失败），**只有重启**。
+
+### ⚠️★★ 二、我做了一个无效的对照实验，自己抓出来了
+
+注意到 `gdsc.c` 里**一个 `pm_runtime` 都没有**（`gdsc_enable` 直接写 regmap），
+而 camcc 自己是 runtime-PM 管理的（`camcc_sc8280xp_probe:3010` 有
+`devm_pm_runtime_enable`，且 3034 行把 `CAMCC_GDSC_CLK` 设成常开）。
+于是提出假说：**camcc 一 suspend，GDSC 的寄存器块没时钟，写进去不生效。**
+
+用 `power/control=on` 把 camcc 钉成 active 后测了一次 —— **成功**，我差点写成结论。
+但那一格其实是**刚开机、GDSC 从未上电**的场景，而"阴性"那一格是**用过并塌缩之后**。
+⇒ **两格比较的不是同一件事**（#49 记过一模一样的错）。
+补做三轮"塌缩→再跑"，camcc 全程 `active`，**照样 3/3 失败** ⇒ 假说推翻。
+
+★ 教训：**对照实验的两格，要先说清"除了我要改的那一项，其余条件是否真的相同"。**
+"钉住 camcc"这一步是对的，错在我没让两格处在同一个 GDSC 历史状态上。
+
+### ⚠️★★★ 三、把机器弄挂了：`/dev/mem` 的【读】也不安全
+
+为了对比"从未上电"与"塌缩之后"的寄存器，我写了个脚本定时 `devmem` 读 GDSCR。
+第三次采样时设备当场消失 —— adb 断、TCP 不通、全网段扫描找不到，**必须长按电源键**。
+而用户当时已经睡下，明确说过没法帮我按。
+
+★ **根因是我把"只读"当成了"安全"**：camcc 一旦 runtime-suspend，它的寄存器块
+**没有时钟**，这时候去读会触发总线 external abort → 内核静默死亡。
+⚠️ 本仓**早就记过同一个形状**：`smmu-nostall.sh` 扫到未实现的 context bank
+→ external abort → "Android 连续三次启动到 post-fs-data 后消失、无 tombstone
+无 pstore 无 adb"（Stage 5）。我读过那条，却没把它推广成一般规律。
+
+⇒ **新规矩**：**对一个【时钟/电源可能被门控】的寄存器块，读和写一样危险。**
+用 `/dev/mem` 碰这类地址之前，必须先确认该块此刻是 resumed 的
+（例如先 `power/control=on` 钉住它的控制器，或只在已知上电的窗口内读）。
+⚠️ 而且这条要与"用户能不能按电源键"绑定：**没人能按的时候，这类探针一概不做。**
+
+### ⬜ 四、还不知道的，以及下一步
+
+**不知道**：为什么塌缩之后就上不了电。已排除"camcc 处于 suspend"这一条。
+剩下的候选（都没验证）：
+* `gdsc_retain_ff_on()` 在 enable 时置 GDSCR 的 `RETAIN_FF_ENABLE`(bit11)，
+  而 disable 路径**从不清它** —— 实测确实一直是 1，但"开机从未上电"时也是 1，
+  所以它**不构成**两种状态的差异（这一条基本可以排除）。
+* `gdsc_clear_mem_on()` 清 RETAIN_MEM/RETAIN_PERIPH，与再上电的时序关系未查。
+* 上游是否已有修复：**没查过**。⚠️ M17 的教训在这里适用 ——
+  "应该已经修了"和"确认在不在"差着一次上机。
+
+**下一步（要设备回来）**：
+1. 对比"从未上电"与"塌缩之后"的 **CFG_GDSCR**（+0x4）与 GDSCR 全字段。
+   ⚠️ 读之前先 `power/control=on` 钉住 camcc，否则重演第三节那次停机。
+2. 查上游 `linux-next` / stable 里 `gdsc.c` 与 `camcc-sc8280xp.c` 的改动。
+3. 这条不修完，相机内核**不能提升为常驻** —— 见 TODO A7。
