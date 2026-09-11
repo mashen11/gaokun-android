@@ -4077,6 +4077,9 @@ compat 探测结果）。
   正常路径是在管理器里逐个授权。
 * **还没进 ROM**：现在跑的是 ESP 上的实验条目 `ksu-full.conf`（oneshot），
   下次重启就回到不带 root 的 `android-b`。要常驻得重新构建 boot.img + OTA。
+  > ✅ **本条已过时（M20 起 root 已进 ROM）**：`ksu-full.conf` 与它指的
+  > `slot_b_ksu/Image` 已于 2026-09-11 删除 —— 那个内核与现役 `slot_b/Image`
+  > sha 完全相同，条目也与 `android-b.conf` 逐字段重复。见 [#79](#79) 第四节。
 * **管理器 APK 要不要随 ROM 发**：`ksud` 就在 APK 的
   `lib/arm64-v8a/libksud.so` 里（5,014,624 字节），装 App 即到位，
   所以 ROM 侧其实**什么都不用加**。是否预装是产品决定，未做。
@@ -4542,10 +4545,11 @@ D_7..D_9   -11.67 -11.72 -11.75                        组内散布 0.04 dB
 
 ---
 
-## #79 ⚠️★★★★ 音量补丁上机失败 + 挖出"A/B 回落网根本不存在"（2026-09-08 夜）
+## #79 ⚠️★★★★ 音量补丁上机失败 → 查明：缺的是本仓自己移植过的两个 ACK 驱动（2026-09-08 夜 / 09-11 结案）
 
 按 [#78](#78) 的修法编了内核并上机，**新内核起不来**，机器停在黑屏、adb 不通，
-需要人到跟前长按电源键。⚠️ **未完成，下次接着查。**
+需要人到跟前长按电源键。✅ **2026-09-11 查明并结案**：差异被穷尽为两个
+**本仓 Stage 3 自己从 ACK 移植、却从未入库**的驱动（`ashmem` 与 `xt_quota2`）。
 
 ### ⚠️★★ 一、`bootctl` 说可启动 ≠ 真的能启动（⚠️ 本节初稿把结论写过头了，已更正）
 
@@ -4612,34 +4616,166 @@ config，不用照文档重建。**下次要复现某个内核，先看设备上
 根本不存在**（主线没有、buildbot 没有、本仓没有）—— 说明 #38 是从一棵还带着
 **别的树外源码**的树上编的，那部分从来没入库。M17 说的"重建不出发版内核"
 到这里才算量化清楚：不是配方错，是**少一份没人记下来的源码**。
+★ **那份源码是什么、以及它就是启动失败的原因，在下一节查明。**
 
-### ⬜ 三、新内核为什么起不来 —— 还没查
+### ★★★ 三、新内核为什么起不来 —— 查明了（2026-09-11）
 
-已布好的证据链，下次从这两条开始：
+取证全部在设备上做完，**没有再重启机器一次**。
 
-1. **`efi_pstore`**：若是 panic，记录在 EFI 变量里（`scripts/pstore-ctl.sh`）。
-   Stage 0 布这条通路就是为了这种没有串口的场景。
-2. **`LoaderEntrySelected`**：能区分"固件加载了新条目但内核挂了"和
-   "根本没走到那个条目"。
+**① 不是 panic。** `efi_pstore` 零记录，efivarfs 的 77 个变量里一个
+`dump-type*` 都没有。⚠️ 但"没有 panic"**不构成任何排除** —— CLAUDE.md
+早记过"Android init 失败时是主动 `reboot()`、不是 panic，pstore 抓不到"。
 
-第一嫌疑是第二节那两个符号背后的**树外源码缺口** —— 差的可能不止 config
-那两行。⚠️ 但这是假说，别当结论：也可能是 zboot 产物、DTB 搭配或别的原因。
+**② 不是引导层的问题。** 两个 BLS 条目**只差 `linux` 一行** —— `options` /
+`devicetree` / `initrd` 三项逐字相同（失败条目直接用的就是 slot_b 的 dtb 和
+ramdisk）。⇒ 这是一次**干净的单变量 A/B**，变量只有内核镜像本身。镜像结构也
+正常：`MZ\0\0` + `zimg` 魔数 + gzip 载荷，zboot 头解析通过，解压后
+45,154,304 字节，**与现役内核一字节不差**。
 
-### ⚠️ 四、设备当前的非默认状态（下次开工前先复原）
+**③ ★★ 判据：对两个内核做【全字符串差集】。** 不去猜哪里不一样，把差异穷尽出来：
 
-- **机器是关着/黑屏的，需要长按电源键强制关机再开机。** `LoaderEntryOneShot`
-  在 systemd-boot 读取时即被删除（在启动内核之前），所以那次失败已经把它消耗掉，
-  下次开机自动走 `default = *-android-b.conf`，回到能用的内核。
-- **`/mnt/esp/.../android/slot_a/recovery-ramdisk.img` 被【搬走】了**（不是删），
-  现在在 `/data/local/tmp/slot_a-recovery-ramdisk.img`。腾它是因为 ESP 只剩
-  6.2 MB 而新内核 15 MB。⬜ **搬回去**。它没有任何 BLS 引用，但
-  `/vendor/bin/gaokun3-ota-postinstall.sh` 会用到。
-- 新增了 `android/slot_b_audio/Image`（15,479,296 B，
-  sha256 `249bfa0f2543e7af…`）和 BLS 条目 `…-android-b-audio.conf`。
-  ⬜ 查完之后要么修好、要么连目录带条目一起删（能腾回 15 MB）。
-- **现役 `slot_b/Image` 全程未被触碰**（sha `7ec8bf2cec625d5e`，前后校验两次）。
-- ESP 现在 **99% 满，5.7 MB 可用**。⚠️ 这个分区长期贴着上限跑，
-  M13 拆 `.bak-prev` 的教训还在，别再往里塞东西。
+| | 唯一字符串 | 只在这一边 |
+|---|---|---|
+| 现役 #38 | 99,299 | **309** |
+| 失败内核 | 99,271 | 281 |
+
+把两边三百来条里的压缩噪声与随机字节滤掉（只留含 4 个以上小写字母的），
+**真正的文本差异只有三类**：
+
+* **只在 #38 里有 —— `ashmem` 6 条 + `xt_quota2` 13 条**：`dev/ashmem`、
+  `android-ashmem`、`ashmem_area_cache`、`6ashmem: initialized`、
+  `net/netfilter/xt_quota2.c`、`quota_mt2_check`、`xt_quota2: init()` …
+* 一百多条 `include/…` 头文件路径 —— **两边都有**，只是失败内核那边全部带
+  `./` 前缀。纯构建路径格式差异，零语义。
+* 构建串：`#38 Sat Aug 22` vs **`#2 Tue Sep 8`** ⇒ 坐实失败内核是**另起一棵
+  干净树的第 2 次构建**，不是在 #38 那棵树上增量编的。
+
+⇒ **两个内核的功能性差异被穷尽为三项：{ashmem 驱动, xt_quota2, 0015 里的 4 个整数}。**
+
+**④ ★★★ 那两个东西不是无名氏 —— 是本仓 Stage 3 自己移植的，当年都是硬阻塞。**
+[`stage2-findings.md`](stage2-findings.md) 8.5 节第 18、20 条白纸黑字：
+
+| # | 问题 | 实锤证据 | 修复 |
+|---|---|---|---|
+| 18 | 主线无 ashmem，A16 的 memfd 兼容探测又需要 ACK shim | ioctl 探测失败 | **从 ACK 移植 staging ashmem 驱动**（2 处 API 漂移修正）|
+| 20 | netd 需 xt_policy/quota/quota2（quota2 是 ACK 专有）| "Extension policy revision 0" | xt 全族 =y + **移植 xt_quota2** |
+
+两条都是"Android 起不来 / netd 起不来"级别的东西，当年逐条实测定位过。
+它们只活在构建机的内核树里，**从来没进过 `patches/`**。
+
+⇒ 排除法到此闭合：差异只剩三项，而 0015 那 4 个整数是 `snd_soc_limit_volume()`
+的上限值 —— 它最坏的结果是找不到控件返回错误，**在物理上不可能挂住启动**；
+另外两项则是**本仓自己记录过能让 Android 起不来**的。
+
+⚠️★ **仍有一处没解释清楚，别当成全知**：Android init 失败走 `reboot()`，
+而重启会自动回到 `default`（能用的内核）**自愈**；实际却是黑屏挂死、要人按
+电源键。所以"卡在哪一步"没有直接证据，只有排除法。
+★ **下次再试这类内核，条目里加 `androidboot.init_fatal_panic=true`**
+（CLAUDE.md「已知坑」记过，把 init 的 LOG(FATAL) 转成真 panic 走 pstore）。
+这次只剩间接证据，就是因为没布这一道。可直接抄已删的 `android-a-dbg.conf`
+在那条 cmdline 尾部加的三项：`androidboot.init_fatal_panic=true loglevel=7
+printk.devkmsg=on`。
+
+### ★★ 三之二、真正的教训：M17 那个坑又踩了一次，这次更贵
+
+M17 已经写过一次同形状的事："上游 Venus 补丁集**也只活在构建机工作区**……
+**从干净的 v7.2-rc2 照本仓 `patches/` 根本重建不出发版内核**"，
+当时的修法是把它们入库成 `patches/upstream-venus/`。
+
+**同一个坑，同一个形状，这次是 ashmem + xt_quota2。** M17 那轮只补了**当时
+撞见的那一份**，没有回头问一句"还有没有别的没入库的源码"。
+
+★ **判据（本轮验证过，很便宜）：拿设备上正在跑的内核的 `/proc/config.gz`，
+与照本仓配方重建出来的 `.config` 做 diff —— 差出来的每一个符号，都是一份
+没入库的树外源码。** 这次 diff 出来正好 2 个，而它们就是全部原因。
+⇒ **这条该进发版收尾清单。**
+
+★ 另一个便宜判据（本轮新用）：**两个内核镜像的全字符串差集**。它比 config
+diff 更强 —— config 只能发现"有 Kconfig 符号"的缺口，字符串差集连**没有
+Kconfig 开关的源码改动**也能看见，而且能证明"除此之外没有别的差异"。
+zboot 镜像的解法：`MZ\0\0`+`zimg` 头里第 8..11 字节是载荷偏移、12..15 是长度，
+gzip 解开后再按 `IKCFG_ST`/`IKCFG_ED` 夹出内嵌 config。
+
+⬜ **待办：把 ashmem 与 xt_quota2 补成 `patches/`**（见 TODO A9）。
+⚠️ **源码可能已经没了**：失败那次是在另起的干净树上编的（构建串 `#2`），
+如果当时 `git clean -fd` 过，那两份未跟踪的 `.c` 就一起没了。
+★ **但有一个时间界标**：ESP 上那个 08-31 编的相机内核（本轮删除前挖过它的
+config）**`CONFIG_ASHMEM=y` 与 `CONFIG_NETFILTER_XT_MATCH_QUOTA2=y` 都在**
+⇒ 源码至少活到 08-31。先去构建机上找那棵树；真没了就照第 18 条重新从 ACK
+移植一遍（记得那 2 处 API 漂移）。
+
+### ✅ 四、设备状态已全部复原（2026-09-11）
+
+用户把机器接回来后逐项做完，**全程没有重启机器**：
+
+| 项 | 状态 |
+|---|---|
+| 回到能用的内核 | ✅ `#38`，slot `_b`；`LoaderEntrySelected` = `…-android-b.conf` |
+| `slot_a/recovery-ramdisk.img` | ✅ 已搬回，sha256 `1b255357…` 与搬走前逐字符一致 |
+| `slot_b_audio/` + `…-android-b-audio.conf` | ✅ 取证完毕后删除（取证结论见上三节） |
+| `/data/local/tmp` 的临时副本 | ✅ 已清 |
+| 现役 `slot_b/Image` | ✅ 全程未被触碰，sha `7ec8bf2cec625d5e…`，与先前记录一致 |
+
+**顺带清掉了用途已尽的启动脚手架**（用户 09-11 授权"把没用的启动项清一下"），
+**ESP 从 99% 降到 84%（可用 5.7 MB → 50 MB）**，而且这还是在把 15 MB 的
+recovery-ramdisk 搬回去之后：
+
+| 删掉的 | 为什么没用了 |
+|---|---|
+| `plain72.conf` + `plain72/`（14 MB）| M15 查 s2idle 的裸 v7.2-rc2 实验位，**M16 已结案** |
+| `camera-test.conf` + `vmlinuz-camera.efi` + `gaokun3-camera.dtb`（15.8 MB）| 08-31 相机实验，**案卷和 git 里都没有记录**；删前已把配方挖出来（见下） |
+| `ksu-full.conf` | root 早已进 ROM（M19/M20），且它与 `android-b.conf` **逐字段重复**（内核 sha 都相同）|
+| `android-a-dbg.conf` | 手工实验条目；它唯一的价值是那三项 cmdline，已抄进上面第三节 |
+| `android/slot_b_ksu/Image`（15 MB）| 与 `slot_b/Image` **sha 完全相同**的重复内核（见下）|
+
+★ **相机实验的配方就地保存下来**（它此前只存在于那个二进制里）。相对 #38
+只是又一次「=m 坑」—— 8 个符号从 `=m` 翻成 `=y`，外加一个新开的：
+
+```
+CONFIG_VIDEO_QCOM_CAMSS=y   CONFIG_I2C_QCOM_CCI=y     CONFIG_SC_CAMCC_8280XP=y
+CONFIG_VIDEO_HI846=y        CONFIG_VIDEO_DW9714=y     CONFIG_VIDEOBUF2_DMA_SG=y
+CONFIG_LEDS_GPIO=y          CONFIG_VIDEO_S5K3L6XX=y（#38 里没有这一项）
+```
+
+⚠️ 那次实验**结果如何无人记录**，TODO A7 至今写着相机"完全没碰"。
+
+★ **Alpine 救援的内核去重，又腾回 15 MB**：它原先指着
+`android/slot_b_ksu/Image` —— M19 的 KSU 实验目录，**名字已经在说谎**
+（root 早就进 ROM 了），而且与 `slot_b/Image` **sha 完全相同**。
+改指 `android/slot_b/Image` 后把那份重复删掉。
+
+> ⚠️★ **这里我走了一段弯路，值得记**：第一版我把内核**移进** `rescue/`、
+> 再复制一份 dtb 进去，想让救援"自包含、不依赖 Android 槽"。两个问题：
+> ① **`mv` 不腾空间** —— 我当时却记成"又腾回 15 MB"，纯属想当然；
+> ② 更要紧的是，`scripts/live/installer-lib.sh:522` 里安装器写的救援条目是
+> `linux /$mid/android/slot_a/Image`，**本来就是共用 Android 槽内核的设计**。
+> 我那一改等于让实机布局和安装器产物分叉，而**分叉正是本项目反复付账的东西**。
+> ⇒ 改回与安装器同一设计，这才真的删掉了重复的 15 MB。
+> ★ **教训：动实机布局之前先看一眼"谁会重新生成它"。**
+
+⚠️ 取舍说明：这样一来 Alpine 救援与 Android 共用内核（Stage 7 本来就这么设计），
+**唯一与 Android 内核解耦的回落网是 `int-ubuntu`**（自带
+`7.2.0-rc2-gaokun3+/linux`，59 MB）—— 所以那 59 MB 别当成可清理的肥肉。
+
+**收工后 ESP 上只剩 4 个条目，逐条验过引用的文件都在**：
+
+| 条目 | 用途 |
+|---|---|
+| `android-b.conf` | 现役系统（`default` 指向它）|
+| `android-a.conf` | A/B 的另一槽。⚠️ **此刻不可启动**（Virtual A/B，super 里没有 `_a`），但 OTA 要用，且 boot_control HAL 会改写它，**必须留** |
+| `int-ubuntu.conf` | Ubuntu 救援，**自带独立内核**（`7.2.0-rc2-gaokun3+/`，59 MB）—— 这是唯一与 Android 内核解耦的回落网 |
+| `rescue-alpine.conf` | Alpine 救援（Stage 7 M0）。内核/dtb 共用 `slot_b/`，自己只带 `rescue/initramfs.img`（2.6 MB）|
+
+⚠️ 两条新记下的依赖，将来动分区/脚本时会咬人：
+
+1. **Alpine 救援的 squashfs 在 Ubuntu 救援分区上**（`p3:/gaokun3/rescue.squashfs`，
+   58 MB），initramfs 靠扫块设备找它。⇒ `docs/stage7-live-installer.md` 提的
+   "给 Ubuntu 瘦身/换掉"一旦执行，**必须先把这个 squashfs 挪走**，否则
+   Alpine 救援跟着一起废。
+2. `scripts/s2idle/s2fp.sh` **依赖已被删除的 `plain72.conf`**（它 `set-oneshot`
+   到那个条目）。s2idle 已结案，但将来若要复查，得先重建那个带 `PM_DEBUG`
+   的实验条目。已在脚本头部加注。
+
 
 ### ⚠️★ 五、纪律：明知回落网不存在，还是直接重启了
 

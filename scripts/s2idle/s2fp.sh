@@ -3,6 +3,13 @@
 # 目的：同一条 cmdline 有的开机连过 10 次、有的第 1 次就死 ——
 #       差异必然在开机时就定下来了。攒若干次开机后比对"能过"与"不能过"的指纹。
 # ⚠️ 只用 pm_test（5 秒自动返回、不需要唤醒源），不会把机器睡死。
+#
+# ⚠️★ 2026-09-11：本脚本【当前跑不起来】—— 它 set-oneshot 到的那个
+#     `*-plain72.conf` 启动条目（带 CONFIG_PM_DEBUG 的裸 v7.2-rc2）已随
+#     ESP 清理删除，因为 s2idle 在 M16 就结案了（真凶是我们自己加的
+#     dr_mode="otg"，与内核/EC 无关）。
+#     要复查 s2idle 的话，先重建那个条目：编一个带 PM_DEBUG 的内核放进
+#     ESP，并写一个 `<machine-id>-plain72.conf` 指向它，本脚本即可照常用。
 B=/var/log/s2fp
 mkdir -p $B
 ID=$(( $(cat $B/counter 2>/dev/null || echo 0) + 1 )); echo $ID > $B/counter

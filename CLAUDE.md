@@ -5,33 +5,50 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M21 — 音量翻案，但上机未完成。**★★ 实测查明**出厂配置一直在削波**：dig90/PA12 在 −6 dBFS 素材上 THD **−20 dB（约 10% 失真）**，而 dig84/PA17 只低 2.12 dB 却干净 **19.7 dB**。机制由阴性对照定死（−20 dBFS 下 81→90 给满额 +9.07 dB 且 THD −52.8）⇒ **是削波，不是压缩器吃增益**。#67 诊断对了但**抬错了那一级**：数字级在 DAC 前、抬它吃余量；**响度要从 PA 出**。已落地：`patches/0015` 重写（数字上限 81→**84 单位增益**、PA 上限 17→**23**）、`audio-route.sh` 改成 dig 84 / PA 17→试 21（两步写，新旧内核都对，回退分支实机验过）。⚠️ **新内核上机起不来，未查明**；顺带确认**平时没有可随时启动的另一个槽**（Virtual A/B 的设计如此，别信 `bootctl`，要用 `lpdump` 判）。详见 [#78](docs/stage4-findings.md) / [#79](docs/stage4-findings.md)，设备遗留状态见下方方框。（每次开工时更新这一行）
+**当前阶段：Stage 6 M21 — 音量翻案已定；★★ 但查出一件更重的事：本仓目前编不出能启动的内核。**★★ 音量：实测查明**出厂配置一直在削波**（dig90/PA12 在 −6 dBFS 素材上 THD **−20 dB ≈ 10% 失真**，而 dig84/PA17 只低 2.12 dB 却干净 19.7 dB），机制由阴性对照定死（−20 dBFS 下 81→90 给满额 +9.07 dB、THD −52.8）⇒ **是削波不是压缩器吃增益**；#67 诊断对了但**抬错了那一级** —— 数字级在 DAC 前、抬它吃余量，**响度要从 PA 出**。已落地 `patches/0015` 重写（数字上限 81→**84 单位增益**、PA 上限 17→**23**）与 `audio-route.sh`（两步写，新旧内核都对，回退分支实机验过）。⚠️★★ **新内核起不来的原因 09-11 查明，与音量无关**：照本仓配方从干净 v7.2-rc2 重建出来的内核，与在跑的 #38 之间的功能性差异被**穷尽为两项** —— `ashmem` 与 `xt_quota2`，而这两个是本仓 **Stage 3 自己从 ACK 移植、却从未入库**的（stage2-findings 8.5 节第 18/20 条），只活在构建机的树里。⇒ **先做 TODO A9（把那两份源码找回来入库），音量补丁才有得验。**详见 [#78](docs/stage4-findings.md) / [#79](docs/stage4-findings.md)。✅ 设备遗留状态已全部复原，ESP 也清过（99%→89%，剩 4 个启动项）。（每次开工时更新这一行）
 
-> ## ⚠️★★★★ 开工前先读：设备处于非默认状态（2026-09-08 夜遗留）
+> ## ⚠️★★★ 开工前先读：内核的可重建性是坏的（2026-09-11）
 >
-> **① 机器可能是黑屏/关着的。** 上机测音量补丁内核失败，需要**长按电源键
-> 强制关机再开机**。会自动回到能用的内核（`default = *-android-b.conf`，
-> `LoaderEntryOneShot` 已被 systemd-boot 消耗）。现役 `slot_b/Image` 全程
-> 没动过（sha `7ec8bf2cec625d5e`）。
+> **本仓当前编不出一个能启动的内核。** 照 [#79](docs/stage4-findings.md) 第二节的
+> 配方从干净的 v7.2-rc2 重建，产物在机器上黑屏挂死。09-11 用**两个内核镜像的
+> 全字符串差集**把差异穷尽了，只有三项：`ashmem` 驱动、`xt_quota2`、
+> 以及 0015 里的 4 个整数（后者是 `snd_soc_limit_volume()` 的上限值，
+> 物理上不可能挂住启动）。
 >
-> **② ⬜ 要复原一处**：`ESP/.../android/slot_a/recovery-ramdisk.img` 被搬到了
-> `/data/local/tmp/slot_a-recovery-ramdisk.img`（腾空间用，没删），**搬回去**。
+> ★ **前两项不是无名氏 —— 是本仓 Stage 3 自己从 ACK 移植的**
+> （`docs/stage2-findings.md` 8.5 节第 18、20 条），当年都是
+> "Android 起不来 / netd 起不来"级别的硬阻塞，**但从来没进过 `patches/`**。
+> ⇒ **TODO A9 是现在的第一优先级**，音量、相机、任何要新内核的事都堵在它后面。
 >
-> **③ ⬜ 待查**：新内核为什么起不来 —— 先看 `efi_pstore` 和
-> `LoaderEntrySelected`。产物在设备 `ESP/.../android/slot_b_audio/Image`，
-> 内核树保留在构建机 `~/gk3-kernel`（Azure VM `CICD`，已 deallocate）。
+> ⚠️★★ **这个坑 M17 踩过一次**（上游 Venus 补丁集同样只活在构建机工作区），
+> 当时只补了撞见的那一份，**没回头普查**，于是原样重演。
+> ★ **判据很便宜，该进发版收尾清单**：拿设备上正在跑的内核的 `/proc/config.gz`，
+> 与重建树的 `.config` 做 diff —— **差出来的每个符号都是一份没入库的源码**。
+> （更强的一招是两个内核镜像的全字符串差集：连没有 Kconfig 开关的源码改动都能看见。）
 >
-> **④ ⚠️★ 平时没有"可以随时启动的另一个槽"** —— super 里只有 `_b` 一套
-> 逻辑分区，所以 `android-a.conf` **此刻**不可启动。⚠️ 这是 **Virtual A/B
-> 的设计如此**（`PRODUCT_VIRTUAL_AB_OTA := true`，见 `lineage_gaokun3.mk:171`）：
-> 目标槽的分区在 OTA 时才创建，不是谁忘了灌。回滚保护在**更新窗口内**有效。
+> ⚠️ **再上机测内核时**：条目里加 `androidboot.init_fatal_panic=true
+> loglevel=7 printk.devkmsg=on`。Android init 失败走的是 `reboot()` 不是 panic，
+> **pstore 什么都抓不到** —— 这次只剩排除法就是因为没布这一道。
+>
+> ✅ **设备已回到完全默认状态**（09-11 逐项验过，全程没重启机器）：跑 `#38`、
+> slot `_b`、`slot_a/recovery-ramdisk.img` 已搬回（sha 逐字符核对）、
+> 失败内核与其条目已删。**ESP 99% → 84%（50 MB 可用，而且这是在把 15 MB 的
+> recovery-ramdisk 搬回去之后）**：清掉了 `plain72/`（s2idle 已结案）、
+> 08-31 的相机实验内核（配方已挖出存档）、`ksu-full.conf`、`android-a-dbg.conf`，
+> 以及与 `slot_b/Image` sha 完全相同的重复内核 `android/slot_b_ksu/`。
+> **现在只剩 4 个启动项**：`android-b`（现役、default）/ `android-a`（A/B 另一槽，
+> 此刻不可启动但 OTA 要用，必须留）/ `int-ubuntu`（唯一与 Android 内核解耦的
+> 回落网）/ `rescue-alpine`（内核共用 `slot_b/`，与安装器同一设计）。
+>
+> ⚠️★ **Alpine 救援的 squashfs 在 Ubuntu 救援分区上**（`p3:/gaokun3/rescue.squashfs`）
+> —— Stage 7 提的"给 Ubuntu 瘦身/换掉"要先把它挪走，否则两个救援一起废。
+>
+> ⚠️★ **平时没有"可以随时启动的另一个槽"**：super 里只有 `_b` 一套逻辑分区。
+> 这是 **Virtual A/B 的设计如此**（`PRODUCT_VIRTUAL_AB_OTA := true`，见
+> `lineage_gaokun3.mk:171`），目标槽的分区在 OTA 时才创建，不是谁忘了灌。
 > ★ 但由此得到一条真判据：**`bootctl is-slot-bootable` 读的是 misc 里的标志位，
-> 不代表 super 里真有那套分区** —— 它报 slot 0 = YES 而 `lpdump` 里一个 `_a`
-> 都没有。**要拿另一个槽当回落网之前，先用 `lpdump` 查。**
->
-> **⑤** ESP 只剩 5.7 MB（99%）。音量结论与已落地的改动见
-> `docs/stage4-findings.md` #78，本次上机失败的完整记录见 #79。
-
+> 不代表 super 里真有那套分区** —— 它报 slot 0 = YES 而 `lpdump` 里一个 `_a` 都没有。
+> **要拿另一个槽当回落网之前，先用 `lpdump` 查。**
 
 > **★★★ Stage 7 M0（2026-08-23）：轻量救援系统上机完成。**
 > Alpine 救援系统 **ssh 可达、WiFi 自动连上、分区工具齐全**
