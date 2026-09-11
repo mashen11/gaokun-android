@@ -112,6 +112,13 @@ AOSP 默认 `config_showNavigationBar=false`
 **本地测不了**：宿舍周围一个 WPA3 网络都没有（框架计数器
 `numWpa3PersonalNetworkScanResults=0`，唯一加密的 `Redmi K40S` 是 WPA2）。
 
+⬜ **顺带一条**：镜像里**没有装 `wpa_cli`**（实测 `which wpa_cli` 为空），
+于是"不刷机改一下 supplicant 参数做 A/B"这条最快的验证路子走不通 ——
+`wpa_supplicant.rc` 里明明已经开了控制接口（`-O/data/vendor/wifi/wpa/sockets`），
+只差那个客户端。**下一版 ROM 把它加进 `PRODUCT_PACKAGES`**。
+⚠️ 加之前先确认模块名（AOSP 里 `external/wpa_supplicant_8` 定义的那个），
+别凭记忆写。
+
 **第一步（二选一）**：
 * 有 WPA3 热点时，跑 `scripts/wifi/wpa3-probe.sh "<SSID>" "<密码>"` ——
   一次取齐四层证据并抓连接失败点；
