@@ -74,29 +74,49 @@ AOSP 默认 `config_showNavigationBar=false`
 
 ⬜ **只剩上机验证**：随下一版 ROM 一起生效，装好后让用户试一次边缘侧滑。
 
-### A6b. ⬜ WiFi 连不上 WPA3（用户报告，2026-09-12）
+### A6b. ⬜ WPA3(SAE) 连上即断 —— [issue #2](https://github.com/vahiru/gaokun-android/issues/2)
 
-用户报告 WPA3 网络有问题。**仓库此前零记录**，现象细节也还没采集到。
+**报告者 robbin15**（GK-W76 / BIOS 2.16 / **v0.2.0-alpha** / 安装脚本全新安装）：
+5 GHz 用 **WPA3-SAE** 或 **WPA2-PSK/WPA3-SAE 混合**时"连接秒断"，**每次都出**；
+把路由器 5G 改回 **WPA2-PSK 就正常**。路由器是 ZTE，5G 在**信道 36（5180 MHz，非 DFS）**，
+扫描里该网络带 `SAE` + `MFPC` 标志。
 
-**已在构建机上排除的一层**：`wpa_supplicant` 编译时 SAE 是**全开**的 ——
-`external/wpa_supplicant_8/wpa_supplicant/android.config` 里
-`CONFIG_SAE=y` / `CONFIG_SAE_PK=y` / `CONFIG_OWE=y` / `CONFIG_DPP=y`，
-构建出的二进制里 `SAE-EXT-KEY` / `FT-SAE` / `sae_pwe` 字符串都在。
-**所以不是"没编进去"。**
+★ **判据很干净**：同一个 5 GHz 频段、同一台路由器，只改安全模式就一正一反
+⇒ **变量是 SAE，不是频段、不是信道、不是 regulatory**。
+⚠️ 而且现象是**关联之后被踢**，不是认证失败连不上 —— 两者要分开查。
 
-★ **第一嫌疑：`sae_pwe` 没设。** WPA3-Personal 的 PWE 推导有 hunt-and-peck 与
-H2E 两种，wpa_supplicant 默认只用前者，而**要求 H2E 的 AP 会直接拒**。
-本仓 `device/huawei/gaokun3/wifi/wpa_supplicant.conf` 只有三行
-（`disable_scan_offload` / `wowlan_triggers` / `ap_scan`），**没有 `sae_pwe`**。
+**已经排除的三层（2026-09-12，都有证据，别再重查）**：
 
-⚠️ 另一层还没查：ath11k **没有**声明 `NL80211_EXT_FEATURE_SAE_OFFLOAD`。
-那本身不是问题（STA 模式的 SAE 由用户态算、走 mgmt_tx），但**没有实测证实过**
-本机这条路通不通 —— 真判据是 supplicant 自己报的 `key_mgmt` 里有没有 `SAE`。
+| 层 | 结论 | 证据 |
+|---|---|---|
+| wpa_supplicant 编译 | ✅ 没问题 | `android.config` 里 `CONFIG_SAE=y` / `SAE_PK=y` / `OWE=y` / `DPP=y`；构建出的二进制里 `SAE-EXT-KEY` / `FT-SAE` / `sae_pwe` 字符串都在 |
+| Android 框架 | ✅ 没问题 | 本机 `dumpsys wifi` 的 SupportedFeatures 含 `WIFI_FEATURE_WPA3_SAE` / `WPA3_SUITE_B` / `OWE` / `DPP` / `SAE_PK`，且有 `KeyMgmt: SAE` |
+| ath11k 拒绝 PMF 的组密钥 | ✅ **不是它** | `ath11k_install_key()` 对不支持的 cipher 返回 **`-EOPNOTSUPP`**，而那正是让 mac80211 **回落软件加密**的返回值 ⇒ BIP/IGTK 走软件是正常安排 |
 
-**第一步**：设备回来后跑 `scripts/wifi/wpa3-probe.sh`（已入库，一次取齐四层证据：
-supplicant 能力 / 框架 `isWpa3SaeSupported` / 扫描结果里的安全类型 / 连接日志）。
-带 SSID+密码参数还会实连一次并抓失败点。
-临时验证 `sae_pwe` 的办法写在脚本第 6 节，**不用刷机**。
+⚠️★ **记一次我自己的误判**：先靠 `grep -A20` 看到一串 `return -EINVAL` 就断定
+"ath11k 硬拒 `WLAN_CIPHER_SUITE_AES_CMAC` 导致 PMF 失败"，差点写成结论 ——
+**那几行 `-EINVAL` 是 `-A20` 溢出到别的函数里的**。读完整函数才看到真正的
+`default:` 分支返回 `-EOPNOTSUPP`。
+★ **看一个函数的返回值，要把函数读完，不能靠 grep 的上下文窗口。**
+
+**还没排除的候选**：
+1. ★ **`sae_pwe` 没设**。WPA3 的 PWE 推导有 hunt-and-peck 与 H2E 两种，
+   本仓 `device/huawei/gaokun3/wifi/wpa_supplicant.conf` 只有三行、**没有这一项**。
+   ⚠️ 但它通常表现为**认证阶段就失败**，与"连上即断"对不太上 —— 优先级不该排第一。
+2. ★★ **SAE 之后的 4 次握手 / 密钥安装**。这与"关联后被踢"的形状最吻合。
+   `ath11k_install_key()` 等 `install_key_done` 最多 1 秒，超时返回 `-ETIMEDOUT`。
+3. WCN6855 固件对 SAE 的行为（我们发的是 linux-firmware ≥ 20241210 那份）。
+4. ⚠️ 报告者用的是 **v0.2.0-alpha**（2026-08-21），此后内核与 ROM 都换过多轮 ——
+   **有没有可能已经变了，没人验证过。**
+
+**本地测不了**：宿舍周围一个 WPA3 网络都没有（框架计数器
+`numWpa3PersonalNetworkScanResults=0`，唯一加密的 `Redmi K40S` 是 WPA2）。
+
+**第一步（二选一）**：
+* 有 WPA3 热点时，跑 `scripts/wifi/wpa3-probe.sh "<SSID>" "<密码>"` ——
+  一次取齐四层证据并抓连接失败点；
+* 或者请报告者跑同一个脚本并贴输出（**比让他描述现象有效得多**）。
+  ⚠️ 顺带请他在**当前版本**上复测一次 —— v0.2.0-alpha 已经很旧了。
 
 ### A1. 音频与蓝牙长期运行后死锁 ⚠️ 次高优先
 用户实机报告，我未复现、未定位（[#38](stage4-findings.md)）。
