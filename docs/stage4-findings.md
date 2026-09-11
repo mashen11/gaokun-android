@@ -5408,3 +5408,65 @@ echo on > /sys/devices/platform/soc@0/ac5a000.camss/power/control
 本机这段时间里正常不会出声，所以目前无害；但如果将来有开机音效，
 它会比预期响 9 dB。⬜ 真要治，就在 0015 里同时把**默认值**也设成目标值，
 而不是只抬上限。
+
+### ⚠️ 八、又否掉一条：MMCX 父域 / 息屏（2026-09-12 上午）
+
+按"`gdsc_register()` 把控制器的 `dev->pm_domain` 设为每个 GDSC 的父域"这条机制
+（上游 `4cc47e8add63` 的提交说明原文），titan_top_gdsc 的父域是 **MMCX**。
+于是怀疑：**息屏 → MMCX 掉档 → GDSC 上不了电**。这个假说还能顺带解释
+"连着跑就成功、隔一会儿就失败"（隔一会儿正好息屏），以及我那个脚本为什么
+在 `sleep` 处被打断（息屏会断 USB adb，M16 记过）。
+
+**实测否掉**：`svc power stayon true` 强制屏幕常亮后，
+`pm_genpd_summary` 里 `mmcx` **全程 `on`、performance 恒为 416**，
+可 `titan_top_gdsc` 照样在 30 秒后变 `off-0`，第二次照样 `-110` 失败。
+
+★ 这轮还澄清了一件事：**寄存器写是生效的** —— 失败之后读到
+`SW_COLLAPSE=0`，说明驱动那一笔写进去了，只是**硬件拒绝上电**。
+⇒ 问题不在"寄存器访问不到"（那会让写也丢失），而在电源域本身。
+
+### ★★★ 九、上游找到一条高度吻合的候选修复，已编好内核但【没有启动】
+
+按 M17 的方法论去查上游（"应该已经修了"和"确认在不在"差着一次上机）：
+
+**`499b4cb6710f clk: qcom: camcc-sc8280xp: unregister CAMCC_GDSC_CLK`**
+（Brian Masney，2026-07-08，进 `qcom-clk-for-7.3`）——
+⚠️ **不在我们的基线 v7.2-rc2 里。**
+
+★ 为什么高度吻合：**上游报告的告警与我们实测到的是同一个 GDSC、同一个函数、
+同一条 WARN**：
+
+```
+上游：titan_top_gdsc status stuck at 'on'    gdsc.c:178 at gdsc_toggle_logic
+我们：titan_top_gdsc status stuck at 'off'   gdsc.c:185 at gdsc_toggle_logic
+```
+
+方向相反（上游关不掉，我们开不起来），但机制同源：**GDSC 要靠
+`CAMCC_GDSC_CLK` 才能翻转状态**。camcc 的 probe 用
+`qcom_branch_set_clk_en(regmap, 0xc1e4)` 把它设成常开，但它**同时又被注册成
+一个普通时钟**，于是 clk/pmdomain 的 sync_state 关闭"未使用时钟"时会把它关掉。
+上游的修法是**干脆不注册它**。
+
+⚠️★ **这仍然是假说，不是已证实的修复。** 本机有一条反证：
+`clk_summary` 里 `camcc_gdsc_clk` 现在显示 **hardware enable = `Y`**（还开着），
+而 `state_synced` 已经是 **1** —— 与"被 sync_state 关掉"对不上。
+**但本仓的规矩是实机为准，所以编出来测，而不是靠推理下结论。**
+
+**已做**：backport 成 `patches/0020`（进了 KPATCHES），编出内核 **`#5`**
+（15,581,696 字节，sha `8f39390e915c6f05e0a890af…`）。
+产物验收：解压后 `camcc_gdsc_clk` 字符串**出现 0 次**（确实没注册），
+而 `camcc_csiphy3_clk` / `titan_top_gdsc` / `hi846` 都在。
+
+**已放到 ESP 待命，但【故意没有设 oneshot】**：
+`android/slot_cam2/Image` + 条目 `…-cam2.conf`（共用 `slot_cam/gaokun3-no-rear.dtb`，
+带 `init_fatal_panic=true loglevel=7 panic=10` 安全阀）。
+⚠️ **新内核第一次上机要有人能按电源键** —— 用户当时不在，按纪律留给他回来再启动。
+
+**测法**（开机后照做即可，全程不用 `devmem`）：
+1. oneshot 到 `…-cam2.conf`，重启；
+2. 跑一次 `/data/local/tmp/camtest`（应出 12 帧）；
+3. 等 `pm_genpd_summary` 里 `titan_top_gdsc` 变成 `off-0`（约 10 秒）；
+4. **再跑一次** —— 这一步是判据：
+   * ✅ 成功 ⇒ 上游这条就是修复，相机内核可以考虑提升为常驻；
+   * ❌ 仍报 `stuck at 'off'` / −110 ⇒ 假说被否，回到第六节留下的
+     "比较 GDSC 寄存器全字段"那条路（**记得先钉住 camcc**）。

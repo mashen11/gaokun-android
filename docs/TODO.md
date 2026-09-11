@@ -255,9 +255,20 @@ media-controller），mesa 那套 meson→bp 工具链可复用。hi846 的完�
    同一次开机内的 A/B：钉住时连跑 5 次 + 空闲 60 秒后再跑**全部成功**，
    解钉 8 秒后立刻复现失败。⚠️ **必须在塌缩之前钉**（已塌缩后再钉会当场触发失败）。
    ⚠️ 代价是相机电源域常开，功耗未测 —— **在相机 HAL 落地之前不要写进 ROM**。
-   **下一步（查根因）**：对比"从未上电"与"塌缩之后"的 GDSCR/CFG_GDSCR 全字段；
-   查上游 `gdsc.c` / `camcc-sc8280xp.c` 有没有相关修复。
-   已排除：camcc 处于 suspend、时钟被关（`clk_summary` 141 行逐行相同）、`RETAIN_FF`。
+   ★★★ **下一步已经备好，只差启动**（[#83](stage4-findings.md) 第九节）：
+   上游 `499b4cb6710f`（`clk: qcom: camcc-sc8280xp: unregister CAMCC_GDSC_CLK`，
+   进 7.3，**不在我们的 7.2-rc2 里**）报告的是**同一个 GDSC、同一个函数、同一条 WARN**
+   （它是 stuck at `'on'`，我们是 `'off'`，方向相反但机制同源：GDSC 要靠
+   `CAMCC_GDSC_CLK` 才能翻转，而那个时钟被注册成普通时钟后会被 sync_state 关掉）。
+   已 backport 成 `patches/0020`、编出内核 `#5`（sha `8f39390e…`，产物验过
+   `camcc_gdsc_clk` 字符串已消失），**放在 ESP 的 `android/slot_cam2/` + `…-cam2.conf`，
+   故意没设 oneshot** —— 新内核第一次上机要有人能按电源键。
+   **测法**：oneshot 过去 → 跑一次 camtest（应 12 帧）→ 等 `titan_top_gdsc` 变
+   `off-0` → **再跑一次**。成功 = 假说成立；仍 −110 = 假说被否。
+   ⚠️ 这是**待验证假说**，本机有一条反证：`camcc_gdsc_clk` 现在
+   hardware enable 仍是 `Y` 而 `state_synced` 已是 1，与"被关掉"对不上。
+   已排除：camcc 处于 suspend、时钟被关（`clk_summary` 141 行逐行相同）、
+   `RETAIN_FF`、**MMCX 父域档位/息屏**（屏强制常亮时 mmcx 全程 `on/416`，照样失败）。
    ⚠️⚠️ **读那些寄存器之前先把 camcc 钉住**（`power/control=on`）并确认
    `runtime_status=active` —— 否则 `devmem` 的【读】就能让内核静默死亡，
    2026-09-12 已经这么弄挂过一次。★ 并且**用户不在场时不做这类探针**。

@@ -54,6 +54,9 @@ KPATCHES=(
     0017-netfilter-port-xt-quota2-from-ack.patch
     # 0018：前摄要工作就得去掉后摄节点（A/B 实测，#81）。只动 camera.dtsi。
     0018-arm64-dts-gaokun3-camera-drop-rear-s5k3l6.patch
+    # ⚠️ 0020 是上游 7.3 的 backport，用来验证 camss 电源域缺陷（#83）的一个
+    #    【待验证假说】—— 它与相机一起用，单独打上无害（只是少注册一个没人用的时钟）。
+    0020-clk-qcom-camcc-sc8280xp-unregister-gdsc-clk.patch
 )
 
 # ★★ 指纹判据：补丁是否【已在树里】。

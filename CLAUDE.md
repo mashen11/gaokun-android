@@ -5,59 +5,55 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M23 — ⚠️★★★ 设备停机等人按电源键（我弄挂的，见下方方框）；ROM 已构建待装。**★★★ 本轮最大的收获不是新功能，是**抢救**：准备构建 ROM 前按 M5 的规矩比了两棵设备树的清单，发现 **08-24 一整轮工作躺在构建机上从未入库**（自研真温控 HAL / 触摸模式 / HEVC CSD 合并 / ★ TODO A0 侧滑返回的根因与修法 / Vulkan 1.1→1.3），而我原计划正是**覆盖过去** —— 那会当场毁掉它们。顺手做了 M17 当年没做的全树普查：1180 个项目扫出 11 个有未提交改动，现在 **10 个可从本仓复现**（tree-fixes 新增第 8–12 条 + 通用打补丁助手）。★ 由此还查出 **`patches/0003` 从入库那天起就是坏的**（hunk 头是人话，`git apply` 永远打不上）—— 详见 [#82](docs/stage4-findings.md)。★★ 音量：**用户实听确认响度够、不爆音**，PA=21 定案；带新 `audio-route.sh` 的 ROM 已构建完成（`crDroidAndroid-16.0-20260911-…zip`，boot.img 内核 == 现役 `#3`，两条断言都过），**等设备回来装**。★★ 相机：camss 下电缺陷的模型**改对了** —— 不是「开机后只有第一次成功」，而是「**GDSC 真的塌缩过就再也上不了电**」，告警是 `titan_top_gdsc status stuck at 'off'`（[#83](docs/stage4-findings.md)）。⚠️ 查它时我把 `/dev/mem` 的**读**当成了安全操作，结果让内核静默死亡 —— 新规矩见方框。⬜ WPA3 取证脚本已入库（`scripts/wifi/wpa3-probe.sh`），等设备。（每次开工时更新这一行）
+**当前阶段：Stage 6 M23 — 三件事都推到"只差上机"：ROM 待装、相机候选修复待启动、WPA3 待环境。**★★★ 本轮最大的收获是**抢救**：构建 ROM 前按 M5 的规矩比了两棵设备树的清单，发现 **08-24 一整轮工作躺在构建机上从未入库**（自研真温控 HAL / 触摸模式 / HEVC CSD 合并 / ★ TODO A0 侧滑返回的根因与修法 / Vulkan 1.1→1.3），而我原计划正是**覆盖过去**。随后做了 M17 当年没做的全树普查：1180 个项目扫出 11 个有未提交改动，现在 **10 个可从本仓复现**；并查出 **`patches/0003` 从入库那天起就是坏的**（hunk 头是人话，`git apply` 永远打不上）。见 [#82](docs/stage4-findings.md)。★★ 音量：**用户实听确认 PA=21 响度够、不爆音**，ROM 已构建并拉到本地，两条断言都过，**等用户在场装机**。★★ 相机：camss 电源域缺陷的模型改对了（**GDSC 真的塌缩过就再也上不了电**），排除了五条（camcc suspend / 时钟被关 / RETAIN_FF / MMCX 档位 / 息屏），找到**已验证的规避**（塌缩前钉住 camss 的 runtime PM）与一条**上游候选修复**（`patches/0020`，与我们的 WARN 同一个 GDSC 同一个函数，不在 7.2-rc2 里）——内核 `#5` 已编好放上 ESP，**故意没设 oneshot**，等有人能按电源键再测。见 [#83](docs/stage4-findings.md)。⚠️★★★ 血的教训：**对时钟可能被门控的寄存器块，`/dev/mem` 的【读】和写一样危险** ——我用 devmem 读 camcc 寄存器把内核弄成静默死亡，机器停到用户醒来。规矩见方框。⬜ WPA3（issue #2）已排除三层，缺 WPA3 环境。（每次开工时更新这一行）
 
-> ## ⚠️★★★★ 开工前先读：设备是关着的，需要人长按电源键（2026-09-12 夜）
+> ## ★★★ 开工前先读：设备正常，两件事等你在场（2026-09-12 中午）
 >
-> **① 机器挂了，是我弄的。** 查 camss 电源域时我用 `devmem` **读** camcc 的
-> 寄存器（`0xad0c1bc`），而 camcc 当时处于 runtime-suspend ——
-> **寄存器块没有时钟，读就触发总线 external abort，内核静默死亡**。
-> adb 断、TCP 不通、全网段扫不到。**长按电源键约 10 秒再开机即可**，
-> `default = *-android-b.conf`，会自动回到现役内核 `#3`，盘没有任何风险。
+> ✅ **设备已恢复**（用户按了电源键），跑现役 `#3`、slot `_b`、PA=21/数字=84。
 >
-> ⚠️★★★ **新规矩（本仓早有同形状的记录，我没推广）**：
-> **对一个【时钟/电源可能被门控】的寄存器块，`/dev/mem` 的【读】和写一样危险。**
-> Stage 5 记过 `smmu-nostall.sh` 扫未实现的 context bank → external abort →
-> 内核静默死亡；那条规律适用于**所有**可能未上电的寄存器块，不只是 SMMU。
-> 非读不可时先把它的控制器钉住（`echo on > .../power/control`）。
-> ★ 并且要与「**现在有没有人能按电源键**」绑定 —— 没人能按时，这类探针一概不做。
+> **① ⬜ ROM 已构建并拉到本地，等装。**
+> `crDroidAndroid-16.0-20260911-gaokun3-v12.11.zip`（1.25 GB，构建戳 `1789140755`，
+> sha `4bfd7e3e…`）。两条断言都过（boot.img 的 kernel == 现役 `#3` 逐字节相同、
+> 只有一个 FDT），内容已核（新 `audio-route.sh`/温控 HAL/触摸模式/HEVC 都在镜像里）。
+> ⚠️ 装之前 `adb enable-verity` + 重启（`update_engine` 拒绝在 overlayfs 生效时工作）。
+> ⚠️★ 装机时那颗地雷：`update_engine` 标记新槽 active 后，**boot_control HAL 会立刻
+> 把 `default` 改成新槽** —— 重启前必须把 `default` 掰回已知可用的槽，只用 oneshot 过去。
+> ⚠️ 用户 2026-09-12 明确说"不在机器旁边，先别装"，**装之前要重新确认他在场**。
 >
-> **② ⬜ ROM 已构建好，等装。** 在构建机
-> `~/crdroid/out/target/product/gaokun3/crDroidAndroid-16.0-20260911-gaokun3-v12.11.zip`
-> （1.3 GB，构建戳 `1789140755`）。两条断言都过：boot.img 里的 kernel 与
-> `prebuilt-boot/vmlinuz.efi` 逐字节相同（`15ca6789…` = 现役 `#3`）、只有一个 FDT。
-> 内容已核：新 `audio-route.sh`（12690 字节，PA_TARGET=21）、温控 HAL（324 KB）、
-> 触摸模式、HEVC 条目都在镜像里。
-> ⚠️ 装之前要 `adb enable-verity` + 重启（`update_engine` 拒绝在 overlayfs 生效时工作），
-> 那会连带抹掉现在用 overlay 推上去的 `audio-route.sh` —— 正好由 ROM 接手。
-> ⚠️★ **顺带修掉一处我自己造成的漂移**：09-11 把 `#3` 提升为常驻时**忘了同步
-> ROM 的预编译内核**，`prebuilt-boot/vmlinuz.efi` 还停在老的 `#38`。
-> 那样发出去 PA 上限还是 17 ⇒ 用户刚确认的 +6 dB 当场丢失。已换成设备上在跑的那个二进制。
+> **② ⬜ 相机内核 `#5` 已编好放在 ESP 上，【故意没设 oneshot】。**
+> 它带上游 backport `patches/0020`（`unregister CAMCC_GDSC_CLK`）——
+> 上游那条报告的是**同一个 GDSC、同一个函数、同一条 WARN**，很可能就是
+> camss 电源域缺陷的修复，但**是假说不是结论**（本机有一条反证，见
+> [#83](docs/stage4-findings.md) 第九节）。
+> 产物在 `android/slot_cam2/Image`（sha `8f39390e…`），条目 `…-cam2.conf`。
+> **测法**：oneshot 过去 → 跑一次 `camtest`（应 12 帧）→ 等 `titan_top_gdsc` 变
+> `off-0` → 再跑一次。成功 = 修好了；仍 −110 = 假说被否。
+> ⚠️ **新内核第一次上机要有人能按电源键。**
 >
-> **③ ★★★ 抢救：08-24 一整轮工作从未入库**（[#82](docs/stage4-findings.md)）。
-> 构建机上有 6 个源码文件本地根本没有，而它的 `device.mk` 正引用着 ——
-> 自研**真温控 HAL**（`Thermal.cpp` 15 KB，连 SHUTDOWN 阈值一起改了；M4 预告过
-> 「只换 HAL 不改阈值 = 开机几分钟自动关机」）、触摸模式、
-> ★ **TODO A0 侧滑返回失效的根因与修法**（这台机器从来没有过导航栏，
-> 而手势返回处理器随 NavigationBar 创建 ⇒ 物理上不存在；修法 `config_showNavigationBar=true`）、
-> HEVC CSD 合并、Vulkan 1.1→1.3。**我原计划是把本地树覆盖过去，那会毁掉全部。**
-> ⇒ **M5 那条「先比两棵设备树的清单再传」今天第二次救场。**
-> ★ 全树普查后 11 个项目里 10 个现在可从本仓复现；`patches/` 终于有了 AOSP 侧消费者
-> （`crdroid-tree-fixes.py` 的 `apply_patch_file()`）。
-> ⚠️ 未编码的一处：`prebuilts/build-tools` 删了 6 个 `date`/`tar`，理由不明，只记录。
+> **③ ⬜ WPA3（[issue #2](https://github.com/vahiru/gaokun-android/issues/2)）本地测不了。**
+> 判据很干净：同一台 ZTE 路由器、同一个 5 GHz 信道 36，只改安全模式就一正一反
+> ⇒ 变量是 SAE；而且是**关联之后被踢**，不是认证失败。
+> 已排除三层（supplicant 编译、Android 框架 feature set、ath11k 的 cipher 处理），
+> 见 TODO A6b。⚠️ 周围零个 WPA3 网络（框架计数器证实它从没见过），
+> **要么用户提供 WPA3 热点，要么请报告者跑 `scripts/wifi/wpa3-probe.sh`**。
+> ⬜ 给报告者的回复**还没发** —— 发到 GitHub 是对外动作，等用户点头。
 >
-> **④ 相机**：V4L2 层已通（[#81](docs/stage4-findings.md)），但 camss 电源域缺陷未解
-> ⇒ 相机内核**没有提升为常驻**，设备仍跑 `#3`。测试条目 `…-cam.conf` 与
-> `android/slot_cam/` 留在 ESP 上。模型已更正见 [#83](docs/stage4-findings.md)：
-> **GDSC 真的塌缩过就再也上不了电**（连着跑不会失败，因为它来不及塌缩）。
+> ⚠️★★★ **一条用血换的规矩**：**对【时钟/电源可能被门控】的寄存器块，
+> `/dev/mem` 的【读】和写一样危险。** 2026-09-12 我用 `devmem` 读 camcc 的
+> 寄存器（当时 camcc runtime-suspend），触发总线 external abort、内核静默死亡，
+> 机器停到用户醒来。Stage 5 的 `smmu-nostall.sh` 记过同形状，我没推广。
+> 非读不可时先钉住控制器（`echo on > .../power/control`）并确认 `runtime_status=active`；
+> ★ **并且要看"此刻有没有人能按电源键"—— 没人能按时，这类探针一概不做。**
 >
-> **⑤ 音量已定案**：用户实听确认 PA=21 响度够、不爆音。设备上现在是用
-> **overlay** 推的脚本（重启保留，刷 super 会没），正式化靠上面那版 ROM。
+> ★★ **相机已有可用的规避**（根因未破时的桥）：**在第一次塌缩之前**
+> `echo on > /sys/devices/platform/soc@0/ac5a000.camss/power/control` ——
+> GDSC 永不掉电，实测钉住时连跑 5 次 + 空闲 60 秒后再跑全部成功，解钉 8 秒后立刻复现失败。
+> ⚠️ 必须在塌缩**之前**钉（已塌缩后再钉会当场触发失败并锁死 `runtime_error`）。
+> ⚠️ 代价是相机电源域常开、功耗未测，**相机 HAL 落地前不要写进 ROM**。
 >
 > ⚠️★ **平时没有「可以随时启动的另一个槽」**：super 里只有 `_b` 一套逻辑分区，
-> 这是 **Virtual A/B 的设计如此**（`PRODUCT_VIRTUAL_AB_OTA := true`）。
-> ★ 真判据：**`bootctl is-slot-bootable` 读的是 misc 里的标志位，不代表 super 里
-> 真有那套分区** —— 要拿另一个槽当回落网之前，先用 `lpdump` 查。
+> 这是 **Virtual A/B 的设计如此**。★ 真判据：**`bootctl is-slot-bootable` 读的是
+> misc 里的标志位，不代表 super 里真有那套分区** —— 先用 `lpdump` 查。
 >
 > ⚠️★ **Alpine 救援的 squashfs 在 Ubuntu 救援分区上**（`p3:/gaokun3/rescue.squashfs`）
 > —— Stage 7 提的「给 Ubuntu 瘦身/换掉」要先把它挪走，否则两个救援一起废。
