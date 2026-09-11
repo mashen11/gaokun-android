@@ -5351,3 +5351,60 @@ qcom-camss ac5a000.camss: Failed to power up pipeline: -110
    ⚠️ 读之前先 `power/control=on` 钉住 camcc，否则重演第三节那次停机。
 2. 查上游 `linux-next` / stable 里 `gdsc.c` 与 `camcc-sc8280xp.c` 的改动。
 3. 这条不修完，相机内核**不能提升为常驻** —— 见 TODO A7。
+
+### ★★★ 五、找到一个已验证的规避手段（2026-09-12 续）
+
+根因仍未查明，但**相机现在可用了**：**在第一次塌缩之前**把 camss 的 runtime PM
+钉住，GDSC 就永不掉电，于是那条失败路径根本走不到。
+
+```
+echo on > /sys/devices/platform/soc@0/ac5a000.camss/power/control
+```
+
+**同一次开机内的单变量 A/B**：
+
+| 条件 | `titan_top_gdsc` | camss genpd | 抓帧 |
+|---|---|---|---|
+| 钉住，连跑 5 次（间隔 6 秒）| `on` 全程 | `active` | ✅ 5/5，每次 12 帧 |
+| 钉住，空闲 **60 秒**后再跑 | `on` | `active` | ✅ 12 帧 |
+| **解钉** 8 秒后再跑 | `off-0` | `suspended` | ❌ `stuck at 'off'` / −110 |
+
+⚠️★ **必须在第一次塌缩之前钉** —— 已经塌缩之后再写 `power/control=on`，
+`pm_runtime_forbid()` 会立刻触发一次 resume，**当场撞上同一个失败并把
+`runtime_error` 锁死**。实测过：写完 `on` 之后 status 直接变 `error`。
+⇒ 正确时机是**开机后、任何相机活动之前**。
+
+### ⚠️ 六、又排除两条，以及为什么没接着往下查
+
+本轮用**只读 sysfs**（不碰 `/dev/mem`）又排除了两个候选：
+
+* **camcc 处于 runtime-suspend** —— ❌ 不是它。把 camcc 钉成 `active` 后，
+  同样的"塌缩→再跑"仍然 3/3 失败。
+* **某个时钟被关掉了** —— ❌ 不是它。对比"从未上电"与"用过并塌缩后"的
+  `clk_summary`（141 行 camcc/gcc_camera 相关时钟），**逐行完全相同**。
+* 加上此前排除的 `RETAIN_FF_ENABLE`（两种状态下都是 1），
+  **框架层能看见的东西已经查完了**。
+
+⇒ 剩下的只能比较 **GDSC 寄存器本身**在两种状态下的全字段差异，
+而那要 `devmem` 读 camcc 的寄存器块。
+⚠️ **本轮没有做** —— 因为用户当时不在机器旁，而本条第三节刚记过：
+这类探针会让内核静默死亡。规矩就是规矩，哪怕这次有"先钉住 camcc"的缓解办法。
+★ **下次做的时候：先 `echo on > .../ad00000.clock-controller/power/control`
+并确认 `runtime_status=active`，再读 `0xad0c1bc`（GDSCR）与 `0xad0c1c0`（CFG_GDSCR），
+在"从未上电"与"塌缩之后"两个时刻各取一次。**
+
+### ⚠️ 七、顺带记一条小事实：开机早期那 20 秒 PA 是 23 而不是 21
+
+2026-09-12 重启后**第 2 秒**读混音器，`SpkrLeft PA Volume` = **23**；
+等 `audio-route.sh` 在**第 23 秒**跑完，才变成预期的 21
+（日志 `扬声器路由已应用（… PA=21 …）`，脚本 sha 与本仓一致）。
+
+**最可能的解释**（推断，未逐项验证）：`snd_soc_limit_volume()` 只设 `platform_max`
+并把**超出上限的当前值往下钳**。wsa883x 的寄存器默认 PA 增益高于上限，于是
+开机时被钳到上限本身 —— `patches/0015` 把上限从 17 抬到 23 之后，
+这个"默认值"也就跟着从 0 dB 变成了 **+9 dB**。
+
+⇒ 后果：**从编解码器初始化到 `audio-route.sh` 跑完之间约 20 秒，PA 停在 +9 dB**。
+本机这段时间里正常不会出声，所以目前无害；但如果将来有开机音效，
+它会比预期响 9 dB。⬜ 真要治，就在 0015 里同时把**默认值**也设成目标值，
+而不是只抬上限。

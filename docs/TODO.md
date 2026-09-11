@@ -249,10 +249,18 @@ media-controller），mesa 那套 meson→bp 工具链可复用。hi846 的完�
    ⚠️ 原先记的"开机后只有第一次成功"是**错的模型**，已更正。
    已排除：camcc 处于 runtime-suspend（钉成 active 照样 3/3 失败）、
    `RETAIN_FF_ENABLE` 位（两种状态下都是 1）。
-   **下一步**：对比"从未上电"与"塌缩之后"的 GDSCR/CFG_GDSCR 全字段；
+   ★★ **已有验证过的规避手段**（[#83](stage4-findings.md) 第五节）：
+   **在第一次塌缩之前**把 camss 的 runtime PM 钉住 ——
+   `echo on > /sys/devices/platform/soc@0/ac5a000.camss/power/control`。
+   同一次开机内的 A/B：钉住时连跑 5 次 + 空闲 60 秒后再跑**全部成功**，
+   解钉 8 秒后立刻复现失败。⚠️ **必须在塌缩之前钉**（已塌缩后再钉会当场触发失败）。
+   ⚠️ 代价是相机电源域常开，功耗未测 —— **在相机 HAL 落地之前不要写进 ROM**。
+   **下一步（查根因）**：对比"从未上电"与"塌缩之后"的 GDSCR/CFG_GDSCR 全字段；
    查上游 `gdsc.c` / `camcc-sc8280xp.c` 有没有相关修复。
-   ⚠️⚠️ **读那些寄存器之前先把 camcc 钉住**（`power/control=on`）——
-   否则 `devmem` 的【读】就能让内核静默死亡，2026-09-12 已经这么弄挂过一次。
+   已排除：camcc 处于 suspend、时钟被关（`clk_summary` 141 行逐行相同）、`RETAIN_FF`。
+   ⚠️⚠️ **读那些寄存器之前先把 camcc 钉住**（`power/control=on`）并确认
+   `runtime_status=active` —— 否则 `devmem` 的【读】就能让内核静默死亡，
+   2026-09-12 已经这么弄挂过一次。★ 并且**用户不在场时不做这类探针**。
 2. ⚠️★★ **camss 抢走 video0–31，Venus 被挤到 video32/33**，而 `v4l2_codec2` 只扫 0–9
    ⇒ 硬解静默回落软解。`crdroid-tree-fixes.py` 第 7 条已修（上界 10→64），
    **必须随相机一起进 ROM**。相机内核因此**没有提升为常驻**，设备仍跑 `#3`。
