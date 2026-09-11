@@ -37,7 +37,7 @@ crDroid 在 system/core/init/property_service.cpp 里加了 SetSafetyNetProps()�
 
 我们本来就不追求 Play Integrity（这是台开发机），关掉没有副作用。
 """
-import io, re, sys, pathlib
+import io, re, sys, pathlib, subprocess
 
 def patch_spoof_safetynet(tree: pathlib.Path) -> str:
     p = tree / "system/core/init/Android.bp"
@@ -404,6 +404,72 @@ def patch_disable_desktop_mode(tree: pathlib.Path) -> str:
     return "已把 crDroid 的 config_isDesktopModeSupported 改成 false"
 
 
+def apply_patch_file(tree: pathlib.Path, project: str, patch_name: str) -> str:
+    """把 <repo>/patches/<patch_name> 用 git apply 打进 AOSP 树的 <project>（幂等）。
+
+    ★ 为什么要有这个助手：本仓 `patches/` 里的 **AOSP 侧**补丁（0003 glslang、
+    0010 audio HAL、0019 v4l2_codec2）**一直没有任何消费者** —— 全靠人手动
+    `git apply`。而本仓已经为"没有消费者的配置一定会漂"付过三次账
+    （M13 的 BOARD_KERNEL_CMDLINE、M17 的上游 Venus 补丁集、以及 2026-09-12
+    抢救回来的那一整批 08-24 工作）。内核那边有 kernel-apply-patches.sh，
+    AOSP 这边的消费者就是本脚本。
+
+    幂等判据用 `git apply --check -R`（反向能打上 = 已经在树里了）。
+    ⚠️ 与 kernel-apply-patches.sh 不同，这里**不接受 fuzz** —— AOSP 树是
+    repo sync 出来的干净树，打不上就是上游动了，应当大声报错而不是模糊匹配。
+    """
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    patch = repo / "patches" / patch_name
+    if not patch.exists():
+        return f"⚠️ 找不到补丁 {patch}"
+    proj = tree / project
+    if not (proj / ".git").exists():
+        return f"跳过（{project} 不是 git 仓库或不存在）"
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(proj), *args],
+                              capture_output=True, text=True)
+
+    if git("apply", "--check", "-R", str(patch)).returncode == 0:
+        return "已打过（幂等，无需改动）"
+    chk = git("apply", "--check", str(patch))
+    if chk.returncode != 0:
+        return "✗ 打不上（既不是已应用、也不干净）：" + chk.stderr.strip().splitlines()[0] if chk.stderr.strip() else "✗ 打不上"
+    r = git("apply", str(patch))
+    if r.returncode != 0:
+        return "✗ 应用失败：" + (r.stderr.strip().splitlines()[0] if r.stderr.strip() else "?")
+    return f"已应用 {patch_name}"
+
+
+def patch_connected_displays_flag(tree: pathlib.Path) -> str:
+    """—— 修补 11：关掉 status_bar_connected_displays 这个 aconfig flag ——
+
+    ⚠️★ **这条的立项理由从来没有被记录下来。** 它是 2026-09-12 从构建机上
+    抢救回来的一处未提交改动（`build/release` 项目），当时那一轮（08-24）
+    的案卷没写。本条注释是现存的全部说明。
+
+    已知的事实（不是推测）：
+      * flag 名 `com.android.systemui.shared/status_bar_connected_displays`，
+        构建机把 `state: ENABLED` 改成了 `DISABLED`。
+      * 本机的 USB-C 外接显示**一直不工作**（UCSI 有缺陷，`/sys/class/typec/`
+        为空，见 TODO A6）。一个"连接外部显示器时改变状态栏行为"的功能，
+        在没有可用外接显示的机器上打开，合理推测是有害无益的。
+    ⚠️ 但**"合理推测"不是证据** —— 如果将来 A6 修好了外接显示，
+    应当先把这条去掉再验一次，别让它变成又一条没人敢动的祖传配置。
+    """
+    p = (tree / "build/release/aconfig/bp4a/com.android.systemui.shared"
+              / "status_bar_connected_displays_flag_values.textproto")
+    if not p.exists():
+        return f"跳过（找不到 {p.name}）"
+    s = io.open(p, encoding="utf-8").read()
+    if "state: DISABLED" in s:
+        return "已是 DISABLED（幂等，无需改动）"
+    if "state: ENABLED" not in s:
+        return "⚠️ 既不是 ENABLED 也不是 DISABLED，上游可能改了格式"
+    io.open(p, "w", encoding="utf-8").write(s.replace("state: ENABLED", "state: DISABLED", 1))
+    return "ENABLED -> DISABLED"
+
+
 def main():
     tree = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path.home() / "crdroid").expanduser()
     if not (tree / "build/envsetup.sh").exists():
@@ -416,6 +482,19 @@ def main():
     print("  [5] v4l2_codec2 初始输出队列: " + patch_v4l2_initial_output(tree))
     print("  [6] 关闭桌面窗口模式: " + patch_disable_desktop_mode(tree))
     print("  [7] v4l2_codec2 设备扫描范围: " + patch_v4l2_device_scan_range(tree))
+    print("  [8] v4l2_codec2 HEVC CSD 合并: " + apply_patch_file(
+        tree, "external/v4l2_codec2",
+        "0019-v4l2-codec2-merge-hevc-csd-into-first-frame.patch"))
+    print("  [9] glslang host 端 glslangValidator: " + apply_patch_file(
+        tree, "external/deqp-deps/glslang",
+        "0003-aosp-glslang-add-host-glslangValidator-binary.patch"))
+    print(" [10] tinyalsa sw_params 取自 refined hw_params: " + apply_patch_file(
+        tree, "external/tinyalsa_new",
+        "0008-tinyalsa-derive-sw-params-from-refined-hw-params.patch"))
+    print(" [11] 关掉 connected-displays flag: " + patch_connected_displays_flag(tree))
+    print(" [12] audio AIDL primary 接受外部设备连接: " + apply_patch_file(
+        tree, "hardware/interfaces",
+        "0010-audio-aidl-primary-accept-external-device-connect.patch"))
 
 if __name__ == "__main__":
     main()

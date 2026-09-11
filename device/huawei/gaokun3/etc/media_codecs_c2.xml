@@ -48,6 +48,15 @@
             <Feature name="adaptive-playback" />
         </MediaCodec>
 
+        <!-- HEVC：2026-08-23 之前这一条是撤掉的（组件能建会话但一帧不出）。
+             根因已查明并修复在【用户态】：venus 固件收到「只有 VPS/SPS/PPS、
+             又没打 CODECCONFIG 标志」的缓冲会报 H265_CONFIG_FLAG_MISSING，
+             用默认 SPS 编造一张 pic 0，那张图要 YUV 输出缓冲，而主机在等
+             SOURCE_CHANGE 才肯分配 —— 死锁。修法是让 v4l2_codec2 把 CSD 并进
+             第一个帧缓冲（external/v4l2_codec2，属性 vendor.gaokun3.v4l2c2.merge_csd
+             可关掉做 A/B）。完整案卷 docs/stage4-findings.md #79。
+             ⚠️ 若这一版实测仍不出帧，把本条 MediaCodec 整段删掉再发版：
+                留着的话 rank 压过软解，应用拿到的是失败而不是回退。 -->
         <MediaCodec name="c2.v4l2.hevc.decoder" type="video/hevc">
             <Limit name="size" min="128x128" max="4096x2176" />
             <Limit name="alignment" value="2x2" />

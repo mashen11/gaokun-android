@@ -5125,3 +5125,140 @@ PN9 / Gradient H / Gradient V / Check Board / Slant / Resolution）、
 * 相机内核（`#4`，含 camss）**没有提升为常驻** —— 就是因为上面那条。
   设备回到 `#3`；测试条目 `…-cam.conf` 与 `android/slot_cam/`（内核 + 去掉后摄的 dtb，
   15.7 MB）**留在 ESP 上**供继续实验，ESP 89% / 35 MB 可用。
+
+---
+
+## #82 ★★★★★ 一整轮工作躺在构建机上从未入库 —— 而且是差点被我自己覆盖掉才发现的（2026-09-12）
+
+用户确认 PA=21 不爆音之后，**准备构建一版带新 `audio-route.sh` 的 ROM**。
+动手前按 M5 立下的规矩做了一次"**先比两棵设备树的清单再传**"。
+**那一步救了这次。**
+
+### ★★★ 一、方向是反的：我原打算覆盖的那一侧，才是新的
+
+本地设备树 101 个文件、构建机 166 个。差集里除了合理忽略的东西
+（`firmware/**`、`adb_keys`、`hexagonrpcd-root/**`、`prebuilt-boot/**` ——
+`.gitignore` 里逐条声明过），**还有 6 个源码文件本地根本没有**，
+而构建机的 `device.mk` **正引用着它们**：
+
+| 只在构建机上的东西 | 是什么 |
+|---|---|
+| `thermal/`（4 个文件，`Thermal.cpp` 15 KB）| **自研真温控 HAL**，替掉 AOSP mock |
+| `bin/gaokun3-touch-mode.sh` + `etc/touchmode.rc` | 触摸模式 |
+
+⚠️★★ **如果我按原计划把本地设备树整棵覆盖过去，会当场毁掉那个温控 HAL。**
+而它恰恰是 M4 明确预告过的地雷：mock 报的 skin/battery **SHUTDOWN 阈值只有
+36.0 °C**，而本机温区**空载就 36–37 °C** —— `ThermalManagerService`
+一到 SHUTDOWN 就 `powerManager.shutdown()`。
+**只换 HAL 不改阈值 = 开机几分钟自动关机。** 那份 HAL 连阈值一起改了，
+`device.mk` 里也写清了"排除 mock 只能靠不装那个 APEX，因为
+`overrides:` 管不到 APEX 打包件、`PRODUCT_PACKAGES` 只能加不能减"。
+
+另外 4 个两边都有但内容不同的文件，**也全部是构建机更新**：
+
+* `etc/media_codecs_c2.xml` —— HEVC 条目重新启用（见第三节）
+* `overlay/…/config.xml` —— `config_showNavigationBar=true`，
+  ★**那是 TODO A0「侧滑返回失效」的根因与修法**，证据链完整
+  （`dumpsys window` 里**只有 StatusBar 没有 NavigationBar**、
+  `hasNavigationBar=false`、`mandatorySystemGestures` 只有顶部一条、
+  `mSystemGestureExclusion` 是空的）。结论是：**这台机器从来没有过导航栏，
+  而手势返回的处理器是随 NavigationBar 组件创建的** ⇒ 物理上就不存在。
+  ⚠️ 而仓库里的 A0 到今天还写着"假说未证实、怀疑是桌面模式"——
+  **那个假说是错的，答案早就有了，只是没人写下来。**
+* `sepolicy/file_contexts` —— 给温控 HAL 的可执行文件打标签
+* `device.mk` —— 上述全部的接线 + ★**Vulkan 1.1 → 1.3**
+  （依据是 turnip 自己的代码 `tu_device.cc:1190`，不是估计）
+
+★ **判据说明**：本地 `device.mk` 自 2026-08-23 起**一次都没改过**
+（`git log` 确认），所以"构建机更严格地新"是查出来的，不是感觉。
+逐行核过，本地独有的非注释行只有 3 条，且都是被新版**替换掉**的旧内容
+（mock thermal 那一行、以及被 Vulkan 1.3 取代的 1.1 权限行）。
+
+### ★★ 二、时间线：08-24 那一轮的产出整个没进 git
+
+`git log` 上，08-23 的 `2f2b903`（安装器搁置）之后直接跳到 09-08。
+**中间 08-24 那一整轮工作 —— 温控 HAL、触摸模式、HEVC 解码、导航栏、Vulkan 1.3
+—— 一个字都没提交。** 然后 09-08 起换了话题（音量），谁也没回头看。
+
+⇒ 这是本仓第 **4** 次同形状的事故（#79/#80 的 ashmem + xt_quota2、
+M17 的上游 Venus 补丁集、`patches/camera-wip` 的相机驱动，现在是这一批）。
+★ 前三次都是"某个文件忘了入库"，**这次是"一整个工作会话忘了入库"**。
+
+### ★★★ 三、顺手做了全树普查 —— M17 当年没做的那一步
+
+不再只查撞见的那一份。扫了整棵 crDroid 树（1180 个项目）里**所有**
+有未提交改动的项目，**结果 11 个**：
+
+| 项目 | 改了什么 | 现在由谁复现 |
+|---|---|---|
+| `device/huawei/gaokun3` | 见上 | ✅ 已入库 |
+| `external/v4l2_codec2` | 4 个文件 | ✅ tree-fixes 3/5/7 + **新增 8** |
+| `external/hexagonrpc` | hexagonfs CR 截断 | ✅ tree-fixes 2 |
+| `system/core` | SPOOF_SAFETYNET | ✅ tree-fixes 1 |
+| `vendor/gapps` | 4 个文件 | ✅ tree-fixes 4 |
+| `vendor/lineage` | `config_isDesktopModeSupported` | ✅ tree-fixes 6 |
+| `external/tinyalsa_new` | `src/pcm.c` | ✅ **新增 10**（`patches/0008` 此前无消费者）|
+| `external/deqp-deps/glslang` | `Android.bp` | ✅ **新增 9**（`patches/0003` 重做，见下）|
+| `build/release` | 一个 aconfig flag | ✅ **新增 11** |
+| `hardware/interfaces` | audio AIDL primary | ✅ **新增 12**（`patches/0010` 此前无消费者）|
+| `external/mesa3d` | mesa 26 全树 | 归档 `~/keep/mesa3d-patched.tar.zst`（82 MB，已确认还在）+ mesa 那几个脚本 |
+| `prebuilts/build-tools` | **删了** 6 个 `date`/`tar` 预编译 | ❌ **故意不编码**，见第五节 |
+
+**★★ 其中最值钱的一处：`external/v4l2_codec2` 的 HEVC CSD 合并**（100+ 行）。
+venus 固件收到"只有 VPS/SPS/PPS、又没打 CODECCONFIG 标志"的缓冲会报
+`H265_CONFIG_FLAG_MISSING`，用默认 SPS 编造一张 pic 0，那张图要 YUV 输出缓冲，
+而主机在等 SOURCE_CHANGE 才肯分配 —— **死锁，一帧不出**。
+修法是把 CSD 并进第一个帧缓冲。代码注释里记着三个"报错完全看不出真因"的坑：
+必须 **dmabuf 支撑**的块（本机无 ION，`BASIC_LINEAR` 拿到的块没有可用 fd）、
+分配尺寸必须 **≥ V4L2 输入队列的 plane 尺寸**（实测 8 MiB，否则 QBUF 直接 EINVAL）、
+**写视图必须在 `share()` 之前析构**（否则 QBUF 报 EFAULT）。
+已入库 `patches/0019`。
+
+### ★★★ 四、更难看的一条：`patches/0003` 从入库那天起就是坏的
+
+给 glslang 那个补丁做消费者时，`git apply --check -R` 报
+**`corrupt patch at line 47`**。去看文件 —— 它的 hunk 头写的是**人话**：
+
+```
+--- a/Android.bp
++++ b/Android.bp
+@@ -- append at end of file --
+```
+
+那不是 unified diff，`git apply` 永远打不上。而且内容还**比构建机树里旧**
+（树里多了一个 `gaokun_glslang_glsl_intrinsic_header` genrule）。
+
+⇒ ★★ **"没有消费者的配置一定会漂"这条要加强**：
+**没有消费者的补丁，不只是会漂 —— 它可以从一开始就是坏的，而没有任何人会发现。**
+0003 入库以来**从未被执行过一次**，所以"它能不能用"这个问题从来没被问过。
+（M13 记的是 `BOARD_KERNEL_CMDLINE` 漂了，那还算"曾经对过"；这个是**从未对过**。）
+
+⇒ 修法：`crdroid-tree-fixes.py` 新增一个**通用的打补丁助手** `apply_patch_file()`，
+让 `patches/` 里的 AOSP 侧补丁终于有了消费者（幂等判据用 `git apply --check -R`）。
+⚠️ 与 `kernel-apply-patches.sh` 不同，**这里不接受 fuzz** —— AOSP 树是
+repo sync 出来的干净树，打不上就是上游动了，应当大声报错。
+
+### ⚠️ 五、唯一没编码的一处，以及为什么
+
+`prebuilts/build-tools` 里 6 个文件被**删掉**了
+（`date`、`tar` × darwin-x86 / linux-arm64 / linux-x86）。
+**全仓零记录，理由不明。**
+
+**决定：只记录、不编码。** 理由是本仓一贯的"静默 vs 大声"判据 ——
+把"删预编译工具"写进自动化脚本，是个看不出对错的动作；而如果它其实是必需的，
+下一次干净树构建会**在构建期大声失败**，那时这条记录会直接给出答案。
+反过来，如果我编码了一个其实不必要的删除，那是个永远不会暴露的错误。
+⬜ 下次干净树构建时留意：若 `tar`/`date` 相关报错出现，就是它。
+
+### ★ 六、这次的规矩
+
+1. **动构建机的树之前，先比清单。** M5 立的这条规矩今天第二次救场
+   （第一次是 08-19 差点用 tar 抹掉不入库的华为固件）。
+2. ★ **"抢救"要做全树普查，不是只捞撞见的那一份。** M17 当年只补了
+   Venus 那一份就收工，于是 ashmem/xt_quota2 又躺了三周并害得一次上机失败。
+   这次扫完 11 个项目才算完。
+3. ★ **每个补丁都要有消费者，而且要被真的执行过一次** —— 否则"它能用吗"
+   这个问题不会被问。`patches/` 现在两个消费者：内核侧
+   `kernel-apply-patches.sh`、AOSP 侧 `crdroid-tree-fixes.py`。
+4. ⬜ **仍然没有自动化的防线**：构建机的树不是 git checkout，下次照样会漂。
+   真正的解法是让构建机的设备树就是本仓的 checkout（TODO B 待办）。

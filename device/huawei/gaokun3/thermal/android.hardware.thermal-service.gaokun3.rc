@@ -1,0 +1,6 @@
+# 温控 HAL。跑 system:system —— 它只读 /sys/class/thermal，不写任何东西
+# （cooling device 的调节归内核 thermal core，用户态再插手就是打架，见 M7/M8）。
+service vendor.thermal-gaokun3 /vendor/bin/hw/android.hardware.thermal-service.gaokun3
+    class hal
+    user system
+    group system

@@ -53,6 +53,7 @@
 /vendor/bin/hw/android\.hardware\.sensors-service\.gaokun3   u:object_r:hal_sensors_default_exec:s0
 /vendor/bin/hw/android\.hardware\.light-service\.gaokun3     u:object_r:hal_light_default_exec:s0
 /vendor/bin/hw/android\.hardware\.boot-service\.gaokun3      u:object_r:hal_bootctl_default_exec:s0
+/vendor/bin/hw/android\.hardware\.thermal-service\.gaokun3   u:object_r:hal_thermal_default_exec:s0
 
 # ── 我们自己的服务脚本：各给一个域 ───────────────────────────────────────
 #

@@ -81,14 +81,20 @@ PRODUCT_PACKAGES += \
 PRODUCT_PACKAGES += \
     com.android.hardware.audio
 
-# thermal HAL 同样是 installable:false 的 APEX 打包件：
-#   hardware/interfaces/thermal/aidl/default/Android.bp 的 cc_binary
-#   android.hardware.thermal-service.example 带 installable: false，
-#   binary 只出现在 apex "com.android.hardware.thermal" 里。
-# 2026-08-19 实测：直接列 binary 名会让 kati 报
-#   "includes non-existent modules in PRODUCT_PACKAGES" 并中止构建。
+# ═══ 温控 HAL：2026-08-24 换成自研的真 HAL ═══
+# 原先装的是 AOSP mock（apex com.android.hardware.thermal，里面那个
+# android.hardware.thermal-service.example 是 installable:false 的，
+# 所以当年只能列 APEX 名 —— 直接列 binary 名 kati 会报
+# "includes non-existent modules in PRODUCT_PACKAGES" 并中止构建）。
+#
+# ⚠️★★ 换掉它是【有危险】的一步，务必连阈值一起改：mock 报的 skin/battery
+#   SHUTDOWN 阈值只有 36.0 °C，而 ThermalManagerService.shutdownIfNeeded()
+#   一到 SHUTDOWN 就 powerManager.shutdown()。本机温区【空载就 36–37 °C】——
+#   只换 HAL 不改阈值 = 开机几分钟自动关机。新阈值与理由见 thermal/Thermal.cpp。
+# ★ 排除 mock 的办法只能是【不装那个 APEX】：overrides: 管不到 APEX 打包件，
+#   而 PRODUCT_PACKAGES 只能加不能减 —— 所以这里是把那一行整个换掉。
 PRODUCT_PACKAGES += \
-    com.android.hardware.thermal
+    android.hardware.thermal-service.gaokun3
 
 # effects HAL 启动即退（"config file audio_effects_config.xml not found"，
 # 实测）。默认配置的 prebuilt_etc 被 soong config 门控着
@@ -188,8 +194,23 @@ PRODUCT_COPY_FILES += \
 
 PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.hardware.opengles.aep.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.opengles.aep.xml \
-    frameworks/native/data/etc/android.hardware.vulkan.level-1.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.vulkan.level.xml \
-    frameworks/native/data/etc/android.hardware.vulkan.version-1_1.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.vulkan.version.xml
+    frameworks/native/data/etc/android.hardware.vulkan.level-1.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.vulkan.level.xml
+
+# ★ Vulkan 1.3（2026-08-24 从 1.1 提上来）。依据是 turnip 自己的代码，不是估计：
+#   mesa 26.0 src/freedreno/vulkan/tu_device.cc:1190
+#       props->apiVersion = tu_has_multiview(pdevice)
+#           ? ((chip >= 7) ? TU_API_VERSION : VK_MAKE_VERSION(1, 3, ...))
+#           : VK_MAKE_VERSION(1, 0, ...);
+#   Adreno 690 是 a6xx（chip 6）⇒ 走 1.3 那一支；而 tu_has_multiview() 取的是
+#   props.has_hw_multiview，freedreno_devices.py 里 a690 = [a6xx_base, a6xx_gen4]，
+#   而 a6xx_base 的 has_hw_multiview = True（False 的是 A702 那一档）。
+#   ⇒ turnip 在本机实报 1.3，声明 1.3 是照实写，不是往高了报。
+# ⚠️ 不声明 android.software.vulkan.deqp.level —— 那要跑 dEQP 才能背书，我们没跑。
+# ★ 顺带补上 compute：Vulkan 1.1+ 的核心里就有计算着色器，之前只声明了
+#   level 与 version，缺 compute 在真机上是不常见的组合。
+PRODUCT_COPY_FILES += \
+    frameworks/native/data/etc/android.hardware.vulkan.compute-0.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.vulkan.compute.xml \
+    frameworks/native/data/etc/android.hardware.vulkan.version-1_3.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.vulkan.version.xml
 
 #
 # Stage 3 之后再加（每次只加一个）：
@@ -253,6 +274,42 @@ PRODUCT_PACKAGES += \
 PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.hardware.bluetooth.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.bluetooth.xml \
     frameworks/native/data/etc/android.hardware.bluetooth_le.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.bluetooth_le.xml
+
+# ─── 蓝牙 profile 开关（用户报「耳机配得上、用不了」，2026-08-23）───
+# ★ 根因：AOSP 14 起每个 profile 由一条 sysprop 单独开关，而【不设 = 关闭】。
+#   packages/modules/Bluetooth/.../a2dp/A2dpService.java:
+#       public static boolean isEnabled() {
+#           return BluetoothProperties.isProfileA2dpSourceEnabled().orElse(false);
+#       }
+#   `.orElse(false)` 就是判决书。本机此前一条 bluetooth.* 属性都没有
+#   （实测 `getprop | grep -c "^\[bluetooth\."` = 0），于是只有 AdapterService
+#   在跑 —— 配对是 adapter 的活所以配得上，放音是 profile 的活所以没有。
+#
+# ★ 属性名取自 system/libsysprop/srcs/android/sysprop/BluetoothProperties.sysprop
+#   （android-16.0.0_r4），不是凭记忆写的。
+# ★ 集合参照 LineageOS android_device_essential_mata/vendor.prop，两处不同：
+#   · 去掉 sap.server —— SIM 卡访问，本机无 modem 无 SIM，开了没有意义
+#   · LE Audio 全家（bap/ccp/csip/hap/mcp/vcp/bass）暂不开 —— 半开的 LE Audio
+#     正是「连上了却没声」这一类故障的经典来源，等有设备能验再说
+#
+# 实测（运行期 setprop + 重启蓝牙，构建戳 1787436126）：
+#   设之前 `setProfileServiceState` 一条不出、A2dpService 不存在；
+#   设之后 12 个 profile 拉起，`btif_av.cc:3813 btif_av_source_execute_service:
+#   enable=true`。
+PRODUCT_VENDOR_PROPERTIES += \
+    bluetooth.profile.gatt.enabled=true \
+    bluetooth.profile.a2dp.source.enabled=true \
+    bluetooth.profile.avrcp.target.enabled=true \
+    bluetooth.profile.hfp.ag.enabled=true \
+    bluetooth.profile.hid.host.enabled=true \
+    bluetooth.profile.hid.device.enabled=true \
+    bluetooth.profile.bas.client.enabled=true \
+    bluetooth.profile.asha.central.enabled=true \
+    bluetooth.profile.opp.enabled=true \
+    bluetooth.profile.pan.nap.enabled=true \
+    bluetooth.profile.pan.panu.enabled=true \
+    bluetooth.profile.pbap.server.enabled=true \
+    bluetooth.profile.map.server.enabled=true
 
 # ─── Stage 4/5: 固件双路安装 ───
 # 新增固件（从本机 Ubuntu /lib/firmware 提取，华为专有，不入版本库）：
@@ -626,3 +683,23 @@ PRODUCT_PACKAGES += \
 PRODUCT_COPY_FILES += \
     $(LOCAL_PATH)/bin/gaokun3-keyboard.sh:$(TARGET_COPY_OUT_VENDOR)/bin/gaokun3-keyboard.sh \
     $(LOCAL_PATH)/etc/keyboard.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/keyboard.rc
+
+# ═══════════ 触摸手感模式（用户 2026-08-23 反馈手感不好）═══════════
+#
+# ★ 先说清楚一件事：我们内核里的 himax 驱动【就是】上游的 EGoTouchRev
+#   （github.com/chiyuki0325/EGoTouchRev-Linux）。逐项比对过：14 个算法函数
+#   逐字相同，20 项默认值只差一项，上游最新提交与 buildbot 那个补丁是同一天的。
+#   ⇒ 「换成 EGoTouchRev」换不来任何东西，我们已经在跑它了。
+#
+# 真正的差距在【参数】：驱动跑的是日用默认值，而它的调参工具里另有一套
+# game_preset，我们从来没用过。差三项，见 bin/gaokun3-touch-mode.sh。
+#
+# 默认设 game：本机的目标就是跑手游，而这三项只关掉平滑与按下防抖
+# （少 2 帧延迟），不动任何信号处理门限。切回来：
+#   setprop persist.sys.gaokun3.touch_mode daily
+PRODUCT_COPY_FILES += \
+    $(LOCAL_PATH)/bin/gaokun3-touch-mode.sh:$(TARGET_COPY_OUT_VENDOR)/bin/gaokun3-touch-mode.sh \
+    $(LOCAL_PATH)/etc/touchmode.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/touchmode.rc
+
+PRODUCT_VENDOR_PROPERTIES += \
+    persist.sys.gaokun3.touch_mode=game

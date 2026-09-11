@@ -1,6 +1,6 @@
 # 待办清单
 
-最后更新：2026-09-11（前摄 V4L2 层出帧；可重建性修好；音量还差一版 ROM）
+最后更新：2026-09-12（音量用户确认可用；从构建机抢救回 08-24 整轮未入库的工作，A0 有答案了）
 
 这份清单的排序原则是**用户能不能感觉到**，而不是有趣程度。每条都尽量写出
 **具体的第一步** —— 没有第一步的条目只是愿望，不是待办。
@@ -42,20 +42,37 @@
 没入库的源码；② 两个内核镜像做**全字符串差集**，**外加 dtb 比 sha256**。
 ⚠️ 字符串差集**看不见 DTS**，0009 漏打就完全逃过了它。
 
-### A0. ⚠️ 侧滑返回手势失效（用户报告，**假说未证实**）
-用户在装了 v0.4.0-alpha 之前的那一版（桌面模式开着）时报告边缘侧滑返回不工作。
+### A0. ✅ 侧滑返回手势失效 —— 根因查明：这台机器从来没有过导航栏
 
-**已知**：`navigation_mode = 2`（手势导航）本身是对的；当时 `dumpsys window`
-显示所有应用都在 **freeform 窗口**里（`mWindowingMode=freeform`、`Task name=Desk`），
-而桌面窗口模式下边缘返回的处理方式本来就不同。
+⚠️★★ **答案 2026-08-24 就查出来了，但那一轮的工作整个没入库**，
+直到 2026-09-12 才从构建机上抢救回来（[#82](stage4-findings.md)）。
+在那之前本条一直写着"假说未证实、怀疑是桌面模式"—— **那个假说是错的。**
 
-⚠️ **这只是嫌疑，没有证实** —— 当时没有运行时开关能把桌面模式关掉再对照
-（那个开发者选项开关只能强制打开，见 A′/#桌面模式）。v0.4.0-alpha 已把桌面
-模式关闭，**所以第一步就是让用户在新版上再试一次**：
-* 好了 ⇒ 就是桌面模式，本条关闭；
-* 还是不行 ⇒ 与桌面模式无关，查 `back_gesture_inset_scale_left/right`
-  （现在是 null）、`dumpsys window | grep -i gesture` 的排除区域，
-  以及触摸驱动在屏幕边缘的上报（#26 那套 evdev 录制方法可复用）。
+**根因**：手势返回的处理器（SystemUI 的 `EdgeBackGestureHandler`）是**随
+NavigationBar 组件创建的**。本机没有声明导航栏 ⇒ 没有该组件 ⇒ 没有处理器，
+也没有左右边缘的手势 inset，边缘往里滑什么都不会发生。
+
+**实测证据**（桌面模式已关、`navigation_mode=2` 的干净状态下取的）：
+
+```
+dumpsys window windows   → 窗口列表里【只有 StatusBar，没有 NavigationBar】
+SysUiState               → hasNavigationBar=false
+InsetsSource mandatorySystemGestures → frame=[0,0][1600,42] sideHint=TOP
+                            —— 只有顶部一条，左右两侧没有任何手势区
+mSystemGestureExclusion  → SkRegion()（空，不是被应用屏蔽掉的）
+```
+
+AOSP 默认 `config_showNavigationBar=false`
+（`frameworks/base/core/res/res/values/config.xml:2771`，注释说
+"in the future this may be autodetected"）—— 那是给有实体按键的机器准备的。
+本机没有实体导航键，**必须自己声明**，而我们此前从未声明过。
+
+**修法已入库**：设备 overlay 里 `config_showNavigationBar=true`。
+★ Lineage 不覆盖这一项（逐名核对过 `vendor/lineage` 的 common overlay），
+所以设备 overlay 在这里有效 —— 不像 `config_isDesktopModeSupported`
+那样要绕到 `crdroid-tree-fixes.py` 去改。
+
+⬜ **只剩上机验证**：随下一版 ROM 一起生效，装好后让用户试一次边缘侧滑。
 
 ### A1. 音频与蓝牙长期运行后死锁 ⚠️ 次高优先
 用户实机报告，我未复现、未定位（[#38](stage4-findings.md)）。
@@ -226,6 +243,31 @@ S5K3L6 要 2.8V）。驱动归档在 `patches/camera-wip/`，不应用，不追�
 ---
 
 ## B. 工程债与正确性
+
+### B0. ⚠️★★★ 让构建机的设备树【就是本仓的 checkout】—— 这个坑已经咬了四次
+
+**现状**：`~/crdroid/device/huawei/gaokun3` 是一个**普通目录**，不是 git
+checkout，与本仓之间靠人手拷来拷去。于是它必然漂，而且是**双向**漂。
+
+**已经付过的四次账**（全是同一个形状）：
+1. M17：上游 Venus 补丁集只活在构建机 ⇒ 从干净树重建不出发版内核
+2. [#79](stage4-findings.md)/[#80](stage4-findings.md)：`ashmem` + `xt_quota2`
+   只活在构建机 ⇒ **上机黑屏，用户按了电源键**
+3. `patches/camera-wip/`：相机驱动只活在构建机
+4. [#82](stage4-findings.md)：**08-24 一整轮工作**（温控 HAL / 触摸模式 /
+   HEVC CSD / 导航栏 / Vulkan 1.3）只活在构建机 ——
+   而且**差点被我自己覆盖掉**，靠 M5 那条"先比清单"才拦住
+
+⇒ 缓解措施已有（`kernel-apply-patches.sh`、`crdroid-tree-fixes.py` 12 条、
+`/proc/config.gz` 对账、全树 `git status` 普查），但**它们都是事后补救**。
+**第一步**：把构建机上那个目录换成本仓的 git checkout（或 symlink 到一个
+checkout），让 `git status` 直接说话。⚠️ 换之前先做一次清单比对 —— 那里面有
+`.gitignore` 掉的固件/传感器配置/预编译内核，不能被覆盖。
+
+⚠️ 另记一处**未编码的分歧**：构建机的 `prebuilts/build-tools` 里
+`date` / `tar`（×3 平台，共 6 个文件）**被删掉了**，全仓零记录、理由不明。
+决定只记录不编码（理由见 [#82](stage4-findings.md) 第五节）。
+下次干净树构建若出现 `tar`/`date` 相关报错，就是它。
 
 ### B1. SELinux 转 enforcing —— **四步已走完，剩两个结构性阻塞**
 [#75](stage4-findings.md) / [#76](stage4-findings.md) / [#77](stage4-findings.md)。

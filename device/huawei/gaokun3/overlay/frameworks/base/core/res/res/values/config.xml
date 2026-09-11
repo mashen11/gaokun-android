@@ -123,4 +123,33 @@
     <bool name="config_isDesktopModeDevOptionSupported">false</bool>
 
 
+    <!--
+      TODO A0 的根因：这台机器从来没有过导航栏，于是手势导航的返回手势
+      在物理上就不存在。
+
+      实测（2026-08-24，桌面模式已关、navigation_mode=2 的干净状态）：
+        dumpsys window windows  → 窗口列表里【只有 StatusBar，没有 NavigationBar】
+        SysUiState              → hasNavigationBar=false
+        InsetsSource mandatorySystemGestures
+                                → frame=[0,0][1600,42] sideHint=TOP
+                                   —— 只有顶部一条，左右两侧没有任何手势区
+        mSystemGestureExclusion → SkRegion()（空，不是被应用屏蔽掉的）
+
+      手势导航的返回处理器（SystemUI 的 EdgeBackGestureHandler）是随
+      NavigationBar 组件创建的。没有导航栏 ⇒ 没有处理器 ⇒ 也没有左右手势
+      inset，边缘往里滑什么都不会发生。
+
+      AOSP 的默认值是 false（core/res/res/values/config.xml:2771，注释说
+      "in the future this may be autodetected"）—— 那是给有实体按键的机器
+      准备的。本机没有实体导航键，必须自己声明。我们此前【从未声明过】。
+
+      ⚠️ 之前 A0 一直挂着"假说未证实"，怀疑是桌面模式的 freeform 窗口。
+      那个假说是错的：桌面模式已经关了、窗口是 fullscreen，手势照样没有。
+
+      ★ Lineage 不覆盖这一项（逐名核对过 vendor/lineage 的 common overlay），
+      所以设备 overlay 在这里是有效的 —— 不像 config_isDesktopModeSupported
+      那样要绕到 crdroid-tree-fixes.py 去改。
+    -->
+    <bool name="config_showNavigationBar">true</bool>
+
 </resources>

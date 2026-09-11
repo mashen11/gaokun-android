@@ -1,0 +1,38 @@
+//
+// gaokun3 的温控 HAL —— 读 /sys/class/thermal 的真实温度，替掉 AOSP 的 mock。
+//
+// ★ 为什么不用 overrides:：出厂那个 android.hardware.thermal-service.example
+//   是 installable:false、只出现在 apex "com.android.hardware.thermal" 里的
+//   （device.mk 里也有这段注释）。overrides 管不到 APEX，所以排除办法是
+//   把 com.android.hardware.thermal 从 PRODUCT_PACKAGES 里去掉。
+//
+cc_binary {
+    name: "android.hardware.thermal-service.gaokun3",
+    relative_install_path: "hw",
+    vendor: true,
+
+    srcs: ["Thermal.cpp"],
+
+    init_rc: ["android.hardware.thermal-service.gaokun3.rc"],
+    vintf_fragment_modules: ["android.hardware.thermal-service.gaokun3.xml"],
+
+    stl: "c++_static",
+    shared_libs: [
+        "libbinder_ndk",
+        "liblog",
+    ],
+    static_libs: [
+        // ⚠️ 版本必须是 V3：设备上现有的 vintf 声明与框架兼容性矩阵
+        //    （compatibility_matrix.202504.xml）都写着 <version>3</version>，
+        //    对不上开机就 VINTF 校验失败。
+        "android.hardware.thermal-V3-ndk",
+        "libbase",
+    ],
+    cflags: ["-Wall", "-Werror"],
+}
+
+vintf_fragment {
+    name: "android.hardware.thermal-service.gaokun3.xml",
+    src: "android.hardware.thermal-service.gaokun3.xml",
+    vendor: true,
+}

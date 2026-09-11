@@ -42,14 +42,45 @@ prog_glslang.found() 上），所以"让 glslang 不可用"会导致
 
 Apply to: external/deqp-deps/glslang/Android.bp（追加到文件末尾）
 
+⚠️★ 2026-09-12 重做：这个文件原先【不是可应用的 diff】——
+hunk 头写的是人话 `@@ -- append at end of file --`，`git apply` 报
+"corrupt patch at line 47"。而且内容也比构建机树里的旧（树里多了一个
+`gaokun_glslang_glsl_intrinsic_header` genrule：StandAlone.cpp 硬 include
+`glsl_intrinsic_header.h`，CMake 侧由 gen_extension_headers.py 生成，
+Soong 侧原本无人生成 → fatal error: file not found）。
+现已按构建机树的**实际改动**重新生成，并由
+`scripts/crdroid-tree-fixes.py` 第 9 条自动应用。
+★ 教训与 M13 那条同源：**没有消费者的补丁不只是会漂，它可以从一开始就是坏的
+而没人发现** —— 0003 从入库那天起就打不上。
+
+diff --git a/Android.bp b/Android.bp
+index f41468bb..4f0db830 100644
 --- a/Android.bp
 +++ b/Android.bp
-@@ -- append at end of file --
+@@ -246,3 +246,74 @@ cc_library_static {
+         "deqp_glslang_ResourceLimits_headers",
+     ],
+ }
++
 +// ─── gaokun3 (patches/0003): 自足的 host 端 glslangValidator ───
 +// 供 external/mesa3d/Android.bp 的 genrule 以 tools: ["glslangValidator"]
-+// + $(location glslangValidator) 使用（合并脚本 scripts/mesa-bp-merge.py 会改写）。
-+// ⚠️ 刻意【不】复用 deqp_glslang_* 静态库：它们是 device-only
-+//    （deqp_and_deps_defaults 带 sdk_version:"27"），没有 linux_glibc 变体。
++// + $(location glslangValidator) 使用（scripts/mesa-bp-merge.py 会改写）。
++// ⚠️ 刻意【不】复用 deqp_glslang_* 静态库：它们继承
++//    deqp_and_deps_defaults（external/deqp/Android.bp，带 sdk_version:"27"
++//    与 -DDE_OS=DE_OS_ANDROID），是彻底的 device-only 模块，
++//    没有 linux_glibc 变体。
++genrule {
++    name: "gaokun_glslang_glsl_intrinsic_header",
++    // StandAlone.cpp 硬 include 它；CMake 侧由 gen_extension_headers.py
++    // 生成，Soong 侧原本无人生成 → fatal error: file not found。
++    srcs: ["glslang/ExtensionHeaders/*.glsl"],
++    out: ["glslang/glsl_intrinsic_header.h"],
++    tool_files: ["gen_extension_headers.py"],
++    // 脚本只接受目录（内部 glob '*.glsl'），故从第一个
++    // 输入文件反推目录；dirname 多参数会逐行输出，head -1 取一行。
++    cmd: "$(location gen_extension_headers.py) -i $$(dirname $(in) | head -1) -o $(out)",
++}
++
 +cc_binary_host {
 +    name: "glslangValidator",
 +    cpp_std: "c++17",
@@ -60,6 +91,7 @@ Apply to: external/deqp-deps/glslang/Android.bp（追加到文件末尾）
 +        "-DENABLE_SPVREMAPPER",
 +        "-DENABLE_OPT=0",
 +        "-DGLSLANG_OSINCLUDE_UNIX",
++        // 构建期工具，不值得为 AOSP 比 glslang 上游严的告警集逐条压。
 +        "-Wno-error",
 +    ],
 +    cppflags: [
@@ -75,6 +107,7 @@ Apply to: external/deqp-deps/glslang/Android.bp（追加到文件末尾）
 +    ],
 +    generated_headers: [
 +        "deqp_glslang_gen_build_info_h",
++        "gaokun_glslang_glsl_intrinsic_header",
 +    ],
 +    srcs: [
 +        "StandAlone/StandAlone.cpp",
@@ -82,8 +115,12 @@ Apply to: external/deqp-deps/glslang/Android.bp（追加到文件末尾）
 +        "glslang/MachineIndependent/*.cpp",
 +        "glslang/MachineIndependent/preprocessor/*.cpp",
 +        "glslang/GenericCodeGen/*.cpp",
++        // ENABLE_HLSL 开了就必须给源码：MachineIndependent 里
++        // 对 HLSL 符号是硬引用，只开宏不给源码会缺符号。
 +        "glslang/HLSL/*.cpp",
 +        "glslang/OSDependent/Unix/ossource.cpp",
++        // 不编 */CInterface/*.cpp：C API 两个文件互相引用，
++        // 要么都进要么都不进，而 StandAlone 根本不用。
 +        "SPIRV/GlslangToSpv.cpp",
 +        "SPIRV/InReadableOrder.cpp",
 +        "SPIRV/Logger.cpp",
