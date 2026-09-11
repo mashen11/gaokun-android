@@ -47,6 +47,11 @@ KPATCHES=(
     0013-drm-crtc-drop-racy-BUG_ON-in-fence_to_crtc.patch
     0014-remoteproc-qcom-ratelimit-repeat-handover-error.patch
     0015-asoc-sc8280xp-retune-wsa-speaker-gain-ceilings.patch
+    # ★★ 0016/0017 是 Android 起不来的硬前提（ashmem / xt_quota2，ACK 专有）。
+    #    它们此前只活在构建机的内核树里，2026-09-08 照本仓配方重建的内核
+    #    因此黑屏起不来 —— 见 docs/stage4-findings.md #79。别删。
+    0016-staging-android-port-ashmem-from-ack.patch
+    0017-netfilter-port-xt-quota2-from-ack.patch
 )
 
 # ★★ 指纹判据：补丁是否【已在树里】。
@@ -59,18 +64,46 @@ KPATCHES=(
 #    重复的 static 结构体只是浪费空间，重复的 of_match 条目只是第一条生效，
 #    所以症状极其隐蔽。
 #
-# 判据：从补丁里挑一条足够独特的新增行（长度 > 25、不是纯符号），
-#       到它要改的文件里 grep。找到 ⇒ 已应用。
+# 判据：从补丁里挑【最长的几条】新增行，到它要改的文件里 grep，要求【全部命中】。
+#
+# ⚠️★★ 2026-09-11：这里原来是"挑第一条长度 > 25 的新增行"，**制造过一次真实事故**。
+#    `patches/0009`（CPU cooling maps）的第一条合格新增行是
+#        polling-delay-passive = <250>;
+#    而这行在【未打补丁的】sc8280xp.dtsi 里本来就有一次（主线自带的 gpu-thermal 区）
+#    ⇒ grep 命中 ⇒ 判成"已应用" ⇒ 静默跳过 ⇒ **重建的内核悄悄失去 CPU 温控降频**。
+#    这正是 M17 写这个脚本要防的那件事，结果被脚本自己的判据复现了。
+#    实测：新树里 cooling-maps 只有 1 处（主线的），旧树 9 处。
+#
+# ★ 两处加固，都便宜：
+#    ① 探针改挑【最长】的新增行 —— 越长越不可能与既有代码撞车
+#       （0009 的最长行是 `cooling-device = <&cpu0 THERMAL_NO_LIMIT ...>` 64 字符，
+#        在未打补丁的文件里根本不存在）。
+#    ② 取最多 3 条并要求【全部】命中 —— 单条撞车是偶然，三条同时撞车基本不可能。
+#
+# ⚠️ 为什么不怕假阴性：fuzz 影响的是【上下文】匹配，新增行本身一定是逐字写入的。
+#    万一仍误判成"没打过"，后面 `git apply --check` 会失败并走 fuzz，
+#    fuzz 再失败就【大声报错】—— 方向是对的：宁可吵，也不要静默跳过。
 already_applied() {
-    local f="$1" probe files ff
-    probe=$(grep -E '^\+[^+]' "$f" | sed 's/^+//'             | grep -vE '^[[:space:]]*$'             | awk 'length($0) > 25' | head -1)
-    [ -n "$probe" ] || return 1
+    local f="$1" probes files ff hit n
+    probes=$(grep -E '^\+[^+]' "$f" | sed 's/^+//' \
+             | grep -vE '^[[:space:]]*$' \
+             | awk 'length($0) > 25' | sort -u \
+             | awk '{ print length($0), $0 }' | sort -rn | head -3 | cut -d' ' -f2-)
+    [ -n "$probes" ] || return 1
     files=$(grep -E '^\+\+\+ b/' "$f" | sed 's|^+++ b/||')
-    for ff in $files; do
-        [ -f "$TREE/$ff" ] || continue
-        grep -qF "$probe" "$TREE/$ff" && return 0
-    done
-    return 1
+    n=0
+    while IFS= read -r probe; do
+        [ -n "$probe" ] || continue
+        n=$((n + 1))
+        hit=0
+        for ff in $files; do
+            [ -f "$TREE/$ff" ] || continue
+            if grep -qF "$probe" "$TREE/$ff"; then hit=1; break; fi
+        done
+        [ "$hit" = 1 ] || return 1
+    done <<< "$probes"
+    [ "$n" -gt 0 ] || return 1
+    return 0
 }
 
 cd "$TREE"

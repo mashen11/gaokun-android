@@ -616,6 +616,17 @@ USB_F_FS），bool 子项的 =y 不代表代码进了内核。**
 | 24 | 无硬件 feature 声明，AppWidgetService 缺席，Launcher NPE | getInstalledProviders null | tablet_core_hardware.xml |
 | 25 | 闲置 52s s2idle 休眠后不醒（CLAUDE.md 预言的 EC 坑）| "PM: suspend entry" 为日志绝笔 | 临时 svc power stayon；Stage 4 正修 |
 
+> ⚠️★★ **第 18、20 条的源码此前【从未入库】，只活在构建机的内核树里**，
+> 直接导致 2026-09-08 一次上机失败（照本仓配方重建的内核黑屏起不来，
+> 见 [stage4-findings](stage4-findings.md) #79）。
+> ✅ 2026-09-11 已补上：`patches/0016-staging-android-port-ashmem-from-ack.patch`
+> 与 `patches/0017-netfilter-port-xt-quota2-from-ack.patch`，两者都进了 KPATCHES。
+> ★ 第 18 条这里写的"2 处 API 漂移修正"**实际是 6 处**，逐条记在补丁头里
+> （去掉 ACK 专有的 `page_size_compat.h`、`mm_get_unmapped_area`、
+> `legacy_to_vma_flags`、shrinker 换动态 API、删 `is_ashmem_file`、
+> 删 compat ioctl）。⚠️ 另记一条边界：**ashmem 在 ACK 里到 `android15-6.6` 为止**，
+> `android16-6.12` 已删除它 —— 没有更新的底本可跟。
+
 **Stage 3 验收（2026-08-17）：Android 桌面完整渲染，SystemUI + Launcher3 稳定。**
 
 ### 8.4 顺带确认的两件事
