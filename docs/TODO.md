@@ -245,27 +245,22 @@ SGBRG10P 原始拜耳解出 **黄 青 绿 品 红 蓝**，R/G/B 满量程 1023/0
 
 **⬜ 第一步：相机 HAL。** `cameraserver` 在跑但 0 个相机设备，`/vendor/lib64/hw` 无 camera HAL。
 
-★★ **动手之前先花半小时验一件事：camss 的 PIX（ISP）通路能不能出 YUV。**
-我们至今只走过 **RDI**（裸转储，出的是 SGBRG10P 原始拜耳），而
-`ExternalCameraDevice` HAL 要的是 YUYV/MJPEG —— 所以"RDI 走不通"是对的。
-**但拓扑里还有另一条路**（[#81](stage4-findings.md) 的转储实测）：
-每个 VFE 除了 3 个 `rdi` 还有一个 **`msm_vfeN_pix`** 实体，
-它连到 `msm_vfeN_video3`；而那个 video 节点 `ENUM_FMT` 报的格式里
-**有 `UYVY` / `VYUY` / `YUYV` / `YVYU`**。
+★★ **已验过：camss 的 PIX（ISP）通路【不出 YUV】，ExternalCamera HAL 这条捷径是死的。**
+（2026-09-12 实测，见 [#84](stage4-findings.md)。这一条是**阴性结果**，
+写下来是为了省掉下一个人半天 —— 拓扑里有 `msm_vfeN_pix` 实体、video 节点又报
+`UYVY`/`YUYV` 这些格式，看起来非常像"接上就有 YUV"。）
 
-⇒ 如果 PIX 通路真能出 YUV，**HAL 的工作量会小一个数量级** ——
-可能直接套 AOSP 自带的 ExternalCamera HAL，而不是移植 libcamera。
+实测：
+* 把 `msm_vfe0_pix` 的**源 pad** 设成 `MEDIA_BUS_FMT_UYVY8_1X16`(0x200f)
+  → **驱动改回 0x300e**（拜耳），随后 STREAMON 报 `EPIPE`；
+* `VIDIOC_SUBDEV_ENUM_MBUS_CODE` 枚举该源 pad → **只有 `0x300e` 一个码**，
+  与 RDI 源 pad 完全相同。
 
-**验法（便宜，改工具即可，不用重编内核）**：把 `scripts/camera/camtest.c` 里的
-`RDI = "msm_vfe0_rdi0"` / `VNODE = "msm_vfe0_video0"` 换成
-`msm_vfe0_pix` / `msm_vfe0_video3`，链路改接 `csid0:4 -> vfe0_pix:0`
-（`csid0` 的 pad 4 就是接 pix 的，见转储），像素格式选 `UYVY`。
-* 能出帧 ⇒ 走 ExternalCamera HAL 这条路；
-* 出不了（PIX 在本 SoC 上没实现 / 缺 ISP 固件）⇒ 老老实实上 libcamera，
-  `simple` pipeline handler 走 media-controller，mesa 那套 meson→bp 工具链可复用。
+⇒ **硬件/驱动这条路上拿不到 YUV，去拜耳必须在上层做。**
+所以相机 HAL 只能走 **libcamera**：它的 `simple` pipeline handler + **软件 ISP**
+正是为"简单流水线出裸拜耳"这种情形设计的。mesa 那套 meson→bp 工具链可复用。
 
-⚠️ 我没验过，**这是个待验证的判断，不是结论**。hi846 的完整控件表在
-[#81](stage4-findings.md) 第六节。
+hi846 的完整控件表在 [#81](stage4-findings.md) 第六节。
 
 **⬜ 两个必须先修的前提**：
 1. ⚠️★★ **camss 电源域缺陷**（[#83](stage4-findings.md) 已把根因缩到一点）：

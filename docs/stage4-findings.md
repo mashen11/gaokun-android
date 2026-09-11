@@ -5470,3 +5470,41 @@ echo on > /sys/devices/platform/soc@0/ac5a000.camss/power/control
    * ✅ 成功 ⇒ 上游这条就是修复，相机内核可以考虑提升为常驻；
    * ❌ 仍报 `stuck at 'off'` / −110 ⇒ 假说被否，回到第六节留下的
      "比较 GDSC 寄存器全字段"那条路（**记得先钉住 camcc**）。
+
+---
+
+## #84 ⚠️★★★ 阴性结果：camss 的 PIX(ISP) 通路不出 YUV —— 相机 HAL 的便宜路走不通（2026-09-12）
+
+**为什么值得单独记**：这条看起来**非常像**能成。拓扑里每个 VFE 除了 3 个 `rdi`
+还有一个 **`msm_vfeN_pix`**，接到 `msm_vfeN_video3`；而那个 video 节点
+`ENUM_FMT` 报的第一批格式就是 **`UYVY VYUY YUYV YVYU`**。
+如果 PIX 真能出 YUV，Android 的相机 HAL 就可能直接套 AOSP 自带的
+`ExternalCameraDevice`（它要 YUYV/MJPEG），**省掉整个 libcamera 移植**。
+
+**实测否掉**（`scripts/camera/camtest.c` 新增 `pix` 与 `enum` 两个模式）：
+
+1. 接链 `msm_csid0:4 -> msm_vfe0_pix:0` ✅ 成功（pad 4 确实是接 pix 的）
+2. 把 `msm_vfe0_pix` 的**源 pad** 设成 `MEDIA_BUS_FMT_UYVY8_1X16`(0x200f)
+   → 驱动**改回 `0x300e`**（SGBRG10 拜耳）
+3. 于是 video 节点设 `UYVY` 时 STREAMON 报 **`EPIPE`**（流水线校验：pad 是拜耳）
+4. ★ 决定性判据 —— 枚举该源 pad 支持的 mbus 码：
+
+```
+msm_vfe0_pix  pad1 支持的 mbus 码:  [ 0] 0x300e  (拜耳族)
+msm_vfe0_rdi0 pad1 支持的 mbus 码:  [ 0] 0x300e  (拜耳族)    ← 完全相同
+```
+
+⇒ **PIX 与 RDI 在输出格式上没有区别，这个驱动的 VFE 不做去拜耳。**
+video 节点报的那一串 YUV 格式是**格式表里有**，不是**这条通路能产出**。
+★ 教训：**"节点声称支持某格式"和"这条流水线能产出该格式"是两件事** ——
+判据要去问**产出它的那个 pad**（`ENUM_MBUS_CODE`），不是问消费端的 video 节点。
+
+### ⇒ 结论：相机 HAL 只能走 libcamera
+
+去拜耳必须在上层做。**libcamera 的 `simple` pipeline handler + 软件 ISP
+正是为"简单流水线出裸拜耳"设计的**，所以它不只是"能用"，而是**对口**。
+mesa 那套 meson→bp 工具链（`scripts/mesa-tool-fixes.py` /
+`scripts/mesa-bp-merge.py` / `join_meson_continuations.py`）可复用。
+
+⚠️ 但**先把 [#83](#83) 那个电源域缺陷解决掉**：现在相机要靠"开机即钉住 camss
+的 runtime PM"才能反复使用，HAL 之上再叠一个这样的前提不合适。

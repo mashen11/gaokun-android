@@ -121,9 +121,45 @@ static int sd_set_fmt(const char *ent, uint32_t pad, uint32_t code, uint32_t w, 
 int main(int argc, char **argv) {
     const char *SENSOR = "hi846 2-0020";
     const char *PHY = "msm_csiphy3", *CSID = "msm_csid0";
-    const char *RDI = "msm_vfe0_rdi0", *VNODE = "msm_vfe0_video0";
-    unsigned W = argc > 1 ? atoi(argv[1]) : 1280, H = argc > 2 ? atoi(argv[2]) : 720;
-    unsigned NFR = argc > 3 ? atoi(argv[3]) : 3;
+    /* ★ 两条通路二选一（第一个参数写 pix 就走 ISP 那条）：
+     *   RDI = 裸转储，出传感器原始拜耳（SGBRG10P）——已验证可用
+     *   PIX = 走 VFE 的 ISP，理论上能出 YUV —— 待验证。
+     *     如果它真能出 YUV，Android 的相机 HAL 就可能直接套 AOSP 自带的
+     *     ExternalCameraDevice（它要 YUYV/MJPEG），不必移植 libcamera。
+     *   拓扑实测：csid0 的 pad 1/2/3 接 vfe 的 rdi0/1/2，pad 4 接 vfe 的 pix。 */
+    int use_pix = 0;
+    int argbase = 1;
+    if (argc > 1 && strcmp(argv[1], "pix") == 0) { use_pix = 1; argbase = 2; }
+    const char *RDI   = use_pix ? "msm_vfe0_pix"    : "msm_vfe0_rdi0";
+    const char *VNODE = use_pix ? "msm_vfe0_video3" : "msm_vfe0_video0";
+    const uint32_t CSID_SRC_PAD = use_pix ? 4 : 1;
+    printf("通路: %s  (%s -> %s)\n", use_pix ? "PIX / ISP" : "RDI / 裸转储", RDI, VNODE);
+    unsigned W = argc > argbase ? atoi(argv[argbase]) : 1280;
+    unsigned H = argc > argbase+1 ? atoi(argv[argbase+1]) : 720;
+    unsigned NFR = argc > argbase+2 ? atoi(argv[argbase+2]) : 3;
+
+    /* enum 模式：枚举某个实体某个 pad 支持的 mbus 码（判"PIX 能不能出 YUV"用）
+       用法: camtest-pix enum "<实体名>" <pad> */
+    if (argc > 3 && strcmp(argv[1], "enum") == 0) {
+        char dv[64];
+        if (open_by_entity(argv[2], dv, sizeof dv) < 0) DIE("找不到实体 %s", argv[2]);
+        int fd = open(dv, O_RDWR); if (fd < 0) DIE("打不开 %s", dv);
+        unsigned pad = atoi(argv[3]);
+        printf("%s pad%u (%s) 支持的 mbus 码:\n", argv[2], pad, dv);
+        int n = 0;
+        for (unsigned i = 0; ; i++) {
+            struct v4l2_subdev_mbus_code_enum mc; memset(&mc, 0, sizeof mc);
+            mc.index = i; mc.pad = pad; mc.which = V4L2_SUBDEV_FORMAT_ACTIVE;
+            if (ioctl(fd, VIDIOC_SUBDEV_ENUM_MBUS_CODE, &mc) < 0) break;
+            const char *kind = (mc.code >= 0x2000 && mc.code < 0x3000) ? " ← YUV 族"
+                             : (mc.code >= 0x3000 && mc.code < 0x4000) ? "  (拜耳族)" : "";
+            printf("   [%2u] 0x%04x%s\n", i, mc.code, kind);
+            n++;
+        }
+        if (!n) printf("   （一个都不报）\n");
+        close(fd);
+        return 0;
+    }
 
     int mfd = open("/dev/media0", O_RDWR); if (mfd < 0) DIE("打不开 /dev/media0: %s", strerror(errno));
     struct topo T; topo_load(mfd, &T);
@@ -155,7 +191,7 @@ int main(int argc, char **argv) {
     /* 2) 接链 */
     printf("=== 接链 ===\n");
     link_enable(mfd, &T, PHY, 1, CSID, 0);
-    link_enable(mfd, &T, CSID, 1, RDI, 0);
+    link_enable(mfd, &T, CSID, CSID_SRC_PAD, RDI, 0);
 
     /* 3) 沿链传格式 */
     printf("\n=== 传格式 ===\n");
@@ -167,7 +203,15 @@ int main(int argc, char **argv) {
     W = aw; H = ah;
     sd_set_fmt(PHY,  0, code0, W, H, NULL, NULL);  sd_set_fmt(PHY,  1, code0, W, H, NULL, NULL);
     sd_set_fmt(CSID, 0, code0, W, H, NULL, NULL);  sd_set_fmt(CSID, 1, code0, W, H, NULL, NULL);
-    sd_set_fmt(RDI,  0, code0, W, H, NULL, NULL);  sd_set_fmt(RDI,  1, code0, W, H, NULL, NULL);
+    sd_set_fmt(RDI,  0, code0, W, H, NULL, NULL);
+    if (use_pix) {
+        /* ISP 的源 pad 试 YUV（去拜耳之后的输出）。驱动若不支持会原样退回拜耳码，
+           下面打印的"驱动改成了…"就会告诉我们。 */
+        uint32_t ow = 0, oh = 0;
+        sd_set_fmt(RDI, 1, MEDIA_BUS_FMT_UYVY8_1X16, W, H, &ow, &oh);
+    } else {
+        sd_set_fmt(RDI,  1, code0, W, H, NULL, NULL);
+    }
 
     /* 4) video 节点 */
     char vdev[64];
@@ -183,7 +227,8 @@ int main(int argc, char **argv) {
     int btype = mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
     printf("  driver=%s caps=0x%08x  %s\n", cap.driver, caps, mplane ? "多平面(MPLANE)" : "单平面");
     printf("  支持的像素格式: ");
-    uint32_t want = pix_for_bus(code0), pixfmt = 0, first = 0;
+    uint32_t want = use_pix ? V4L2_PIX_FMT_UYVY : pix_for_bus(code0);
+    uint32_t pixfmt = 0, first = 0;
     for (unsigned i = 0; ; i++) {
         struct v4l2_fmtdesc fd_; memset(&fd_, 0, sizeof fd_);
         fd_.index = i; fd_.type = btype;
