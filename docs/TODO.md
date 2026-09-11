@@ -244,9 +244,28 @@ SGBRG10P 原始拜耳解出 **黄 青 绿 品 红 蓝**，R/G/B 满量程 1023/0
 （去掉后摄节点，A/B 实测非它不可）、`scripts/camera/`（两个静态诊断工具）。
 
 **⬜ 第一步：相机 HAL。** `cameraserver` 在跑但 0 个相机设备，`/vendor/lib64/hw` 无 camera HAL。
-AOSP 的 ExternalCamera HAL 只认 UVC 风格节点，RDI 出的是裸拜耳，走不通。
-现实路线是 **libcamera 的 Android HAL 适配层**（`simple` pipeline handler 走
-media-controller），mesa 那套 meson→bp 工具链可复用。hi846 的完整控件表在 #81 第六节。
+
+★★ **动手之前先花半小时验一件事：camss 的 PIX（ISP）通路能不能出 YUV。**
+我们至今只走过 **RDI**（裸转储，出的是 SGBRG10P 原始拜耳），而
+`ExternalCameraDevice` HAL 要的是 YUYV/MJPEG —— 所以"RDI 走不通"是对的。
+**但拓扑里还有另一条路**（[#81](stage4-findings.md) 的转储实测）：
+每个 VFE 除了 3 个 `rdi` 还有一个 **`msm_vfeN_pix`** 实体，
+它连到 `msm_vfeN_video3`；而那个 video 节点 `ENUM_FMT` 报的格式里
+**有 `UYVY` / `VYUY` / `YUYV` / `YVYU`**。
+
+⇒ 如果 PIX 通路真能出 YUV，**HAL 的工作量会小一个数量级** ——
+可能直接套 AOSP 自带的 ExternalCamera HAL，而不是移植 libcamera。
+
+**验法（便宜，改工具即可，不用重编内核）**：把 `scripts/camera/camtest.c` 里的
+`RDI = "msm_vfe0_rdi0"` / `VNODE = "msm_vfe0_video0"` 换成
+`msm_vfe0_pix` / `msm_vfe0_video3`，链路改接 `csid0:4 -> vfe0_pix:0`
+（`csid0` 的 pad 4 就是接 pix 的，见转储），像素格式选 `UYVY`。
+* 能出帧 ⇒ 走 ExternalCamera HAL 这条路；
+* 出不了（PIX 在本 SoC 上没实现 / 缺 ISP 固件）⇒ 老老实实上 libcamera，
+  `simple` pipeline handler 走 media-controller，mesa 那套 meson→bp 工具链可复用。
+
+⚠️ 我没验过，**这是个待验证的判断，不是结论**。hi846 的完整控件表在
+[#81](stage4-findings.md) 第六节。
 
 **⬜ 两个必须先修的前提**：
 1. ⚠️★★ **camss 电源域缺陷**（[#83](stage4-findings.md) 已把根因缩到一点）：
