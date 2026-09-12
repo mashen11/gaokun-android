@@ -264,7 +264,16 @@ URL 是 **36.9 MB/s**。对"用户走系统内 OTA 升级"有实际影响（1 GB
 >    ⚠️ 画面全黑（传感器没光，RAW 标准差仅 0.36 = 黑电平基座）——
 >    **"能出图"已证明，"出的是对的图"还没视觉确认**，下次开工先给前摄补光。
 >    ⬜ 功能缺口：hi846 不在 `camera_sensor_helper.cpp` 里 ⇒ 模拟增益恒 0。
-> ⬜ **M2 解决 HAL3→框架的接法**（HIDL passthrough vs 自写 AIDL provider）。
+> ⬜ **M2 HAL3→框架的接法**：★ 2026-09-12 已查清（[#91](stage4-findings.md)）——
+>    **HIDL 在本机是死的**（`hwservicemanager` 是悬空符号链接、init 报
+>    "service not found"，而 `CameraProviderManager` 发现 HIDL provider 只能靠它），
+>    所以 `provider@2.4-legacy` 那条"零代码"路**作废**。
+>    ⚠️ 另有一条便宜路也死了：libcamera 软件 ISP **只出 RGB 族**
+>    （`debayer_cpu.cpp:436-441`，无 YUYV/NV12），喂不了 AOSP 的 ExternalCameraProvider
+>    —— **和 #84 撞的是同一堵墙**。
+>    ⬜ 三条候选：A camera3→AIDL 桥 / B 直接在 libcamera API 上写 AIDL provider
+>    （参考量 268 KB 源码）/ C 把 hwservicemanager 编回来复活 HIDL。
+>    **先验 C 的前提**（构建机上 grep `system/hwservicemanager` 还在不在），代价最小。
 > ⬜ **M3 meson → Android.bp**（mesa 那套工具链可复用）。
 > ⚠️ 全程压着 [#87](stage4-findings.md) 的电源域缺陷，开发期用"开机即钉住 camss"当桥。
 

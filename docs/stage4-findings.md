@@ -6049,3 +6049,86 @@ DEBUG Agc agc.cpp:825 exposure-time: 39266.67us, analogue-gain: 0, ...
 2. ⬜ 给 hi846 写 `CameraSensorHelper`（增益模型从内核驱动读），解决增益恒 0。
 3. ⬜ M2：HAL3 模块怎么接进框架（[#88](#88) 查明 HIDL passthrough 与 AIDL 两条都在）。
 4. ⬜ 重编时加 `-static-libstdc++`，去掉对 `libc++_shared.so` 的依赖。
+
+---
+
+## #91 ★★★★ M2 的架构问题有答案了：HIDL 在本机是死的，只能走 AIDL；而那条便宜路死在和 #84 同一堵墙上（2026-09-12）
+
+[#88](#88) 当时留下的未知是"libcamera 产出的传统 HAL3 模块怎么接进 Android 16 的框架"，
+并记了一条乐观的可能："cameraserver 的 `strings` 里 HIDL 与 AIDL 两条都在，
+上游 `provider@2.4-legacy` 也还在 ⇒ **可能一行 HAL 代码都不用写**"。
+本条把它查实了 —— **那条路走不通**。
+
+### ★★ 一、HIDL 在本机是死的（实机日志，不是推理）
+
+```
+init: Command 'start hwservicemanager' action=init (/system/etc/init/hw/init.rc:504)
+      took 0ms and failed: service hwservicemanager not found
+W HidlServiceManagement: hwservicemanager is not supported on the device.
+I HidlServiceManagement: Trying to get transport of ... without hwservicemanager
+```
+
+`/system/bin/hwservicemanager` 只是一个**指向不存在目标的符号链接**
+（`-> /system/system_ext/bin/hwservicemanager`），没有任何 .rc 定义这个服务。
+
+而 AOSP 的 `CameraProviderManager` 发现 HIDL provider 的唯一途径是
+`HidlServiceInteractionProxyImpl::listServices()`
+（`CameraProviderManager.cpp:123-134`），它走
+`hardware::defaultServiceManager1_2()->listManifestByInterface(...)`
+—— **必须有 hwservicemanager**。
+
+⇒ **`android.hardware.camera.provider@2.4-legacy`（那个"加载传统
+`camera_module_t` 模块"的现成件）在本机永远不会被发现。**
+⇒ [#88](#88) 里"可能一行 HAL 代码都不用写"的乐观估计**作废**。
+
+★ 顺带纠正我自己当时的推理错误：我从 `strings /system/bin/cameraserver`
+里看到 HIDL 符号就推断"HIDL 通路是编进去的"。**编进去 ≠ 能用** ——
+客户端代码在，服务端的注册中心不在。
+**"二进制里有这个字符串"是很弱的证据，它只说明代码路径存在，不说明依赖齐全。**
+
+⚠️ 另记一处**容易看漏的控制流**：`CameraProviderManager::initialize()`
+是**先 HIDL 后 AIDL**，而且 `tryToInitAndAddHidlProvidersLocked()` 返回非 OK
+就**直接 return，AIDL 根本不会被尝试**（`CameraProviderManager.cpp:239-245`）。
+本机没炸是因为 libhidl 对"没有 hwservicemanager"是**优雅降级**（只打 Warning），
+所以注册返回成功、AIDL 得以继续。⇒ 将来若哪个改动让 HIDL 那步真的失败，
+**症状会是"AIDL 相机也一起消失"**，而原因看起来毫无关系。
+
+### ★★ 二、那条"零 Android 代码"的便宜路，死在和 [#84](#84) 同一堵墙上
+
+设想过一条很省事的路：libcamera 自带 **V4L2 兼容层**（`src/v4l2/` →
+`v4l2-compat.so`，LD_PRELOAD 垫片，能把 libcamera 的相机伪装成 `/dev/videoX`），
+再喂给 AOSP 自带的 **AIDL `ExternalCameraProvider`** —— 那样一行 HAL 代码都不用写。
+
+**不成立。** 查 libcamera 软件 ISP 的输出格式
+（`src/libcamera/software_isp/debayer_cpu.cpp:436-441`）：
+
+```
+outputFormats = { RGB888, XRGB8888, ARGB8888, BGR888, XBGR8888, ABGR8888 }
+```
+
+**只有 RGB 族，没有 YUV / NV12 / YUYV。** 而 AOSP 的 ExternalCamera HAL 要
+YUYV 或 MJPEG —— 这正是 [#84](#84) 判它出局的同一条理由。
+
+★ **同一堵墙撞了两次，值得记成一条判据**：
+**"生产端能出什么格式"和"消费端收什么格式"要在立项时就对一遍。**
+两次都是先被"结构上看起来能接"吸引，然后才发现格式对不上。
+
+⇒ 顺带说明为什么 libcamera **自己的** Android HAL 层能行：
+`src/android/yuv/post_processor_yuv.cpp` 用 **libyuv** 做 RGB→YUV 转换。
+也就是说 Android 要的那次色彩空间转换，libcamera 的 HAL 层已经做了 ——
+只是那个 HAL 层是**传统 camera3 模块**，而本机没有能加载它的 provider。
+
+### ⬜ 三、M2 因此只剩三条路，都不便宜
+
+| 方案 | 做法 | 量级 |
+|---|---|---|
+| **A. camera3 → AIDL 桥** | 写一个 AIDL `ICameraProvider`/`ICameraDevice`，内部加载 libcamera 的 `libcamera-hal.so`（传统 camera3 模块）。等价于把 AOSP 的 `@2.4-legacy` 从 HIDL 翻成 AIDL。 | 大；但接口窄且定义清晰（`camera_module_t` + `camera3_device_t`） |
+| **B. 直接在 libcamera C++ API 上写 AIDL provider** | 拿 AOSP 的 `ExternalCamera*` 当结构模板，色彩转换用 libyuv。 | 参考量：`hardware/interfaces/camera/device/default/` 共 **268 KB** 源码，光 `ExternalCameraDeviceSession.cpp` 就 116 KB |
+| **C. 把 HIDL 救活** | 把 `hwservicemanager` 编进 ROM（本机只有悬空符号链接 ⇒ 模块可能还在 AOSP 里、只是 crDroid 没编），然后用现成的 `@2.4-legacy` + `libcamera-hal.so`。 | **可能最小**，但前提未验证，且是在往一条上游正在删除的通路上押注 |
+
+⬜ **下一步建议：先花很小的代价验证 C 的前提** ——
+在构建机的 AOSP 树里 `grep` 一下 `system/hwservicemanager` 还在不在、
+`hwservicemanager` 这个模块名能不能解析。
+成立的话 C 是数量级上更省的路；不成立就在 A / B 之间选。
+⚠️ 即便 C 可行，也要权衡：HIDL 是上游明确在移除的东西，
+今天省下的工作量可能在下一个大版本连本带利还回去。

@@ -26,6 +26,11 @@
 #     不要指望一条 ssh 从头挂到尾。
 #  6. 故意 **不编 `cam` 工具**：它依赖 libevent，又是一个要交叉编的东西。
 #     用 `scripts/camera/lctest.cpp`（几百行，只打公开 API）代替。
+#  7. ⚠️★ **Android 上没有 `libc++_shared.so`**（系统只有 soname 不同的平台
+#     `libc++.so`）。NDK 默认动态链接它，于是产物在设备上报
+#     `library "libc++_shared.so" not found`。本脚本因此加 `-static-libstdc++`。
+#     ⚠️ 从设备上已装应用里借一份【不可靠】：实测六份里五份被游戏构建裁剪过，
+#     借错会报 `cannot locate symbol "_ZTTNSt6__ndk114basic_ofstreamIcE..."`。
 set -euo pipefail
 
 NDK_VER=${NDK_VER:-r27c}
@@ -65,7 +70,8 @@ meson setup "$BUILD" --cross-file "$CROSS" \
     -Dlc-compliance=disabled -Dpycamera=disabled -Dv4l2=disabled \
     -Dudev=disabled -Ddocumentation=disabled -Dtracing=disabled \
     -Dlibdw=disabled -Dlibunwind=disabled -Dsoftisp-gpu=disabled \
-    -Dtest=false
+    -Dtest=false \
+    -Dcpp_link_args="-static-libstdc++"
 
 ninja -C "$BUILD" -j"$(nproc)"
 echo "✅ 编译完成，产物："

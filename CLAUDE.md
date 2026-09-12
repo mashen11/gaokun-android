@@ -64,6 +64,14 @@
 > ⬜ **下次开工第一件事：给前摄一点光再抓一帧**（对着亮处/开灯）。
 > ⚠️ 想用传感器彩条自证走不通：**libcamera 在 configure 时把 `TestPatternMode`
 > 写回 Off**，`yavta` 预设会被它覆盖 —— 要在请求里设控件才行。
+> ★★ **M2 的架构问题已查清**（[#91](docs/stage4-findings.md)）：**HIDL 在本机是死的**
+> —— `hwservicemanager` 只是个悬空符号链接、init 报 "service not found"，
+> 而 `CameraProviderManager` 发现 HIDL provider 只能靠它 ⇒ #88 说的
+> "可能一行 HAL 代码都不用写"**作废**。⚠️ 另一条便宜路（libcamera 的 V4L2 垫片
+> 喂 AOSP 的 ExternalCameraProvider）也死了：软件 ISP **只出 RGB 族**、没有 YUYV
+> —— **和 #84 撞同一堵墙**。★ 教训：**生产端出什么格式、消费端收什么格式，
+> 要在立项时就对一遍。** 余下三条路见 TODO A7（建议先验"把 hwservicemanager
+> 编回来"这条，代价最小）。
 > ⬜ 真正的功能缺口：**hi846 不在 `camera_sensor_helper.cpp` 里**
 > （注意它**在** `camera_sensor_properties.cpp` 里，两个数据库别混），
 > 于是增益码换算不出来、**模拟增益全程恒 0**，弱光下先天残废。
