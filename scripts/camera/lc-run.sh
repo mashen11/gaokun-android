@@ -37,8 +37,23 @@ echo "  control = $(S 'cat /sys/devices/platform/soc@0/ac5a000.camss/power/contr
 echo "═══ 3. 跑 lctest ═══"
 # 环境变量名都是从 refs/libcamera 源码里 grep 出来的，不是记忆：
 #   LIBCAMERA_IPA_MODULE_PATH / LIBCAMERA_IPA_PROXY_PATH / LIBCAMERA_LOG_LEVELS
+# ⚠️★ LIBCAMERA_IPA_CONFIG_PATH 不能漏：软件 ISP 的 IPA 在 init 里【必须】
+#   读到调优文件，读不到就 return 错误 → "IPA init failed" →
+#   simple 流水线打一行 "disabling software debayering" 然后**照常出图**
+#   —— 于是拿到的是原始拜耳而不是 YUV，而整个流程看起来是成功的。
+#   ★ 这是本轮最像成功的失败：3 帧全收到、退出码 0。
+#   路径布局是 <配置路径>/<ipa名>/<文件名>（`ipa_proxy.cpp:57`），
+#   所以文件要放在 .../ipaconf/softisp/uncalibrated.yaml。
+# ⚠️★ 输出必须落到设备上的文件再 cat 回来，【不能】直接让 adb shell 打印：
+#   软件 ISP 的 IPA 跑在独立进程（softisp_ipa_proxy）里，它会**比 lctest 活得久**
+#   并继承 stdout ⇒ 直接打印时 `adb shell` 永远不返回，看起来像程序挂死，
+#   其实程序早就正常退出了。实测踩过一次，卡了 5 分钟。
 S "LD_LIBRARY_PATH=$LC/lib \
    LIBCAMERA_IPA_MODULE_PATH=$LC/ipa \
    LIBCAMERA_IPA_PROXY_PATH=$LC/proxy \
+   LIBCAMERA_IPA_CONFIG_PATH=$LC/ipaconf \
    LIBCAMERA_LOG_LEVELS=${LCLOG:-*:INFO} \
-   $LC/bin/lctest $*" 2>&1 | tr -d '\r'
+   $LC/bin/lctest $* > $LC/last.log 2>&1; echo LCTEST_RC=\$?"  2>&1 | tr -d '\r'
+S "cat $LC/last.log" 2>&1 | tr -d '\r'
+# 收尾：孤儿 proxy 不杀掉会一直占着，下次再跑会堆叠
+S "pkill -f softisp_ipa_proxy 2>/dev/null; true" >/dev/null 2>&1

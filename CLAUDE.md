@@ -54,18 +54,24 @@
 > ★★ 根因暂时搁置，**用户选择直接开工 libcamera HAL**。开发期用"开机即钉住
 > camss"当桥（实测有效）；功耗的账留到真要发布时再算（那时再测 pin 的代价）。
 >
-> **③ ⏳ libcamera HAL：M1 的【编译】这一半已完成，只差上机。**
-> 可行性摸底 [#88](docs/stage4-findings.md) 结论很好：`simple` 流水线**显式支持
-> `qcom-camss`**（`simple.cpp:266`，`swIspEnabled=true`）、**hi846 在传感器数据库里**
-> （`camera_sensor_properties.cpp:135`）、软件 ISP 吃我们的 `SGBRG10`、
-> **`LINK_FREQ` 全源码零出现**（hi846 缺它也不要紧）。
-> 实编 [#89](docs/stage4-findings.md)：NDK r27c 交叉编到 aarch64，
-> **整个移植只需要一处修复**（bionic 无 `pthread_setaffinity_np`，
-> `patches/libcamera/0001-*.patch`，`git diff` 生成、`git apply --check` 验过）。
-> 产物 3.0 MB（**故意不入库**，用 `scripts/camera/build-libcamera-android.sh` 重建）。
-> ⬜ **上机照做**：oneshot 到 `…-cam2.conf` → `SER=… bash scripts/camera/lc-run.sh -n 3`
-> → 看 `★ 最终像素格式` 是不是 RGB/YUV 族（是 ⇒ 软件 ISP 真的在去拜耳）。
-> ⚠️ 产物在本会话 scratchpad 里；换会话要重编（构建机按分钟计费）。
+> **③ ★★★★★ libcamera HAL：M1 已达成 —— 软件 ISP 把 8 MP 拜耳变成了 RGB。**
+> 实测（[#90](docs/stage4-findings.md)）：`simple` 流水线认出相机、
+> `SoftwareIsp: Input 3264x2448-GBRG-10-CSI2P` → **输出 ABGR8888 3256×2448**、
+> **连收 40 帧**无丢失、AGC 曝光单调爬升 23.5→39.3 ms。
+> ⇒ **相机 HAL 的技术底座成立**（拜耳进、RGB 出、帧率稳、控制环在动）。
+> ⚠️ **但画面是全黑的，视觉上还没确认过**。做过 A/B：RAW 帧标准差只有 0.36，
+> 整帧就是一条黑电平基座 ⇒ **传感器没收到光**，不是流水线坏。
+> ⬜ **下次开工第一件事：给前摄一点光再抓一帧**（对着亮处/开灯）。
+> ⚠️ 想用传感器彩条自证走不通：**libcamera 在 configure 时把 `TestPatternMode`
+> 写回 Off**，`yavta` 预设会被它覆盖 —— 要在请求里设控件才行。
+> ⬜ 真正的功能缺口：**hi846 不在 `camera_sensor_helper.cpp` 里**
+> （注意它**在** `camera_sensor_properties.cpp` 里，两个数据库别混），
+> 于是增益码换算不出来、**模拟增益全程恒 0**，弱光下先天残废。
+> 补一条 helper 是小而清晰、可发上游的活，增益模型要从内核 `hi846.c` 读不能猜。
+> ⚠️ 两个运行时坑见 #90：**Android 上没有 `libc++_shared.so`**（要借或改成
+> `-static-libstdc++`，且设备上六份里五份是裁剪过的）；
+> **`adb shell` 会因孤儿 `softisp_ipa_proxy` 占着 stdout 而挂死，
+> 程序其实早退出了** —— 已在 `lc-run.sh` 里绕开。
 >
 > **③ ⬜ WPA3（[issue #2](https://github.com/vahiru/gaokun-android/issues/2)）本地测不了。**
 > 判据很干净：同一台 ZTE 路由器、同一个 5 GHz 信道 36，只改安全模式就一正一反

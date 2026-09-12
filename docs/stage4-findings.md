@@ -5946,3 +5946,106 @@ will be isolated`。查代码坐实（`src/libcamera/ipa_manager.cpp:313`）：
    然后**在第一次塌缩之前钉住 camss**，再跑 `lctest`。
 3. **判据**：`lctest` 打印的 `★ 最终像素格式` —— 如果是 RGB/YUV 族而不是拜耳，
    就说明软件 ISP 真的插进了流水线并在做去拜耳；再看能不能收满 3 帧。
+
+---
+
+## #90 ★★★★★ M1 达成：libcamera 在 gaokun3 上跑通，软件 ISP 把 8 MP 拜耳变成 RGB（2026-09-12）
+
+[#89](#89) 编出来的东西上机了。**`simple` 流水线 + 软件 ISP 在这台机器上是通的。**
+
+### ★★ 决定性输出
+
+```
+INFO Camera camera_manager.cpp:223 Adding camera
+     '/base/soc@0/cci@ac4c000/i2c-bus@1/camera@20' for pipeline handler simple
+INFO SoftwareIsp software_isp.cpp:300 Input 3264x2448-GBRG-10-CSI2P stride 4080
+★ 最终像素格式 = ABGR8888  尺寸 = 3256x2448  stride = 13024
+  帧 0: seq=0 bytesused=31882752
+✅ 收满 40 帧
+```
+
+| 判据 | 结果 |
+|---|---|
+| libcamera 认出相机 | ✅ 1 个，走 **simple** 流水线 |
+| 软件 ISP 插进流水线 | ✅ `Input 3264x2448-GBRG-10-CSI2P` → 输出 **ABGR8888** |
+| 分辨率 | **3256×2448（8 MP，满分辨率）** |
+| 连续取帧 | ✅ 40 帧无丢失，`bytesused` 恒为 31,882,752 = 3256×2448×4 |
+| AGC 控制环 | ✅ 曝光单调爬升 23,459 → 39,266 µs |
+| ⚠️ 画面内容 | **全黑** —— 见下，是光的问题不是流水线的问题 |
+
+⇒ **相机 HAL 的技术底座成立**：拜耳进、RGB 出、帧率稳定、控制环在动。
+
+### ⚠️ 画面全黑的归因（做了 A/B，不是猜的）
+
+`lctest` 存下的 ABGR 帧 RGB 全 0、alpha 全 255。对照抓一次 **RAW**：
+
+| | 均值（高 8 位） | 标准差 | 范围 |
+|---|---|---|---|
+| RAW 第一次 | 15.31 | 3.14 | [0,17] |
+| RAW（曝光爬升后）| 15.94 | **0.36** | [0,17] |
+
+★ 第二次的**标准差只有 0.36** —— 整帧就是一条平的黑电平基座。
+`uncalibrated.yaml` 里启用了 `BlackLevel`，10 位传感器的黑电平通常是 64
+（折合 8 位 = 16），而整帧几乎都在它之下 ⇒ 减完全部钳到 0。
+⇒ **传感器确实没收到光**，与 [#81](#81) 的记录一致
+（当年要把曝光拉到 840 + 模拟增益 240 才有可观读数）。
+
+⚠️ 所以：**"能出图"已经证明，"出的是正确的图"还没有视觉确认。**
+按本仓规矩这两件事要分开说。
+
+### ⚠️ 试图用测试图案自证失败了 —— 而失败本身是个有用的发现
+
+[#81](#81) 当年用传感器的 100% 彩条证明"传感器是活的"。这次照做：
+`yavta -w "0x009f0903 2"` 设好（回读 `current 2`），跑 lctest，**出来还是全黑**；
+跑完再回读 —— **`current 0`**。
+
+⇒ **libcamera 在 configure 时把 `TestPatternMode` 写回了 Off。**
+它把测试图案当成一个自己管理的控件（默认 Off），外部预设会被覆盖。
+要用它必须在**请求里**设 `controls::draft::TestPatternMode`，
+而 `lctest` 当前没设（构建机已 deallocate，改不了）。
+★ 这条要记住：**libcamera 接管设备后，任何靠 `yavta`/`v4l2-ctl` 预设的
+subdev 控件都可能被它覆盖** —— 预设法在 libcamera 之下不成立。
+
+### ⚠️ 真正的功能缺口：hi846 没有 `CameraSensorHelper`，模拟增益被钉死在 0
+
+```
+WARN IPASoftIsp softisp.cpp:104 Failed to create camera sensor helper for hi846
+DEBUG Agc agc.cpp:825 exposure-time: 39266.67us, analogue-gain: 0, ...
+```
+
+★ 注意区分**两个不同的数据库**，我一开始差点混为一谈：
+
+* `src/libcamera/sensor/camera_sensor_properties.cpp` —— **hi846 在里面**（[#88](#88)）
+* `src/ipa/libipa/camera_sensor_helper.cpp` —— **hi846 不在**
+
+后者提供的是**增益码 ↔ 真实增益的换算模型**。没有它，AGC 只能调曝光，
+**模拟增益全程为 0**（实测 40 帧里一次都没动），弱光下先天残废。
+⬜ 这是一个小而清晰、且**可以发上游**的补丁：给 hi846 写一条
+`CameraSensorHelper`，增益模型要从内核驱动 `drivers/media/i2c/hi846.c` 里读，
+**不能猜**。设备实测控件范围：`Exposure [6,840] 默认 840`、
+`Analogue Gain [0,240] step 8`、`Vertical Blanking [122,64815]`、
+`Pixel Rate 144 MHz`、`Test Pattern [0,9]`。
+
+### ⚠️ 两个运行时坑
+
+1. **缺 `libc++_shared.so`** —— NDK 默认动态链接 C++ 运行时，而 Android 系统里
+   **没有这个库**（只有平台自己的 `libc++.so`，soname 不同）。
+   临时办法是从设备上已装应用里借一份；⚠️ **六份里有五份是裁剪过的**
+   （游戏构建会剥掉没用到的部分），借错了会报
+   `cannot locate symbol "_ZTTNSt6__ndk114basic_ofstreamIcE..."`。
+   判据是直接 `strings` 找那个符号，比逐个试快。
+   ★ **正解是构建时 `-static-libstdc++`**，下次在构建机上改掉。
+2. ⚠️★ **`adb shell` 会挂死，而程序其实早就正常退出了** ——
+   软件 ISP 的 IPA 跑在独立进程 `softisp_ipa_proxy` 里，它**比 `lctest` 活得久**
+   且继承了 stdout，于是 adb 那条管道一直不关闭。实测卡了 5 分钟，
+   看起来完全像"程序挂死"。
+   ★ **判据教训：进程退出与管道关闭是两件事。** 修法是让命令把输出写到设备上的
+   文件再 `cat` 回来，并在收尾时 `pkill` 掉孤儿 proxy —— 已写进 `lc-run.sh`。
+
+### ⬜ 下一步
+
+1. ⬜ **视觉确认**：给前摄一点光（对着亮处/开灯）再抓一帧，确认是正确的图像
+   而不只是正确的格式。**这一步需要人。**
+2. ⬜ 给 hi846 写 `CameraSensorHelper`（增益模型从内核驱动读），解决增益恒 0。
+3. ⬜ M2：HAL3 模块怎么接进框架（[#88](#88) 查明 HIDL passthrough 与 AIDL 两条都在）。
+4. ⬜ 重编时加 `-static-libstdc++`，去掉对 `libc++_shared.so` 的依赖。

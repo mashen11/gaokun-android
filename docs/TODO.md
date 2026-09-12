@@ -258,8 +258,12 @@ URL 是 **36.9 MB/s**。对"用户走系统内 OTA 升级"有实际影响（1 GB
 > 但 hwservicemanager 本机装着没跑，passthrough 还灵不灵**未验证**。
 >
 > **里程碑**（照搬传感器 M11 被验证过的路径：先做独立客户端 = HAL 逻辑的 90%）：
-> ⬜ **M1 把 libcamera + `cam` 交叉编到 Android aarch64，在设备上出一帧去拜耳的图**
->    —— 需要构建机。这一步一次性解决最大的不确定性。
+> ✅ **M1 已达成**（2026-09-12，[#89](stage4-findings.md)/[#90](stage4-findings.md)）：
+>    交叉编只需一处移植修复；上机后 `SoftwareIsp` 把 `3264x2448-GBRG-10-CSI2P`
+>    变成 **ABGR8888 3256×2448**，连收 40 帧，AGC 曝光在爬。
+>    ⚠️ 画面全黑（传感器没光，RAW 标准差仅 0.36 = 黑电平基座）——
+>    **"能出图"已证明，"出的是对的图"还没视觉确认**，下次开工先给前摄补光。
+>    ⬜ 功能缺口：hi846 不在 `camera_sensor_helper.cpp` 里 ⇒ 模拟增益恒 0。
 > ⬜ **M2 解决 HAL3→框架的接法**（HIDL passthrough vs 自写 AIDL provider）。
 > ⬜ **M3 meson → Android.bp**（mesa 那套工具链可复用）。
 > ⚠️ 全程压着 [#87](stage4-findings.md) 的电源域缺陷，开发期用"开机即钉住 camss"当桥。
