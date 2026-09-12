@@ -41,24 +41,42 @@ S() { adb -s "$SER" shell "$@"; }
 
 set_ctl() { S "/data/local/tmp/yavta-static --no-query -w '$1 $2' $SD >/dev/null 2>&1"; }
 
-measure() {   # $1 = 增益码；打印 "code,均值,中位,p99,饱和%"
+REPS=${REPS:-3}
+
+one_shot() {  # $1=增益码；打印 "中位数 均值 饱和%"
     set_ctl $ID_EXPO $EXPO
     set_ctl $ID_AGAIN $1
     SER=$SER bash "$(dirname "$0")/lc-run.sh" -r RAW -n 4 -o /data/local/tmp/gc >/dev/null 2>&1
     adb -s "$SER" pull /data/local/tmp/gc-0.SGBRG10_CSI2P /tmp/gc.bin >/dev/null 2>&1
-    python3 - "$1" <<'PY'
-import sys
-code=int(sys.argv[1])
+    python3 - <<'PY'
 d=open("/tmp/gc.bin","rb").read()
 msb=[]
 for i in range(0,len(d),5): msb.extend(d[i:i+4])   # CSI2P：每 5 字节 4 像素，取高 8 位
 msb.sort(); n=len(msb)
-sat=sum(1 for v in msb if v>=250)/n*100
-print(f"{code},{sum(msb)/n:.4f},{msb[n//2]},{msb[int(n*0.99)]},{sat:.3f}")
+print(f"{msb[n//2]} {sum(msb)/n:.4f} {sum(1 for v in msb if v>=250)/n*100:.3f}")
 PY
 }
 
-echo "code,mean,median,p99,sat_pct" | tee "$OUT"
+measure() {   # $1 = 增益码；重复 REPS 次取中位数
+    local meds="" means="" sats=""
+    for _ in $(seq 1 "$REPS"); do
+        set -- "$1"
+        out=$(one_shot "$1")
+        meds="$meds $(echo "$out" | cut -d" " -f1)"
+        means="$means $(echo "$out" | cut -d" " -f2)"
+        sats="$sats $(echo "$out" | cut -d" " -f3)"
+    done
+    python3 - "$1" "$meds" "$means" "$sats" <<'PY'
+import sys, statistics
+code, meds, means, sats = sys.argv[1], sys.argv[2].split(), sys.argv[3].split(), sys.argv[4].split()
+m  = statistics.median(list(map(float, meds)))
+mn = statistics.median(list(map(float, means)))
+st = statistics.median(list(map(float, sats)))
+print(f"{code},{m:.1f},{mn:.2f},{st:.3f}," + "|".join(meds))
+PY
+}
+
+echo "code,median,mean,sat_pct,reps" | tee "$OUT"
 for g in $(seq 0 "$STEP" 240); do measure "$g" | tee -a "$OUT"; done
 echo "# 收尾对照：再测一次 code=0，与开头那行比" | tee -a "$OUT"
 measure 0 | tee -a "$OUT"

@@ -263,7 +263,13 @@ URL 是 **36.9 MB/s**。对"用户走系统内 OTA 升级"有实际影响（1 GB
 >    变成 **ABGR8888 3256×2448**，连收 40 帧，AGC 曝光在爬。
 >    ⚠️ 画面全黑（传感器没光，RAW 标准差仅 0.36 = 黑电平基座）——
 >    **"能出图"已证明，"出的是对的图"还没视觉确认**，下次开工先给前摄补光。
->    ⬜ 功能缺口：hi846 不在 `camera_sensor_helper.cpp` 里 ⇒ 模拟增益恒 0。
+>    ✅ **增益缺口已补**（[#94](stage4-findings.md)）：实测标定出
+>    **`gain(code) = 1 + code/16`**（满量程 16×），留出验证四档误差 <2.3%；
+>    黑电平实测 64@10bit 且不随增益放大。补丁
+>    `patches/libcamera/0002-ipa-libipa-add-hi846-camera-sensor-helper.patch`
+>    已入库（`git diff` 生成、`git apply --check` 验过），**可发上游**。
+>    ⬜ 待用它重编 libcamera 并确认 AGC 的 analogue-gain 不再恒 0 → 拿到第一张
+>    正常曝光的彩色图。
 > ⬜ **M2 HAL3→框架的接法**：★ 2026-09-12 已查清（[#91](stage4-findings.md)）——
 >    **HIDL 在本机是死的**（`hwservicemanager` 是悬空符号链接、init 报
 >    "service not found"，而 `CameraProviderManager` 发现 HIDL provider 只能靠它），
