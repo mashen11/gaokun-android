@@ -6430,3 +6430,65 @@ code=128 三次:  66  99  68      ← 三次里【两次】偏低，中位数直
 补丁已入库并经 `git apply --check` 验过。⬜ 还需要：
 1. 用它重编 libcamera（构建机），确认 AGC 的 `analogue-gain` 不再恒 0；
 2. 那时应当就能拿到**第一张正常曝光的彩色图** —— [#90](#90) 欠的视觉确认。
+
+---
+
+## #95 ★★★★★ 相机拍出第一张照片：libcamera 软件 ISP 端到端跑通（2026-09-13）
+
+![gaokun3 第一张照片](img/gaokun3-first-photo.jpg)
+
+**一张能认出来的真实照片** —— 墙、门框、天花板的灯、右边的纸。
+8 MP，从 10 位拜耳纯软件去马赛克得到。
+
+完整链路：**hi846 → CSIPHY3 → CSID0 → VFE0 RDI0 → libcamera `simple` 流水线
+→ 软件 ISP（去拜耳 + AWB + AGC）→ ABGR8888**。
+
+### 决定性的一行
+
+```
+DEBUG Agc agc.cpp:825 exposure-time: 66605.56us, analogue-gain: 16,
+                      quantization-gain: 1, digital-gain: 6.65
+```
+
+**`analogue-gain: 16`** —— [#94](#94) 标定出来的增益模型在工作
+（16 = 满量程 16×）。此前它**恒为 0**（[#92](#92)），画面只能停在黑电平。
+`Failed to create camera sensor helper for hi846` 那条 Warning 也消失了。
+
+### 帧内容判据
+
+| 通道 | 均值 | 标准差 | 范围 |
+|---|---|---|---|
+| R | 48.72 | 20.01 | [0,127] |
+| G | 57.36 | 16.97 | [0,136] |
+| B | 51.11 | 18.31 | [0,154] |
+
+不同颜色数 **4723** ⇒ 有真实的空间结构与色彩变化，不是死图。
+
+### 本轮一并做掉的三件事
+
+1. **两个补丁从干净的上游树重新应用并验证**
+   （`patches/libcamera/0001`+`0002`，`git apply --check` + 实际 `git apply` 都过）
+   —— 证明补丁本身可复现，不依赖我当时手改的那棵树。
+2. **`-static-libstdc++`**：`llvm-readelf -d` 确认 `lctest` 与 `libcamera.so`
+   的 `NEEDED` 里只剩 `libcamera-base.so` / `libm` / `libdl` / `libc`，
+   **对 `libc++_shared.so` 的依赖彻底消失** ⇒ [#90](#90) 那个"从应用里借一份、
+   六份里五份被裁剪过"的丑陋workaround可以扔了。
+3. **`lctest` 改存最后一帧**（`got == want - 1`）而不是第 0 帧
+   —— [#94](#94) 查明第 0 帧偶发不完整，是所有单边偏低离群值的来源。
+   顺带：跑 AGC 时最后一帧也正是曝光收敛得最好的那一帧。
+
+### ⚠️ 画面偏暗偏灰是【调优】问题，不是通路问题
+
+用的是 libcamera 的通用 `uncalibrated.yaml`：**没有色彩矫正矩阵（CCM）**
+（该文件里 `Ccm:` 那一段是注释掉的，原文说"有显著性能开销，没调过就别开"），
+白平衡是**灰度世界法**（`No AWB algorithm specified, using grey world`），
+且 `colourGains` 参数缺失（`Failed to parse 'colourGains'`）。
+
+⇒ ⬜ 想要好看的成片需要一份 **hi846 的调优文件**（`hi846.yaml`），那是独立的一摊活。
+**但那不挡 HAL** —— M2 可以在当前画质上直接开工。
+
+### 里程碑状态
+
+* ✅ **M1 完成**（[#89](#89) 编译 + [#90](#90) 出帧 + 本条出图）
+* ⬜ M2：camera3 → AIDL 桥（方案已定，见 [#91](#91)）
+* ⬜ M3：meson → Android.bp

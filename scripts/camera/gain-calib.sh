@@ -47,7 +47,7 @@ one_shot() {  # $1=增益码；打印 "中位数 均值 饱和%"
     set_ctl $ID_EXPO $EXPO
     set_ctl $ID_AGAIN $1
     SER=$SER bash "$(dirname "$0")/lc-run.sh" -r RAW -n 4 -o /data/local/tmp/gc >/dev/null 2>&1
-    adb -s "$SER" pull /data/local/tmp/gc-0.SGBRG10_CSI2P /tmp/gc.bin >/dev/null 2>&1
+    adb -s "$SER" pull /data/local/tmp/gc-last.SGBRG10_CSI2P /tmp/gc.bin >/dev/null 2>&1
     python3 - <<'PY'
 d=open("/tmp/gc.bin","rb").read()
 msb=[]

@@ -268,8 +268,12 @@ URL 是 **36.9 MB/s**。对"用户走系统内 OTA 升级"有实际影响（1 GB
 >    黑电平实测 64@10bit 且不随增益放大。补丁
 >    `patches/libcamera/0002-ipa-libipa-add-hi846-camera-sensor-helper.patch`
 >    已入库（`git diff` 生成、`git apply --check` 验过），**可发上游**。
->    ⬜ 待用它重编 libcamera 并确认 AGC 的 analogue-gain 不再恒 0 → 拿到第一张
->    正常曝光的彩色图。
+>    ✅ **已重编并上机验证**（[#95](stage4-findings.md)）：`analogue-gain: 16`
+>    （满量程），Warning 消失，**拍出第一张能认出来的真实照片**
+>    （`docs/img/gaokun3-first-photo.jpg`）。M1 至此完成。
+>    ⬜ 画质偏暗偏灰是**调优**问题（用的是通用 `uncalibrated.yaml`：无 CCM、
+>    灰度世界 AWB、缺 colourGains）——需要一份 `hi846.yaml` 调优文件，
+>    **但那不挡 HAL**，M2 可以直接开工。
 > ⬜ **M2 HAL3→框架的接法**：★ 2026-09-12 已查清（[#91](stage4-findings.md)）——
 >    **HIDL 在本机是死的**（`hwservicemanager` 是悬空符号链接、init 报
 >    "service not found"，而 `CameraProviderManager` 发现 HIDL provider 只能靠它），

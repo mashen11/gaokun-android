@@ -67,7 +67,7 @@ int main(int argc, char **argv)
 {
 	StreamRole role = StreamRole::Viewfinder;
 	unsigned int want = 3;
-	std::string prefix = "/data/local/tmp/lcframe";
+	std::string prefix = "/data/local/tmp/lcframe";   /* 实际文件名是 <prefix>-last.<格式> */
 
 	for (int i = 1; i < argc; i++) {
 		std::string a = argv[i];
@@ -194,11 +194,19 @@ int main(int argc, char **argv)
 			std::cout << p.bytesused << " ";
 		std::cout << "\n";
 
-		if (got == 0) {
-			std::string path = prefix + "-0." +
+		/*
+		 * ⚠️★ 存【最后一帧】而不是第 0 帧。
+		 * 开流后的第一帧偶尔是不完整的：标定增益时同一档重复测，
+		 * 离群值【全是偏低的、没有偏高的】（如 66/99/68），
+		 * 正是 frame 0 偶发坏帧的签名。见 docs/stage4-findings.md #94。
+		 * 顺带：跑 AGC 时最后一帧也是曝光收敛得最好的那一帧。
+		 */
+		if (got == want - 1) {
+			std::string path = prefix + "-last." +
 				(sc.pixelFormat.toString());
 			if (writePlanes(fb, path))
-				std::cout << "  ✅ 首帧已存到 " << path << "\n";
+				std::cout << "  ✅ 末帧(第 " << got << " 帧)已存到 "
+					  << path << "\n";
 		}
 
 		got++;
