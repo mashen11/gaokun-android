@@ -5675,3 +5675,93 @@ update_attempter_android.cc(770)] Update successfully applied, waiting to reboot
 * ⚠️ 设备时钟不准（开机时刻直接取了构建时间，没有 RTC/NTP 校准）——
   **拿 tombstone 的 mtime 与"本次开机时刻"比较是不可靠的判据**，
   用 `logcat -b crash` 才靠谱。
+
+---
+
+## #87 ★★★★ camss 电源域缺陷：上游候选修复【被实测否掉】，并查出 camcc 的 unbind 是坏的（2026-09-12）
+
+[#83](#83) 第九节提出的候选修复 **`499b4cb6710f clk: qcom: camcc-sc8280xp:
+unregister CAMCC_GDSC_CLK`**，backport 成 `patches/0020` 编出内核 `#5`，
+本轮上机实测：**不是我们这个缺陷的修复。**
+
+### 判据与结果
+
+先确认补丁真的生效（不是"编了但没进去"）：
+
+| 判据 | 值 |
+|---|---|
+| `clk_summary` 里 `camcc_gdsc_clk` | **0 次**（确实没注册） |
+| 对照 `camcc_csiphy3_clk` | 1 次（camcc 本身正常） |
+| `titan_top_gdsc` 在 genpd 里 | 在，`off-0` |
+| `/dev/video*` | **34 个**（camss 完整 probe） |
+
+然后跑判据（全程**不碰 `/dev/mem`** —— GDSC 开关状态在 `pm_genpd_summary` 里就有）：
+
+```
+① 第一次 camtest（GDSC 从未塌缩）  ✅ 流已开，12 帧，titan=on
+② 等塌缩                           ★ 第 3 秒：titan=off-0
+③ 塌缩之后再跑 —— 判据              ❌ STREAMON 失败: Connection timed out，0 帧
+                                     titan=off-0  camss=error
+```
+
+dmesg **一字不差地复现**：
+
+```
+titan_top_gdsc status stuck at 'off'
+WARNING: drivers/clk/qcom/gdsc.c:185 at gdsc_toggle_logic+0x1b8/0x1c0
+qcom-camss ac5a000.camss: Failed to power up pipeline: -110
+```
+
+⇒ **假说被否。** 至此 camss 电源域缺陷已排除 **六条**：camcc runtime suspend /
+时钟被关 / RETAIN_FF / MMCX 父域档位 / 息屏 / **上游 `unregister CAMCC_GDSC_CLK`**。
+
+### ★ 这个否定结果是【被预测到的】
+
+[#83](#83) 第九节写这条候选时就记了反证：本机 `clk_summary` 里 `camcc_gdsc_clk`
+的 hardware enable 一直是 **`Y`**，而 `state_synced` 已是 1 ——
+"被 sync_state 关掉"这个机制**在本机从来就对不上**。
+
+★ 所以真正值得记的不是"猜错了"，而是：**当时那条反证的分量被低估了。**
+上游的告警文本与我们逐字相同（同一个 GDSC、同一个函数、同一条 WARN），
+这种表面相似度**压过了**一条直接矛盾的实测观察。
+⇒ **文本相似度不是证据；一条对不上的实测比十条对得上的字面匹配更有分量。**
+（好在本仓的规矩是"编出来测，不靠推理下结论"，所以代价只是一次上机。）
+
+### ⚠️ 顺带查出：`camcc-sc8280xp` 的 unbind 路径是坏的
+
+想验一个新假说（"塌缩会打掉 camcc 在 probe 时设好的寄存器状态，
+比如那句把 GDSC 时钟设成常开的 `qcom_branch_set_clk_en(regmap, 0xc1e4)`"），
+做法是 unbind + bind camcc 让它重走 probe —— **这条路不通**：
+
+```
+debugfs: 'titan_top_gdsc' already exists in 'pm_genpd'
+camcc-sc8280xp ad00000.clock-controller: probe with driver camcc-sc8280xp
+                                          failed with error -22
+```
+
+`gdsc_register()` 在 probe 里注册的那些 genpd **unbind 时没有被注销**，
+于是 rebind 必然撞名失败。后果不是"试不成"，而是
+**相机子系统进入"已解绑且绑不回去"的状态，只能重启恢复**。
+
+⇒ 两个推论：
+1. **"出错后重绑 camcc 恢复相机"这条廉价的规避路子不存在**（除非先修这个 unbind）。
+2. 这本身是一条可以报给上游的缺陷。
+
+### 下一步（重排优先级）
+
+★ **建议不再继续猜根因，先把"能用的相机"交付出去**：
+已有**实测有效的规避**（塌缩前钉住 camss 的 runtime PM，连跑 5 次 + 空闲 60 秒全过）。
+挡着它进 ROM 的唯一理由是 **"相机电源域常开、功耗未测"** ——
+**那是一个可以测量的问题，不是一个未知**。
+
+⬜ 因此下一个动作定为：**量一次钉住 camss 的功耗代价**（息屏静置，
+对比 `pin` / `不 pin` 两种状态的电池电流）。
+* 代价可忽略 ⇒ 规避可以进 ROM，相机 HAL（libcamera，见 [#84](#84)）立刻可以开工；
+* 代价明显 ⇒ 再回来啃根因，那时才值得动 `/dev/mem`（**并且必须先钉住 camcc**）。
+
+### 另记
+
+* ⚠️ 本机 dmesg 被 **SELinux permissive 的 audit 噪声淹没**
+  （`audit_lost=3332`、`audit: rate limit exceeded`）——
+  和 [#37](#37) 的 `Handover signaled` 是同类问题：**无害但损害取证能力**。
+  查 camcc/camss 必须 `grep`，直接 `tail` 看到的全是 avc denied。
