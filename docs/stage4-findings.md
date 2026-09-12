@@ -5765,3 +5765,88 @@ camcc-sc8280xp ad00000.clock-controller: probe with driver camcc-sc8280xp
   （`audit_lost=3332`、`audit: rate limit exceeded`）——
   和 [#37](#37) 的 `Handover signaled` 是同类问题：**无害但损害取证能力**。
   查 camcc/camss 必须 `grep`，直接 `tail` 看到的全是 avc denied。
+
+---
+
+## #88 ★★★★ libcamera 可行性摸底：比预期好得多 —— 上游已经认识我们这台机器（2026-09-12）
+
+[#84](#84) 证明相机 HAL 只能走 libcamera 的软件 ISP 之后，本条把"这条路到底有多远"
+查清楚。**全部结论都有源码出处**（`refs/libcamera`，已加进 `scripts/clone-refs.sh`，
+clone 于 2026-09-12，上游 HEAD `87c72856`）。
+
+### ★★ 五条关键事实：libcamera 上游**已经**支持我们这套硬件
+
+| # | 问题 | 答案 | 出处 |
+|---|---|---|---|
+| 1 | `simple` 流水线认不认 qcom-camss | ✅ **显式列着**，且 `swIspEnabled = true` | `src/libcamera/pipeline/simple/simple.cpp:266` |
+| 2 | 软件 ISP 吃不吃我们的格式 | ✅ 8/10/12 位未打包 + **10/12 位 CSI2 打包**，拜耳序 GBRG 在标准四种内 | `src/libcamera/software_isp/debayer_cpu.cpp:443-465` |
+| 3 | 我们的 mbus 码 `0x300e` 是什么 | `MEDIA_BUS_FMT_SGBRG10_1X10`（10 位拜耳 GBRG） | `include/linux/media-bus-format.h:145` |
+| 4 | hi846 在不在传感器数据库里 | ✅ **在**（41 个已知传感器之一） | `src/libcamera/sensor/camera_sensor_properties.cpp:135` |
+| 5 | 有没有 Android HAL 层 | ✅ 产出 `libcamera-hal.so`（camera3 HAL3 模块） | `src/android/meson.build`、`src/android/camera3_hal.cpp:95` |
+
+★ 第 4 条还给了一次**交叉验证**：libcamera 给 hi846 记的测试图案是
+`2 = Color Bars`、`9 = Resolution Pattern` —— **正是 [#81](#81) 当初用来证明
+"传感器是活的"的那两个**。我们逆向出来的东西和上游数据库逐条对上。
+
+### ✅ 顺手排掉一个本来很可能致命的风险
+
+[#81](#81) 记过：**hi846 驱动没实现 `V4L2_CID_LINK_FREQ`**（控件表里只有
+`Pixel Rate` = 144 MHz）。很多相机框架拿它算带宽，缺了就直接拒绝。
+
+实查：`LINK_FREQ` 在整个 libcamera **源码里一次都没出现**
+（只在 vendored 的 `include/linux/v4l2-controls.h` 里，那是内核头的副本）
+⇒ **libcamera 不要求它**，风险解除。
+★ 这类"上游要不要某个我们缺的东西"的问题，`grep -rn` 一次就能定，
+**比任何推理都便宜**，应该在立项时就做，而不是编译失败时才做。
+
+### 依赖面很小
+
+`src/libcamera/meson.build`：`threads` / `dl` 是硬依赖；
+**`libudev` 与 `gnutls`(或 `libcrypto`) 都是可选**（`required : get_option('udev')`
+/ `required : false`）—— Android 上正好都没有，可以直接关掉。
+实际要补的只有 **`libyaml`**。
+Android HAL 层另加 `libexif` / `libjpeg` / `libyuv`（后两个 AOSP 自带）。
+
+### ⚠️ 真正的未知在 Android 这一侧：HAL3 模块怎么接进框架
+
+libcamera 产出的是**传统 `camera_module_t` HAL3 模块**
+（`camera3_hal.cpp:95` 的 `HAL_MODULE_INFO_SYM`），全树**没有任何 AIDL**。
+而 Android 16 的框架要 `ICameraProvider`。中间这一段需要自己接。
+
+实机取证（`cameraserver` 是**静态链接**的，所以要对二进制本身 `strings`，
+`/system/lib64/libcameraservice.so` 根本不存在）：
+
+```
+strings /system/bin/cameraserver | grep ICameraProvider
+  → HIDL::ICameraProvider::getCameraDeviceInterface_V3_x::passthrough  ← ★
+  → android.hardware.camera.provider@2.4 / @2.5 / @2.6
+  → android.hardware.camera.provider.ICameraProvider          ← AIDL 也在
+```
+
+⇒ **这个 ROM 的 cameraserver 两条通路都支持**：HIDL `@2.4/2.5/2.6`（含
+**passthrough**，即进程内 dlopen `-impl.so`，不需要 hwservicemanager）与 AIDL。
+而上游 `hardware/interfaces/camera/provider/2.4/default/Android.bp` 里
+**`android.hardware.camera.provider@2.4-legacy` 仍然存在**
+（`LegacyCameraProviderImpl_2_4.cpp`，作用就是加载传统 `camera_module_t` 模块）。
+
+⇒ 因此**有可能一行 HAL 代码都不用写**：
+`libcamera-hal.so` 改名装成 `camera.gaokun3.so` + 装上 `@2.4-legacy`/`-impl`。
+⚠️ **但这只是"零件都在"，不是"接得上"** —— hwservicemanager 在本机
+**装着但没在跑**（`ps` 0 个进程），passthrough 那条 fallback 在 AOSP 16 里
+还灵不灵**没有验证**。★ 按本仓规矩这条只能记成待验证，不能当结论。
+
+### 建议的里程碑（照搬传感器 M11 那条被验证过的路径）
+
+M11 的经验是：**先做独立命令行客户端，那就是 HAL 逻辑的 90%**。对应到这里：
+
+1. ⬜ **M1：把 libcamera + `cam` 工具交叉编到 Android aarch64，在设备上跑出
+   一帧去拜耳后的图。** 这一步验证 `simple` 流水线 + 软件 ISP 在**我们的**
+   拓扑上真能跑通，把最大的不确定性一次性解决。
+   ⚠️ 需要构建机（本机编不了）。
+2. ⬜ **M2：解决"HAL3 模块怎么接进框架"**（HIDL passthrough vs 自写 AIDL provider），
+   这时已经有能出图的 libcamera，可以直接试。
+3. ⬜ **M3：meson → Android.bp**。mesa 那套工具链可复用
+   （`scripts/mesa-tool-fixes.py` / `mesa-bp-merge.py` / `join_meson_continuations.py`）。
+
+⚠️ **三个里程碑全程都还压着 [#87](#87) 那个电源域缺陷** —— 开发期用
+"开机即钉住 camss"当桥（实测有效），功耗的账留到真要发布时再算。

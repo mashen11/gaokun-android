@@ -241,6 +241,29 @@ URL 是 **36.9 MB/s**。对"用户走系统内 OTA 升级"有实际影响（1 GB
 
 ### A7. 摄像头 —— ★★ 前摄在 V4L2 层已打通，缺 HAL
 
+> **★★ 2026-09-12 libcamera 可行性摸底完成（[#88](stage4-findings.md)）——
+> 结论比预期好得多，上游已经认识我们这台机器**：
+> `simple` 流水线 **显式支持 `qcom-camss`** 且 `swIspEnabled=true`
+> （`simple.cpp:266`）；软件 ISP 吃 10 位 CSI2 打包 + GBRG 序
+> （`debayer_cpu.cpp:443-465`，我们是 `0x300e` = `SGBRG10_1X10`）；
+> **hi846 在传感器数据库里**（`camera_sensor_properties.cpp:135`，
+> 它记的测试图案 2=彩条 / 9=分辨率图案**正是 #81 用过的那两个**）；
+> 依赖面很小（`udev`/`gnutls` 都可选，只需补 `libyaml`）；
+> ✅ 并排掉了一个本可能致命的风险：**libcamera 源码里 `LINK_FREQ` 一次都没出现**
+> ⇒ 不要求 hi846 缺的那个控件。
+> ⚠️ 真正的未知在 Android 侧：libcamera 产出的是传统 `camera_module_t` HAL3，
+> 而框架要 `ICameraProvider`。实机 `strings /system/bin/cameraserver` 显示
+> **HIDL @2.4/2.5/2.6（含 passthrough）与 AIDL 两条都在**，上游
+> `provider@2.4-legacy`（加载传统模块的那个）也还在 ⇒ **可能一行 HAL 代码都不用写**，
+> 但 hwservicemanager 本机装着没跑，passthrough 还灵不灵**未验证**。
+>
+> **里程碑**（照搬传感器 M11 被验证过的路径：先做独立客户端 = HAL 逻辑的 90%）：
+> ⬜ **M1 把 libcamera + `cam` 交叉编到 Android aarch64，在设备上出一帧去拜耳的图**
+>    —— 需要构建机。这一步一次性解决最大的不确定性。
+> ⬜ **M2 解决 HAL3→框架的接法**（HIDL passthrough vs 自写 AIDL provider）。
+> ⬜ **M3 meson → Android.bp**（mesa 那套工具链可复用）。
+> ⚠️ 全程压着 [#87](stage4-findings.md) 的电源域缺陷，开发期用"开机即钉住 camss"当桥。
+
 > **★ 2026-09-12 更新（上机实测）**：上游候选修复 `patches/0020`
 > （`unregister CAMCC_GDSC_CLK`）**被否** —— 补丁确实生效（`clk_summary` 里
 > `camcc_gdsc_clk` 0 次）但故障一字不差复现，见 [#87](stage4-findings.md)。

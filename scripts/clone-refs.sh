@@ -27,6 +27,7 @@ jhovold-linux|https://github.com/jhovold/linux|wip/sc8280xp-6.16
 egotouchrev-linux|https://github.com/chiyuki0325/EGoTouchRev-Linux|main
 gaokun-buildbot|https://github.com/KawaiiHachimi/linux-gaokun-buildbot|main
 egotouchrev-rebuild|https://github.com/awarson2233/EGoTouchRev-rebuild|main
+libcamera|https://gitlab.freedesktop.org/camera/libcamera.git|master
 "
 
 echo "=== clone start ==="
