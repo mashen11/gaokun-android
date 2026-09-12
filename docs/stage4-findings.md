@@ -5656,7 +5656,20 @@ update_attempter_android.cc(770)] Update successfully applied, waiting to reboot
   确实掉了（0 个 overlay 挂载、`vendor.minigbm.debug` 回到镜像原值）。
   本仓此前只记了那句 vbmeta footer 警告，这两句补上。
 * `default` 现已被 boot_control HAL 改成 `*-android-a.conf`（[#42](#42) 记过的行为）。
-  `_b` 槽保留着上一版 ROM（构建戳 1787552138）+ 同款内核，是现成的回落。
+* ⚠️★★★ **更正（同日，几小时后当场被打脸）：上面原本写着"`_b` 槽保留上一版 ROM，
+  是现成的回落"——【这句是错的】。** 装完 OTA 之后 `lpdump` 显示 super 的元数据里
+  **只剩 `_a` 一套逻辑分区**（`system_a`/`vendor_a`/`product_a`/`system_ext_a`），
+  `/dev/block/mapper/` 里也再没有任何 `_b`。**Virtual A/B 就是这样设计的**，
+  而 **CLAUDE.md 早就写着这条**，连"别信什么"都写明了：
+  > 真判据：`bootctl is-slot-bootable` 读的是 misc 里的标志位，
+  > **不代表 super 里真有那套分区** —— 先用 `lpdump` 查。
+
+  而我在装机验收里恰恰**用了那个被点名作废的判据**（"两槽都可启动 rc=0"），
+  还把它当成回落存在的证据写进了案卷 —— **在读过该警告的同一次会话里**。
+  ★ 教训：**仓库里"别用这个判据"的警告，和"这个结论是什么"一样值钱，
+  而前者更容易在自己顺手做验收时被跳过。**
+  真正的回落是：`default *-android-a.conf`（已验收的现役系统）
+  + 两个救援条目（Alpine / Ubuntu）。
 * ESP 只剩 **20 MiB**（296M 用掉 276M）：slot_a 42M + slot_b 42M +
   slot_cam 15M + slot_cam2 15M。
 * ⚠️ 设备时钟不准（开机时刻直接取了构建时间，没有 RTC/NTP 校准）——

@@ -24,7 +24,10 @@
 > ⚠️ 装机脚本里揪出三个"长得像成功"的 bug（假阳性完成判据 ×2、
 > 安全网 glob 写成下划线匹配不到条目），都已修并写进代码注释，见
 > [#86](docs/stage4-findings.md)。
-> `_b` 槽保留上一版 ROM（`1787552138`）+ 同款内核，是现成回落。
+> ⚠️★★★ **装完 OTA 后 `_b` 槽【不再存在】** —— `lpdump` 实测 super 里只剩 `_a`
+> 一套逻辑分区。我在验收里写过"`_b` 是现成回落"，**错的**，而本文下面早就
+> 写着"`bootctl is-slot-bootable` 不代表 super 里真有那套分区，先用 `lpdump` 查"。
+> 真正的回落 = `default *-android-a.conf` + 两个救援条目。见 [#86](docs/stage4-findings.md)。
 >
 > **② ⬜ 相机内核 `#5` 已编好放在 ESP 上，【故意没设 oneshot】。**
 > 它带上游 backport `patches/0020`（`unregister CAMCC_GDSC_CLK`）——
