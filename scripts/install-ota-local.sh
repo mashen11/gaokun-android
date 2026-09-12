@@ -16,8 +16,11 @@
 #  2. ★★ `update_engine` 把新槽标成 active 之后，**boot_control HAL 会立刻把
 #     ESP 的 `default` 改成新槽的条目**（M20 实测）。新槽起不来就连回落都没有了。
 #     **重启前必须把 `default` 掰回已知可用的那个槽，只用 oneshot 过去。**
-#  3. 这个版本的 `update_engine_client` **没有 `--status`**（M17 实测）。
-#     判断装完看 `bootctl get-active-boot-slot` 是否切槽。
+#  3. 这个版本的 `update_engine_client` **没有 `--status`**（M17 实测），
+#     而且 `--update` 是**异步**的：它提交完就返回（实测 82 ms），
+#     真正的进度只在 logcat 里。⚠️ 别拿 `bootctl get-active-boot-slot`
+#     当完成判据 —— **active slot 在【开始】时就切过去了**，见第 3 段注释。
+#     实测一次完整装机 93 秒（1.345 GB，含 postinstall）。
 set -uo pipefail
 SER=${SER:-gaokun3}
 MODE=${1:---check}
@@ -60,17 +63,46 @@ echo "═══ 2. 下发更新 ═══"
 HDRS=$(S 'cat /data/local/tmp/payload_properties.txt' | tr -d '\r' | tr '\n' '|' | sed 's/|$//')
 S "update_engine_client --payload=file:///data/local/tmp/payload.bin --update --headers=\"\$(cat /data/local/tmp/payload_properties.txt)\"" 2>&1 | tail -5
 
-echo "═══ 3. 等装完（看 active slot 是否切换；这个版本没有 --status）═══"
-for i in $(seq 1 120); do
-    NEW=$(S bootctl get-active-boot-slot | tr -d '\r')
-    CURN=$([ "$CUR" = "_a" ] && echo 0 || echo 1)
-    [ "$NEW" != "$CURN" ] && { ok "active slot 已切到 $NEW"; break; }
-    sleep 10
+echo "═══ 3. 等装完 ═══"
+# ⚠️★ 判据踩过一次坑（2026-09-12）：原先用 "active slot 是否切换"，而
+#   **update_engine 在【开始】时就把 active slot 切过去了**，不是结束时。
+#   于是第一次检查就命中，第 4 步在装到 40% 时提前跑掉 —— 而且它长得
+#   和真正的成功一模一样。★ 本仓 #49/#73 反复记过：**判据要问"两种结果下
+#   它会不会不同"**，一个在开始就已经成立的观测量是零证据。
+#   现在只认 update_engine 自己写的终态行，**并且成功/失败两种都匹配**
+#   （只 grep 成功标记的话，装失败会表现为"一直等"，与"还在装"无法区分）。
+#   ⚠️★ 第二次踩：我改判据时写成 grep "ErrorCode::k[A-Za-z]+"，结果命中了
+#   **中间步骤**那几行（"finished UpdateBootFlagsAction with code
+#   ErrorCode::kSuccess"），开装 3 秒就报"终态"。★ update_engine 每个
+#   action 结束都打一行 ErrorCode —— **只有带 "finished last action" 的
+#   那行才是终态**。真正的成功标记是 update_attempter_android.cc:770 的
+#   "Update successfully applied, waiting to reboot."
+DONE=""
+for i in $(seq 1 180); do
+    L=$(A logcat -d 2>/dev/null | grep "update_engine" \
+        | grep -E "Update successfully applied|finished last action" | tail -1 | tr -d '\r')
+    if [ -n "$L" ]; then DONE="$L"; break; fi
+    sleep 5
 done
+if   [ -z "$DONE" ];                       then die "等了 15 分钟没等到终态行 —— 自己看 adb logcat | grep update_engine"
+elif echo "$DONE" | grep -q "Update successfully applied"; then ok "装完：${DONE#*] }"
+elif echo "$DONE" | grep -q "ErrorCode::kSuccess";         then ok "最后一个 action 成功：${DONE#*] }"
+else die "装失败：${DONE#*] }"
+fi
 
 echo "═══ 4. ⚠️ 把 default 掰回已知可用的槽，只用 oneshot 过去 ═══"
 echo "   （boot_control HAL 刚把它改成新槽了 —— 这一步是安全网）"
-S "sed -i 's|^default .*|default *-android${CUR}.conf|' /mnt/esp/loader/loader.conf; sync; grep ^default /mnt/esp/loader/loader.conf" 2>&1 | tr -d '\r'
+# ⚠️★ 这里也踩过一次（同一天）：原先写 "default *-android${CUR}.conf"，
+#   而 CUR 是 "_b"（带下划线），真实条目名却是 "<machine-id>-android-b.conf"
+#   （连字符）。于是 default 被写成一个【匹配不到任何条目】的 glob ——
+#   安全网静默失效，而输出看起来完全正常。
+#   ★ 规矩：写 glob 之前先确认它在真实目录上匹配得到东西，匹配不到就 die。
+SLOT=${CUR#_}                       # _b -> b
+GLOB="*-android-${SLOT}.conf"
+S "ls /mnt/esp/loader/entries/ | grep -q -- '-android-${SLOT}\.conf'" \
+    || die "ESP 上没有 -android-${SLOT}.conf 这个条目，glob '$GLOB' 会写成死链 —— 停手"
+ok "glob '$GLOB' 在 ESP 上匹配得到条目"
+S "sed -i 's|^default .*|default ${GLOB}|' /mnt/esp/loader/loader.conf; sync; grep ^default /mnt/esp/loader/loader.conf" 2>&1 | tr -d '\r'
 echo
 echo "⬜ 剩下的手工两步（故意不自动做）："
 echo "   1) 写 LoaderEntryOneShot 指向新槽的条目"

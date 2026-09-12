@@ -5578,3 +5578,87 @@ modifier 重算布局"的修复确实覆盖住了这条路
 **任何会抹掉某个存储层的动作之前，先把那一层的内容列出来逐个问"这个仓库里有吗"。**
 今天要不是装 ROM 前顺手 `find` 了一下 overlay，这条结论就跟着 `enable-verity`
 一起没了，而且**不会有任何报错** —— 唯一的症状是"下次谁再想起来做 UBWC 实验"。
+
+---
+
+## #86 ★★★ ROM 装机成功；顺带查出装机脚本里两个"长得像成功"的 bug（2026-09-12）
+
+`crDroidAndroid-16.0-20260911-gaokun3-v12.11` 经 `update_engine` 的 `file://`
+通路装进 `_a` 槽并启动成功。**全程 93 秒**（1.345 GB，含 postinstall）。
+
+### 验收
+
+| 判据 | 结果 |
+|---|---|
+| 槽位 / 构建戳 | `_a` / **1789140755**（= 目标值） |
+| 内核 | `#3`，与装机前**同一个二进制**（slot_a/Image sha == slot_b/Image sha == `15ca6789…`） |
+| 音量 | `audio-route.sh` sha `87324646…`（与仓库逐字节相同）、`PA_TARGET=21`，**`tinymix` 实测 `SpkrLeft PA Volume = 21`** |
+| 真温控 HAL | `android.hardware.thermal-service.gaokun3` 在跑；`HAL Ready: true`、`ThermalHAL AIDL 3 connected: yes`；八个 CPU + GPU + mem + skin + 四个 PMIC 全是真读数 |
+| ★ 那颗 36 °C 地雷 | **已拆**：skin 44.1 °C 而 `Thermal Status: 0`，没有关机 |
+| 触摸模式 | `/vendor/bin/gaokun3-touch-mode.sh` + `/vendor/etc/init/touchmode.rc` 都在 |
+| 导航栏（TODO A0） | `mNavigationBar=Window{… Taskbar}` —— **出现了** |
+| HEVC | `/vendor/etc/media_codecs_c2.xml` 命中 3 处 |
+| 稳定性 | `logcat -b crash` **0 行**，本次启动后 **0 个新 tombstone**，slot `_a` 已 `marked_successful` |
+
+★ **风险其实比看起来低，而这一点是可以【事先】知道的**：postinstall 写进
+`slot_a/` 的内核与正在跑的 `slot_b/` 内核 **sha 完全相同** ⇒ 这次切槽
+**内核一个字节都没变**，唯一的变量是 Android 用户态。
+⇒ 方法论：**上机之前先把"这次到底改了几个变量"量出来**，别笼统地当成"换系统"。
+
+### ⚠️ 两个 bug，都在"看起来完全正常"的输出里
+
+#### ① 完成判据是假阳性：active slot 在【开始】时就切了
+
+脚本原先等 `bootctl get-active-boot-slot` 从当前槽变掉。实测 `--go` 打出
+`✓ active slot 已切到 0` 的那一刻，**装机才进行到 40%**
+（logcat 里 `delta_performer` 正在写 system）。
+原因是 **`update_engine` 在开始时就把 active slot 指向目标槽**，不是结束时。
+
+后果不是"多等一会儿"，而是**第 4 步（掰回 `default` 的安全网）在装到一半时就跑了**
+—— 而它的输出和装完之后跑一模一样。
+
+★ 这与 [#49](#49)/[#73](#73) 是同一条：**选判据先问"两种结果下它会不会不同"**。
+一个在动作【开始】时就已经成立的观测量，是零证据。
+
+顺带：`update_engine_client --update` 是**异步**的，提交完就返回（实测 82 ms），
+真进度只在 logcat 里。这个版本也**没有 `--status`**。
+
+#### ② 修判据时又踩了一次同款：`ErrorCode` 不是终态
+
+我把判据改成 grep `ErrorCode::k[A-Za-z]+`，结果开装 3 秒就"命中终态" ——
+因为 **update_engine 每个 action 结束都打一行 `ErrorCode`**：
+
+```
+ActionProcessor: finished UpdateBootFlagsAction with code ErrorCode::kSuccess    ← 中间
+ActionProcessor: finished last action PostinstallRunnerAction with code ...      ← 终态
+update_attempter_android.cc(770)] Update successfully applied, waiting to reboot. ← 终态
+```
+
+**只有带 `finished last action` 的那行才是终态。**
+★ 教训：**同一个判据陷阱在一次会话里可以连中两次** —— 第二次是我"已经知道
+要小心判据"之后犯的。写完判据要再问一遍"它会不会在我不想要的时刻也成立"。
+
+#### ③ 安全网被写成了一个匹配不到东西的 glob
+
+第 4 步原先写 `default *-android${CUR}.conf`，而 `CUR` 是 `_b`（**下划线**），
+真实条目却叫 `<machine-id>-android-b.conf`（**连字符**）。
+于是 `default` 被写成 `*-android_b.conf` —— **匹配不到任何条目**，
+而 `grep ^default` 的回显看起来完全正常。
+
+这恰恰是这一步本来要拆的那颗地雷（新槽起不来时的回落）。
+★ **规矩：写 glob 之前先确认它在真实目录上匹配得到东西，匹配不到就 die。**
+三处都已修进 `scripts/install-ota-local.sh` 并把原因写在代码注释里。
+
+### 其它
+
+* ⚠️ `adb enable-verity` 报 `Error setting verity state` +
+  `Overlayfs teardown failed (scratch busy)` —— **虚惊**，重启后 overlay
+  确实掉了（0 个 overlay 挂载、`vendor.minigbm.debug` 回到镜像原值）。
+  本仓此前只记了那句 vbmeta footer 警告，这两句补上。
+* `default` 现已被 boot_control HAL 改成 `*-android-a.conf`（[#42](#42) 记过的行为）。
+  `_b` 槽保留着上一版 ROM（构建戳 1787552138）+ 同款内核，是现成的回落。
+* ESP 只剩 **20 MiB**（296M 用掉 276M）：slot_a 42M + slot_b 42M +
+  slot_cam 15M + slot_cam2 15M。
+* ⚠️ 设备时钟不准（开机时刻直接取了构建时间，没有 RTC/NTP 校准）——
+  **拿 tombstone 的 mtime 与"本次开机时刻"比较是不可靠的判据**，
+  用 `logcat -b crash` 才靠谱。
