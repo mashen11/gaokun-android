@@ -5,7 +5,7 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M24 — ROM 已装机并验收通过（slot `_a`/`1789140755`），相机候选修复待启动、WPA3 待环境。**★★★ 本轮最大的收获是**抢救**：构建 ROM 前按 M5 的规矩比了两棵设备树的清单，发现 **08-24 一整轮工作躺在构建机上从未入库**（自研真温控 HAL / 触摸模式 / HEVC CSD 合并 / ★ TODO A0 侧滑返回的根因与修法 / Vulkan 1.1→1.3），而我原计划正是**覆盖过去**。随后做了 M17 当年没做的全树普查：1180 个项目扫出 11 个有未提交改动，现在 **10 个可从本仓复现**；并查出 **`patches/0003` 从入库那天起就是坏的**（hunk 头是人话，`git apply` 永远打不上）。见 [#82](docs/stage4-findings.md)。★★ 音量：**用户实听确认 PA=21 响度够、不爆音**，ROM 已构建并拉到本地，两条断言都过，**等用户在场装机**。★★ 相机：camss 电源域缺陷的模型改对了（**GDSC 真的塌缩过就再也上不了电**），排除了五条（camcc suspend / 时钟被关 / RETAIN_FF / MMCX 档位 / 息屏），找到**已验证的规避**（塌缩前钉住 camss 的 runtime PM）与一条**上游候选修复**（`patches/0020`，与我们的 WARN 同一个 GDSC 同一个函数，不在 7.2-rc2 里）——内核 `#5` 已编好放上 ESP，**故意没设 oneshot**，等有人能按电源键再测。见 [#83](docs/stage4-findings.md)。⚠️★★★ 血的教训：**对时钟可能被门控的寄存器块，`/dev/mem` 的【读】和写一样危险** ——我用 devmem 读 camcc 寄存器把内核弄成静默死亡，机器停到用户醒来。规矩见方框。⬜ WPA3（issue #2）已排除三层，缺 WPA3 环境。（每次开工时更新这一行）
+**当前阶段：Stage 6 M25 — 📷 相机在 Android 上拍出第一张照片（libcamera 软件 ISP 端到端），ROM 已装机验收；下一步相机 HAL 的 AIDL 桥。**★★★ 本轮最大的收获是**抢救**：构建 ROM 前按 M5 的规矩比了两棵设备树的清单，发现 **08-24 一整轮工作躺在构建机上从未入库**（自研真温控 HAL / 触摸模式 / HEVC CSD 合并 / ★ TODO A0 侧滑返回的根因与修法 / Vulkan 1.1→1.3），而我原计划正是**覆盖过去**。随后做了 M17 当年没做的全树普查：1180 个项目扫出 11 个有未提交改动，现在 **10 个可从本仓复现**；并查出 **`patches/0003` 从入库那天起就是坏的**（hunk 头是人话，`git apply` 永远打不上）。见 [#82](docs/stage4-findings.md)。★★ 音量：**用户实听确认 PA=21 响度够、不爆音**，ROM 已构建并拉到本地，两条断言都过，**等用户在场装机**。★★ 相机：camss 电源域缺陷的模型改对了（**GDSC 真的塌缩过就再也上不了电**），排除了五条（camcc suspend / 时钟被关 / RETAIN_FF / MMCX 档位 / 息屏），找到**已验证的规避**（塌缩前钉住 camss 的 runtime PM）与一条**上游候选修复**（`patches/0020`，与我们的 WARN 同一个 GDSC 同一个函数，不在 7.2-rc2 里）——内核 `#5` 已编好放上 ESP，**故意没设 oneshot**，等有人能按电源键再测。见 [#83](docs/stage4-findings.md)。⚠️★★★ 血的教训：**对时钟可能被门控的寄存器块，`/dev/mem` 的【读】和写一样危险** ——我用 devmem 读 camcc 寄存器把内核弄成静默死亡，机器停到用户醒来。规矩见方框。⬜ WPA3（issue #2）已排除三层，缺 WPA3 环境。（每次开工时更新这一行）
 
 > ## ★★★ 开工前先读：设备正常，两件事等你在场（2026-09-12 中午）
 >
@@ -54,32 +54,23 @@
 > ★★ 根因暂时搁置，**用户选择直接开工 libcamera HAL**。开发期用"开机即钉住
 > camss"当桥（实测有效）；功耗的账留到真要发布时再算（那时再测 pin 的代价）。
 >
-> **③ ★★★★★ libcamera HAL：M1 已达成 —— 软件 ISP 把 8 MP 拜耳变成了 RGB。**
-> 实测（[#90](docs/stage4-findings.md)）：`simple` 流水线认出相机、
-> `SoftwareIsp: Input 3264x2448-GBRG-10-CSI2P` → **输出 ABGR8888 3256×2448**、
-> **连收 40 帧**无丢失、AGC 曝光单调爬升 23.5→39.3 ms。
-> ⇒ **相机 HAL 的技术底座成立**（拜耳进、RGB 出、帧率稳、控制环在动）。
-> ⚠️ **但画面是全黑的，视觉上还没确认过**。做过 A/B：RAW 帧标准差只有 0.36，
-> 整帧就是一条黑电平基座 ⇒ **传感器没收到光**，不是流水线坏。
-> ⬜ **下次开工第一件事：给前摄一点光再抓一帧**（对着亮处/开灯）。
-> ⚠️ 想用传感器彩条自证走不通：**libcamera 在 configure 时把 `TestPatternMode`
-> 写回 Off**，`yavta` 预设会被它覆盖 —— 要在请求里设控件才行。
-> ★★ **M2 的架构问题已查清**（[#91](docs/stage4-findings.md)）：**HIDL 在本机是死的**
-> —— `hwservicemanager` 只是个悬空符号链接、init 报 "service not found"，
-> 而 `CameraProviderManager` 发现 HIDL provider 只能靠它 ⇒ #88 说的
-> "可能一行 HAL 代码都不用写"**作废**。⚠️ 另一条便宜路（libcamera 的 V4L2 垫片
-> 喂 AOSP 的 ExternalCameraProvider）也死了：软件 ISP **只出 RGB 族**、没有 YUYV
-> —— **和 #84 撞同一堵墙**。★ 教训：**生产端出什么格式、消费端收什么格式，
-> 要在立项时就对一遍。** 余下三条路见 TODO A7（建议先验"把 hwservicemanager
-> 编回来"这条，代价最小）。
-> ⬜ 真正的功能缺口：**hi846 不在 `camera_sensor_helper.cpp` 里**
-> （注意它**在** `camera_sensor_properties.cpp` 里，两个数据库别混），
-> 于是增益码换算不出来、**模拟增益全程恒 0**，弱光下先天残废。
-> 补一条 helper 是小而清晰、可发上游的活，增益模型要从内核 `hi846.c` 读不能猜。
-> ⚠️ 两个运行时坑见 #90：**Android 上没有 `libc++_shared.so`**（要借或改成
-> `-static-libstdc++`，且设备上六份里五份是裁剪过的）；
-> **`adb shell` 会因孤儿 `softisp_ipa_proxy` 占着 stdout 而挂死，
-> 程序其实早退出了** —— 已在 `lc-run.sh` 里绕开。
+> **③ 📷★★★★★ 相机拍出照片了 —— M1 完成。**
+> 一张能认出来的真实照片（`docs/img/gaokun3-first-photo.jpg`），8 MP，
+> 从 10 位拜耳**纯软件**去马赛克。链路：hi846 → CSIPHY3 → CSID0 → VFE0 RDI0
+> → libcamera `simple` 流水线 → 软件 ISP（去拜耳+AWB+AGC）→ ABGR8888。
+> 案卷 [#88](docs/stage4-findings.md)（可行性）/ [#89](docs/stage4-findings.md)（交叉编译）
+> / [#90](docs/stage4-findings.md)（出帧）/ [#94](docs/stage4-findings.md)（增益标定）
+> / [#95](docs/stage4-findings.md)（出图）。
+> ★ 打通的关键是**自己标定出 hi846 的增益模型** `gain = 1 + code/16`（满量程 16×，
+> 留出验证四档误差 <2.3%）—— 上游没有这条 helper，AGC 就把模拟增益锁死在 0，
+> 画面永远停在黑电平。补丁 `patches/libcamera/0002-*`，**可发上游**。
+> ⚠️ 画面偏暗偏灰是**调优**问题不是通路问题（用的是通用 `uncalibrated.yaml`：
+> 无 CCM、灰度世界 AWB）。要好成片得写 `hi846.yaml`，**但那不挡 HAL**。
+> ⬜ **下一步 M2：camera3 → AIDL 桥**（方案与理由见 [#91](docs/stage4-findings.md)：
+> HIDL 在本机是死的，AIDL 的 `CameraMetadata` 就是 `camera_metadata_t`，
+> 所以 A 是转发、B 是重写）。⬜ M3：meson → Android.bp。
+> ⚠️ 复现构建：`scripts/camera/build-libcamera-android.sh`（坑都写在头部注释里），
+> 产物**故意不入库**。
 >
 > **③ ⬜ WPA3（[issue #2](https://github.com/vahiru/gaokun-android/issues/2)）本地测不了。**
 > 判据很干净：同一台 ZTE 路由器、同一个 5 GHz 信道 36，只改安全模式就一正一反
