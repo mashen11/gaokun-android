@@ -429,6 +429,24 @@ DRM 输出 + 触摸 + 键盘 + 软键盘在真机上跑通。
 ★ 回来时记住：**设备自己能编译**（Alpine aarch64 + 网），
 改一行到真机看见效果约 30 秒，不用重建镜像。
 
+### B5b. ⬜ UBWC 压缩：设备上已经开了 13 天，但仓库里还写着关（[#85](stage4-findings.md)）
+`device/huawei/gaokun3/device.mk:174` 仍然设 `vendor.minigbm.debug=nocompression`
+—— 那是 **Stage 2 为 SwiftShader 软渲染加的**（`stage2-findings.md` 第 15 条），
+Stage 5 换成硬件 turnip 之后就没有存在理由了。
+2026-08-30 我在设备 overlay 上把它注释掉做 A/B，**然后没记结论也没改 device.mk**，
+于是仓库与实机分叉了 13 天（09-12 装 ROM 前清点 overlay 才发现）。
+
+**已知**：UBWC 开着跑 13 天，SMMU fault / `a6xx_recover` / GMU error **全 0**，
+用户日常 + 原神无异常 ⇒ **它不坏**，`patches/0004` v3 按真实 modifier 重算布局
+那步确实覆盖了这条路。
+**未知**：**一次测量都没有** —— "关掉能省显存带宽"至今是推论不是数据。
+
+⬜ 做法：下一版构建前删掉 `device.mk:174` 那一行，**并带一次实测**
+（帧率 / 合成耗时 / 显存带宽三选一即可），别凭"理应更好"直接改。
+★ 这是 #14 同一形状的坑：**"用了正确的做法"不等于"达成了目标"，差一次测量。**
+⚠️ 2026-09-12 装的那版 ROM 把它 **revert 回 `nocompression` 了**，这是故意的：
+装机当口不引入未测量的变更，而 `nocompression` 是历版发布的 known-good。
+
 ### B6. GPU SMMU 中断根治
 实际 DT 是全局 672/673、context bank 从 678 起；而硬件拉的是 675/680，
 其中 680 被分给 CB2、675 整张表里根本没有。很像 CB 起始偏移就错了。

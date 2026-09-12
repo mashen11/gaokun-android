@@ -5508,3 +5508,73 @@ mesa 那套 meson→bp 工具链（`scripts/mesa-tool-fixes.py` /
 
 ⚠️ 但**先把 [#83](#83) 那个电源域缺陷解决掉**：现在相机要靠"开机即钉住 camss
 的 runtime PM"才能反复使用，HAL 之上再叠一个这样的前提不合适。
+
+---
+
+## #85 ★★★ 又一件躺在设备上没入库的事：UBWC 压缩已经开了 13 天，而仓库并不知道（2026-09-12）
+
+装 ROM 前按规矩先看 overlay 里存着什么（`enable-verity` 会把它整个抹掉），
+结果**除了预期的 `audio-route.sh`，还有一个 `/vendor/build.prop`**：
+
+```
+--- /mnt/vlow/build.prop        (逻辑分区 vendor_b，未经 overlay)
++++ /vendor/build.prop          (overlay 上层，mtime 2026-08-30 23:00)
+-vendor.minigbm.debug=nocompression
++# gaokun3: UBWC A/B 实验 2026-08-30，原值 nocompression（swangle 遗留）
++# vendor.minigbm.debug=nocompression
+```
+
+### 这是什么
+
+`nocompression` 是 **Stage 2 为软渲染（SwiftShader）加的**
+（`docs/stage2-findings.md` 第 15 条：SwiftShader 导入不了 UBWC buffer，
+SF 会在 `GaneshBackendTexture` 崩）。Stage 5 换成硬件 turnip 之后它就没有存在
+理由了 —— `docs/stage6-crdroid.md:1017` 当时已经写下"现在 GPU 认 UBWC，
+关掉能省一大块显存带宽"，但**只是写了，没做**。
+
+2026-08-30 有人（我）在设备上用 overlay 把它注释掉做 A/B，**然后没有记结论、
+没有改 `device.mk`**。于是：
+
+* `device/huawei/gaokun3/device.mk:174` 至今仍然设着 `nocompression`；
+* 而**实际在跑的机器上这个属性是空的** —— 也就是 UBWC 一直开着。
+
+### 实测证据（2026-09-12 采集）
+
+| 观测 | 值 |
+|---|---|
+| `getprop vendor.minigbm.debug` | **空**（未设 ⇒ 压缩启用） |
+| 带着这个改动运行了多久 | **13 天**（overlay mtime 08-30 → 今天 09-12） |
+| `dmesg` 里 SMMU fault / `a6xx_recover` / GMU error | **0** |
+| 期间用户的实际使用 | 日常 + 原神，未报任何渲染异常 |
+
+⇒ **UBWC 在硬件 turnip 路径上是好的**，`patches/0004` v3 那个"按 gralloc 真实
+modifier 重算布局"的修复确实覆盖住了这条路
+（`docs/stage5-freedreno.md:653` 预判过：不重算就是错位渲染 + 越界写 —— 没发生）。
+
+### ⚠️ 但这不是"已验证的收益"
+
+13 天零故障只证明**它不坏**，**没有任何一次测量说明它更快或更省带宽**。
+"关掉能省显存带宽"到现在仍然是推论，不是数据。★ 这正是 #14 那条教训的同一形状
+——**"用了正确的做法"不等于"达成了目标"，差一次测量**。
+
+### 处置
+
+装 ROM 会把它**revert 回 `nocompression`**（device.mk 没改）。这是**故意接受的**：
+
+* `nocompression` 是历版发布 ROM 的状态，是真正的 known-good；
+* UBWC 那一版从没进过任何构建，只在这一台机器的 overlay 里活着；
+* 装机当口不是引入未测量变更的时候。
+
+⬜ 留 TODO：下一版构建前把 `device.mk:174` 删掉并**带一次实测**
+（帧率 / 显存带宽 / 合成耗时），而不是凭"理应更好"直接改。
+
+### ★ 方法论
+
+**[#82](#82) 发生在构建机上，#85 发生在设备上 —— 同一个病。**
+凡是"临时改一下试试"的地方（构建机工作区、设备 overlay、`/data/local/tmp`），
+都是**不入库改动的藏身处**，而它们全都会在某次覆盖操作中静默消失。
+
+★ 现在这条已经成为习惯并且第二次付清成本：
+**任何会抹掉某个存储层的动作之前，先把那一层的内容列出来逐个问"这个仓库里有吗"。**
+今天要不是装 ROM 前顺手 `find` 了一下 overlay，这条结论就跟着 `enable-verity`
+一起没了，而且**不会有任何报错** —— 唯一的症状是"下次谁再想起来做 UBWC 实验"。
