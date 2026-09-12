@@ -6126,9 +6126,59 @@ YUYV 或 MJPEG —— 这正是 [#84](#84) 判它出局的同一条理由。
 | **B. 直接在 libcamera C++ API 上写 AIDL provider** | 拿 AOSP 的 `ExternalCamera*` 当结构模板，色彩转换用 libyuv。 | 参考量：`hardware/interfaces/camera/device/default/` 共 **268 KB** 源码，光 `ExternalCameraDeviceSession.cpp` 就 116 KB |
 | **C. 把 HIDL 救活** | 把 `hwservicemanager` 编进 ROM（本机只有悬空符号链接 ⇒ 模块可能还在 AOSP 里、只是 crDroid 没编），然后用现成的 `@2.4-legacy` + `libcamera-hal.so`。 | **可能最小**，但前提未验证，且是在往一条上游正在删除的通路上押注 |
 
-⬜ **下一步建议：先花很小的代价验证 C 的前提** ——
-在构建机的 AOSP 树里 `grep` 一下 `system/hwservicemanager` 还在不在、
-`hwservicemanager` 这个模块名能不能解析。
-成立的话 C 是数量级上更省的路；不成立就在 A / B 之间选。
-⚠️ 即便 C 可行，也要权衡：HIDL 是上游明确在移除的东西，
-今天省下的工作量可能在下一个大版本连本带利还回去。
+### ★★ 四、C 的前提查完了：**技术上成立，但战略上是个陷阱**
+
+不用开构建机，直接查 AOSP 上游（`android.googlesource.com`，免费）：
+
+| 问题 | 答案 | 出处 |
+|---|---|---|
+| `platform/system/hwservicemanager` 还在吗 | ✅ **在**（`main` 与 `android16-release` 都 HTTP 200） | gitiles |
+| 模块名叫什么 | `cc_binary { name: "hwservicemanager", system_ext_specific: true }`，自带 `init_rc` | 该仓 `Android.bp:91` |
+| 为什么本机只有悬空符号链接 | 同一个 bp 里还有 `install_symlink { name: "hwservicemanager_compat_symlink_module" }`（`Android.bp:118`）——**符号链接模块被拉进来了，二进制没有** | 同上 |
+| 加进 `PRODUCT_PACKAGES` 就能用吗 | 应该可以：它的 rc 写的是 `service hwservicemanager … disabled`，而 init.rc 里那句 `start hwservicemanager` **本机已经在执行了**（只是找不到服务） | 设备 logcat |
+
+**⇒ C 的前提成立。但下面这条把它否掉了：**
+
+```
+/system/etc/vintf/compatibility_matrix.202504.xml   ← 本机 ro.board.api_level=202504
+    <hal format="aidl" updatable-via-apex="true">
+        <name>android.hardware.camera.provider</name>
+
+/system/etc/vintf/compatibility_matrix.7.xml        ← 老矩阵
+    <hal format="hidl">
+        <name>android.hardware.camera.provider</name>   version 2.4-7
+```
+
+★ **HIDL 的 camera provider 在矩阵 7 之后就从框架兼容性矩阵里消失了**，
+当前 FCM 级别 202504 只认 AIDL。走 C 等于在 AOSP 已经拆了好几个版本的通路上押注。
+
+⚠️ **本仓在这件事上已经吃过一模一样的亏**：M2 查明"解码器一个都没有"的真凶是
+`media.c2.hal.selection` 默认 `hidl`，而 **HIDL Codec2 在 Android 15+ 已随
+hwservicemanager 一起消失**。⇒ **同一个教训不该学两遍。**
+
+### ★★★ 五、推荐 A，理由是一条可以核实的事实
+
+A（camera3 → AIDL 桥）之所以比 B（在 libcamera C++ API 上重写）便宜得多，
+关键在于 **AIDL 的相机元数据根本不是另一种格式**：
+
+```aidl
+/* hardware/interfaces/camera/device/aidl/.../CameraMetadata.aidl */
+parcelable CameraMetadata {
+    /**
+     * A serialized metadata buffer created by libcamera_metadata.
+     * Access by casting to a camera_metadata* and using libcamera_metadata methods
+     */
+    byte[] metadata;
+}
+```
+
+⇒ **AIDL 元数据 == `camera_metadata_t` == camera3 HAL 用的同一个东西，转换成本为零。**
+而 libcamera 的 `src/android/` 已经把真正难的部分做完了（能力表、流配置、
+请求/结果、JPEG、**RGB→YUV（用 libyuv）**）。A 要写的是一层**转发**，不是一层**重写**。
+
+B 则要把 libcamera `src/android/` 那一万行在 AIDL 上重做一遍
+（参考量：AOSP 自己的 `camera/device/default/` 共 268 KB 源码）。
+
+**⬜ 结论：走 A。** 下一步是把 libcamera 按 `-Dandroid=enabled` 编出
+`libcamera-hal.so`（需要 `libexif`/`libjpeg`/`libyuv`，后两个 AOSP 自带），
+再写 AIDL provider/device/session 三个薄壳去驱动它。

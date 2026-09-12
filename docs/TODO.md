@@ -271,9 +271,17 @@ URL 是 **36.9 MB/s**。对"用户走系统内 OTA 升级"有实际影响（1 GB
 >    ⚠️ 另有一条便宜路也死了：libcamera 软件 ISP **只出 RGB 族**
 >    （`debayer_cpu.cpp:436-441`，无 YUYV/NV12），喂不了 AOSP 的 ExternalCameraProvider
 >    —— **和 #84 撞的是同一堵墙**。
->    ⬜ 三条候选：A camera3→AIDL 桥 / B 直接在 libcamera API 上写 AIDL provider
->    （参考量 268 KB 源码）/ C 把 hwservicemanager 编回来复活 HIDL。
->    **先验 C 的前提**（构建机上 grep `system/hwservicemanager` 还在不在），代价最小。
+>    ★ **已定方案 A：camera3 → AIDL 桥。**
+>    C（复活 HIDL）的前提其实成立（`hwservicemanager` 在 AOSP android16-release 里还在，
+>    本机那个悬空符号链接正是它的 `install_symlink` 模块装的），但**战略上是陷阱**：
+>    FCM 202504 的兼容性矩阵里 camera.provider **只剩 `format="aidl"`**，
+>    HIDL 版在矩阵 7 之后就没了 —— 本仓在 Codec2 上已经吃过同一个亏。
+>    A 比 B 便宜得多的硬理由：**AIDL 的 `CameraMetadata` 就是 `camera_metadata_t` 的
+>    序列化 blob**（aidl 文件原文："Access by casting to a `camera_metadata*`"），
+>    与 camera3 HAL 同一个东西、转换成本为零；而 libcamera 的 `src/android/`
+>    已经把能力表/流配置/请求结果/JPEG/**RGB→YUV(libyuv)** 全做完了。
+>    ⇒ A 写的是一层**转发**，B 是一层**重写**。
+>    ⬜ 下一步：按 `-Dandroid=enabled` 编出 `libcamera-hal.so`，再写 AIDL 三件套薄壳。
 > ⬜ **M3 meson → Android.bp**（mesa 那套工具链可复用）。
 > ⚠️ 全程压着 [#87](stage4-findings.md) 的电源域缺陷，开发期用"开机即钉住 camss"当桥。
 
