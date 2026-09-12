@@ -11,6 +11,8 @@
 >
 > ✅ **设备在线**（TCP adb；⚠️ 换网了，网段是 `192.168.10.x` 且 IP 会漂 ——
 > 用 `arp` 扫 5555 端口找，MAC 前缀 `00:03:7f` 是本机的 WCN6855）。
+> ⚠️★★ **连本机的网段都会换** —— 2026-09-12 一天之内 `192.168.31.x` →
+> `192.168.10.x` → `192.168.130.x`。找设备前先 `ifconfig` 看自己在哪个网段。
 > ⚠️★ **扫全网段，别按"上几次 IP 都落在哪"收窄。** 2026-09-12 我把 ping 扫描
 > 收窄到 `.150–.230`（前四次都在这里），结果设备拿到 `.124`，于是
 > **在搜索范围外 10 分钟没找到，而那看起来和"内核挂死了"一模一样** ——
@@ -49,10 +51,21 @@
 > **"已解绑且绑不回去"**、只能重启恢复的状态 ⇒ "出错后重绑 camcc 恢复相机"
 > 这条廉价规避不存在。
 >
-> ★★ **下一步已改为：量一次"钉住 camss"的功耗代价。** 规避本身是实测有效的
-> （连跑 5 次 + 空闲 60 秒全过），挡着它进 ROM 的唯一理由是"功耗未测"——
-> 而那是个**可以测量的问题，不是未知**。测完才决定是继续啃根因还是直接做
-> libcamera HAL（[#84](docs/stage4-findings.md)）。
+> ★★ 根因暂时搁置，**用户选择直接开工 libcamera HAL**。开发期用"开机即钉住
+> camss"当桥（实测有效）；功耗的账留到真要发布时再算（那时再测 pin 的代价）。
+>
+> **③ ⏳ libcamera HAL：M1 的【编译】这一半已完成，只差上机。**
+> 可行性摸底 [#88](docs/stage4-findings.md) 结论很好：`simple` 流水线**显式支持
+> `qcom-camss`**（`simple.cpp:266`，`swIspEnabled=true`）、**hi846 在传感器数据库里**
+> （`camera_sensor_properties.cpp:135`）、软件 ISP 吃我们的 `SGBRG10`、
+> **`LINK_FREQ` 全源码零出现**（hi846 缺它也不要紧）。
+> 实编 [#89](docs/stage4-findings.md)：NDK r27c 交叉编到 aarch64，
+> **整个移植只需要一处修复**（bionic 无 `pthread_setaffinity_np`，
+> `patches/libcamera/0001-*.patch`，`git diff` 生成、`git apply --check` 验过）。
+> 产物 3.0 MB（**故意不入库**，用 `scripts/camera/build-libcamera-android.sh` 重建）。
+> ⬜ **上机照做**：oneshot 到 `…-cam2.conf` → `SER=… bash scripts/camera/lc-run.sh -n 3`
+> → 看 `★ 最终像素格式` 是不是 RGB/YUV 族（是 ⇒ 软件 ISP 真的在去拜耳）。
+> ⚠️ 产物在本会话 scratchpad 里；换会话要重编（构建机按分钟计费）。
 >
 > **③ ⬜ WPA3（[issue #2](https://github.com/vahiru/gaokun-android/issues/2)）本地测不了。**
 > 判据很干净：同一台 ZTE 路由器、同一个 5 GHz 信道 36，只改安全模式就一正一反

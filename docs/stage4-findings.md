@@ -5850,3 +5850,99 @@ M11 的经验是：**先做独立命令行客户端，那就是 HAL 逻辑的 90
 
 ⚠️ **三个里程碑全程都还压着 [#87](#87) 那个电源域缺陷** —— 开发期用
 "开机即钉住 camss"当桥（实测有效），功耗的账留到真要发布时再算。
+
+---
+
+## #89 ★★★★ M1 上半场：libcamera 交叉编到 Android **只需要一处移植修复**（2026-09-12）
+
+[#88](#88) 定下的 M1 是"把 libcamera + 一个独立客户端编到 Android aarch64，
+在设备上出一帧去拜耳的图"。**编译这一半已经完成**，结果比预想干净得多。
+
+### 结果
+
+| 项 | 值 |
+|---|---|
+| 工具链 | NDK **r27c**，`aarch64-linux-android34-clang`（clang 18.0.3） |
+| libcamera | 上游 `87c7285663`（与 `refs/libcamera` 同一个 commit） |
+| 配置 | `-Dpipelines=simple -Dipas=softisp`，其余全关 |
+| **移植修复** | **1 处**（见下） |
+| 产物 | `libcamera.so` 2.0 MB · `libcamera-base.so` 236 KB · `ipa_softisp.so` 502 KB · `softisp_ipa_proxy` 137 KB，合计 **3.0 MB** |
+| 独立客户端 | `scripts/camera/lctest.cpp` → `lctest` 89 KB |
+
+★ **一个 2 MB 的库 + 一处补丁，就是整个"相机 HAL 能不能做"的技术底座。**
+
+### 唯一的移植问题：bionic 没有 `pthread_setaffinity_np`
+
+```
+src/libcamera/base/thread.cpp:465:2: error: use of undeclared identifier
+    'pthread_setaffinity_np'; did you mean 'sched_setaffinity'?
+```
+
+它是 glibc 扩展。NDK r27c sysroot 实查（**不凭记忆**）：
+`pthread_setaffinity_np` 在 `usr/include/*.h` 里**一个都没有**；
+`pthread_gettid_np` 在 `pthread.h:189`；`sched_setaffinity` 在 `sched.h:227`。
+全树只有 `setThreadAffinityInternal()` 一处用到，改走"取 tid → sched_setaffinity"。
+补丁 `patches/libcamera/0001-base-thread-use-sched_setaffinity-on-bionic.patch`。
+
+⚠️★ **补丁是 `git diff` 生成的，不是手敲的** —— [#82](#82) 查出
+`patches/0003` 从入库那天起就打不上，正因为它的 hunk 头是人写的散文。
+已用 `git apply --check` 对干净的上游树验过。
+
+### ⚠️ 一个要留意的运行时状态：IPA 会被强制隔离
+
+configure 打了一行警告：`Neither gnutls nor libcrypto found, all IPA modules
+will be isolated`。查代码坐实（`src/libcamera/ipa_manager.cpp:313`）：
+没有 `HAVE_IPA_PUBKEY` 时 `isSignatureValid()` **无条件 `return false`**，
+于是走 `T::Isolated` 而不是 `T::Threaded` —— IPA 跑在独立进程里（`softisp_ipa_proxy`）。
+
+★ 这是 M1 的**临时**状态：M3 在 AOSP 里编时有 BoringSSL 的 `libcrypto`，
+签名可用，IPA 会回到进程内。M1 先按隔离模式测，能不能跑用实测说话。
+
+### 建立起来的可复现资产（⚠️ 二进制【故意不入库】）
+
+* `scripts/camera/build-libcamera-android.sh` —— 一条命令重建，坑都写在头部注释里
+* `patches/libcamera/0001-*.patch` —— 那处移植修复
+* `scripts/camera/lctest.cpp` —— 独立客户端（222 行）
+* `scripts/camera/lc-run.sh` —— 上机运行（含两个前提检查）
+
+★ **为什么不把 3.0 MB 的产物入库**：本仓 `.git` 只有 9.1 MB 且
+**至今一个二进制都没提交过**。[#82](#82) 要的是"可从本仓复现"，
+上面四样已经做到；塞进产物只增体积不增复现性。
+
+### 踩到的坑（都已写进构建脚本注释）
+
+1. meson 的 machine file **必须单引号**。双引号在 meson 1.0.1 报
+   `Malformed value in machine file variable 'c'`，**报错完全不提引号**。
+2. 缺 python 的 **`ply`** 模块会在 configure 的最后一步才炸。
+3. 选项名是 **`-Dipas=softisp`**，不是 `simple`（`meson_options.txt:49-53` 的
+   choices 里根本没有 `simple`）—— ★ 又一次印证"选项名要去 grep，不要猜"。
+4. `cam` 工具依赖 **libevent**，故意不编，改用自写的 `lctest`
+   （照搬传感器 M11 "先做独立客户端 = HAL 逻辑 90%" 的路子）。
+5. libcamera 要 **C++20**（`meson.build:9` `cpp_std=c++20`）。
+   我先用 `-std=c++17` 编客户端，报的是 `no member named 'span' in namespace 'std'`
+   —— 看起来像缺头文件，其实是标准版本不够。
+
+### ⚠️★★ 两次"判据自己骗自己"，同一天同一类
+
+1. **`pgrep -f lc-build.sh` 匹配到了我自己那条轮询命令** ——
+   轮询命令的命令行里就含这个字符串，于是 `pgrep` 永远命中，
+   "还在编"是恒真的。而实际上编译**根本没启动**（日志文件压根不存在）。
+   ★ **`pgrep -f` 的模式绝不能出现在发起它的那条命令行里**；
+   要判进程在不在，用 `ps -eo comm` 精确匹配进程名。
+2. **`cmd | head` 之后取 `$?` 拿到的是 `head` 的退出码** ——
+   编译明明失败了却打印 `rc=0`。⚠️ 本仓 M14 **已经记过这个坑**
+   （当时是 `make | tail`），我还是又踩了一次。
+   ★ 真判据是**产物存不存在**，不是管道的退出码。
+
+### ⬜ 还欠：上机
+
+产物已拉到本地，**但设备当时不在同一网段**（本机的网络在同一天内换了两次，
+`192.168.31.x` → `192.168.10.x` → `192.168.130.x`），M1 的上机那一半没做完。
+
+**上机时照做**：
+1. oneshot 到 `…-cam2.conf`（相机 DTB 内核）并重启；
+2. `SER=<序列号> bash scripts/camera/lc-run.sh -n 3`
+   —— 脚本会先检查 camss 有没有 probe / 有没有已经 `runtime_error`，
+   然后**在第一次塌缩之前钉住 camss**，再跑 `lctest`。
+3. **判据**：`lctest` 打印的 `★ 最终像素格式` —— 如果是 RGB/YUV 族而不是拜耳，
+   就说明软件 ISP 真的插进了流水线并在做去拜耳；再看能不能收满 3 帧。
