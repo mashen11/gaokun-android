@@ -220,9 +220,20 @@ PRODUCT_COPY_FILES += \
 #
 
 # ─── Stage 4: WiFi（ath11k 主线 + AIDL HAL APEX + wpa_supplicant）───
+# ★ wpa_cli：诊断用的控制台客户端。之前没装，于是 WPA3（issue #2）
+#   最直接的那条验证路——问 supplicant 自己 sae_pwe / 支持哪些 key_mgmt
+#   ——在设备上根本跑不了，而 wpa_supplicant.rc 明明开着控制接口。
+#   模块名已核：external/wpa_supplicant_8/wpa_supplicant/Android.bp:1272
+#   是 cc_binary + proprietary:true ⇒ 装到 /vendor/bin/wpa_cli，
+#   依赖只有 libcutils/liblog（Soong 自己拉 vendor 变体，
+#   不会重演 tinymix 那个 "放进 /vendor/bin 但 .so 在 /system" 的坑）。
+#   ⚙ 用法：wpa_cli -p /data/vendor/wifi/wpa/sockets -i wlan0 <cmd>
+#   ⚠ 那个目录是 0770 wifi:wifi（见 wifi/wpa_supplicant.rc），
+#     shell 不在 wifi 组里 ⇒ 要 root 才能连上。
 PRODUCT_PACKAGES += \
     com.android.hardware.wifi \
-    wpa_supplicant
+    wpa_supplicant \
+    wpa_cli
 
 PRODUCT_COPY_FILES += \
     $(LOCAL_PATH)/wifi/wpa_supplicant.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/wpa_supplicant.rc \
