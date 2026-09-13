@@ -283,7 +283,8 @@ PRODUCT_PACKAGES += \
 #   而 HAL 以 cameraserver 用户跑 —— 打不开。症状是 libcamera 报"发现 0 个相机"，
 #   看起来像 camss 没 probe，实际 root 手跑同一个二进制能找到 1 个。
 PRODUCT_COPY_FILES += \
-    $(LOCAL_PATH)/camera/ueventd.gaokun3-camera.rc:$(TARGET_COPY_OUT_VENDOR)/etc/ueventd.rc
+    $(LOCAL_PATH)/camera/ueventd.gaokun3-camera.rc:$(TARGET_COPY_OUT_VENDOR)/etc/ueventd.rc \
+    $(LOCAL_PATH)/camera/gaokun3-camera-features.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/gaokun3-camera-features.xml
 
 # ─── Stage 4: 蓝牙（WCN6855 / hci_qca，AOSP 原装 HAL 直接可用）───
 # ⚠️ 2026-08-19 发现：#34 记了"把这个 HAL 推进 vendor 即可"，但那句话

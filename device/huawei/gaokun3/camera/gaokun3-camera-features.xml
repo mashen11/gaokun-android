@@ -1,0 +1,16 @@
+<!--
+    Android 的"本机有没有相机"【不是自动探测的】，靠这份 feature 声明。
+    ⚠️★ 没有它的症状极具误导性：相机 HAL 一切正常、`dumpsys media.camera`
+       也报 "Number of camera devices: 1"，但**相机应用连启动项都没有**
+       （`pm list features | grep camera` 一条都没有 ⇒ 应用的
+       `<uses-feature android:required="true">` 判定本机无相机）。
+
+    ⚠️ 故意【不】声明 android.hardware.camera.level.full：
+       本 HAL 的 ANDROID_INFO_SUPPORTED_HARDWARE_LEVEL 报的是 LIMITED
+       （见 camera/Metadata.cpp）。声明 full 会让应用期待它做不到的能力
+       （手动曝光、全同步…），失败得莫名其妙。两处要一致。
+-->
+<permissions>
+    <feature name="android.hardware.camera.any" />
+    <feature name="android.hardware.camera.front" />
+</permissions>
