@@ -87,6 +87,30 @@ static uint32_t pad_id(struct topo *T, uint32_t eid, uint32_t idx) {
     DIE("找不到 pad %u:%u", eid, idx); return 0;
 }
 
+/* ★ 先把图里所有【已使能且可改】的数据链路断开（#106）：两个传感器共用 CSID0 的 sink，
+   谁的链路先使能了，另一个再 SETUP_LINK 就是 EBUSY（"Device or resource busy"）。
+   HAL（libcamera）启动时会把链路配成它最后用的那个相机，所以冒烟测试前必须清场。 */
+static void links_reset(int mfd, struct topo *T) {
+    int n = 0;
+    for (unsigned i = 0; i < T->t.num_links; i++) {
+        struct media_v2_link *L = &T->l[i];
+        if ((L->flags & MEDIA_LNK_FL_LINK_TYPE) != MEDIA_LNK_FL_DATA_LINK) continue;
+        if (!(L->flags & MEDIA_LNK_FL_ENABLED) || (L->flags & MEDIA_LNK_FL_IMMUTABLE)) continue;
+        struct media_v2_pad *sp = NULL, *kp = NULL;
+        for (unsigned j = 0; j < T->t.num_pads; j++) {
+            if (T->p[j].id == L->source_id) sp = &T->p[j];
+            if (T->p[j].id == L->sink_id) kp = &T->p[j];
+        }
+        if (!sp || !kp) continue;
+        struct media_link_desc ld; memset(&ld, 0, sizeof ld);
+        ld.source.entity = sp->entity_id; ld.source.index = sp->index; ld.source.flags = MEDIA_PAD_FL_SOURCE;
+        ld.sink.entity   = kp->entity_id; ld.sink.index   = kp->index; ld.sink.flags   = MEDIA_PAD_FL_SINK;
+        ld.flags = 0;
+        if (ioctl(mfd, MEDIA_IOC_SETUP_LINK, &ld) == 0) n++;
+    }
+    printf("  清场：断开了 %d 条已使能的链路\n", n);
+}
+
 static int link_enable(int mfd, struct topo *T, const char *src, uint32_t sp, const char *snk, uint32_t kp) {
     uint32_t se = ent_id(T, src), ke = ent_id(T, snk);
     uint32_t sid = pad_id(T, se, sp), kid = pad_id(T, ke, kp);
@@ -210,6 +234,7 @@ int main(int argc, char **argv) {
 
     int mfd = open("/dev/media0", O_RDWR); if (mfd < 0) DIE("打不开 /dev/media0: %s", strerror(errno));
     struct topo T; topo_load(mfd, &T);
+    links_reset(mfd, &T);
     printf("拓扑: 实体 %u · pad %u · 链路 %u\n\n", T.t.num_entities, T.t.num_pads, T.t.num_links);
 
     /* 1) 传感器支持什么 */
@@ -438,6 +463,12 @@ int main(int argc, char **argv) {
     xioctl(vfd, VIDIOC_STREAMOFF, &type, "STREAMOFF");
     for (unsigned i = 0; i < rb.count; i++) munmap(bufs[i], lens[i]);
     close(vfd); close(mfd);
+    /* ★ 退出前把传感器的 Test Pattern 清零（#106 教训）：驱动会保留这个 V4L2 控件值，
+       libcamera 不去动它，于是相机应用打开后摄看到的是我留下的彩条，不是画面。
+       诊断工具改过的传感器状态，必须自己收拾干净。 */
+    { int sfdr = open(sdev, O_RDWR);
+      if (sfdr >= 0) { struct v4l2_control c0 = { .id = V4L2_CID_TEST_PATTERN, .value = 0 };
+        if (ioctl(sfdr, VIDIOC_S_CTRL, &c0) == 0) printf("  已把 Test Pattern 恢复为 0\n"); close(sfdr); } }
     printf("\n完成。\n");
     return 0;
 }

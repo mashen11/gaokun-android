@@ -35,6 +35,8 @@
 > ⚠️ 两个坑：`make dtbs` 失败而我没看 RC 就部署（旧 dtb 配新内核）；`VIDEO_DW9714=m`（第 15 个 =m 坑）让
 > ov13b10 的 `lens-focus` 永远等不到 vcm ⇒ **前后摄一个 subdev 都不出**，`pending_async_subdevices` 一眼看穿。
 > ✅ 内核 `#18`：47 个 subdev、`camtest --rear 2104 1560` 出帧、前→后→前交替出帧、HAL 枚举 2 个相机。
+> ✅ **Aperture 直接打开后摄**（`Device 1 is open`，输入 4208x3120 GRBG），用户确认 L2B 抬到 2.8V 时屏幕正常。
+> ⚠️ 第一眼是彩条 —— camtest 留下的 Test Pattern（已改成退出清零，未重编）；复位后预览近黑：夜里 + libcamera 没有 ov13b10 增益模型。
 > ⬜ 应用层实测（顺便看后摄开着时屏幕有没有异常）；libcamera 侧 ov13b10 属性/增益模型/`ov13b10.yaml`；EEPROM@0x50。
 > ⚠️ 稳健性：v7.2 camss 要求端点上所有传感器都绑上，任一没绑前后摄一起消失（0018 当初的理由）。
 >

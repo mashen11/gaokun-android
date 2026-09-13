@@ -7552,3 +7552,16 @@ s5k3l6xx 1-0010: bus scan on Qualcomm-CCI: 2 device(s) answered
 * `scripts/camera/camtest.c`：`--rear` 与 `links_reset()`。
 * 内核 `#18` 在 `slot_cam5`（+ 新 dtb `6af27026…`），默认槽仍是 `#14`（前摄 only）。
 * ⚠️ 本轮新踩：`pkill -f "dmesg -w"` 写在 adb 一行命令里会把自己杀掉（命令行含同一字串）—— 放进脚本文件才安全。
+
+### ✅ 八、应用层：Aperture 直接打开了后摄（补记）
+
+用 adb 拉起 Aperture（用户在床上，解锁也是 adb 画图案 —— `uiautomator dump` 读 `lockPatternView` 的边界算九宫格，
+`input motionevent DOWN/MOVE/UP` 画线；⚠️ 边界必须与手势在**同一次** shell 里取，中间屏幕会转向）。
+`dumpsys media.camera`：**`Device 1 is open`**，libcamera 输入 `4208x3120-GRBG-10-CSI2P`（OV13B10 全幅，GRBG 是它的拜耳序），
+软 ISP 去拜耳 18.8 ms/帧；此刻 `vreg_l2b = 2800mV`（共用轨抬起），**用户确认屏幕正常**。
+
+第一眼看到的是**彩条**（`docs/img/gaokun3-rear-ov13b10-colorbars.png`）—— 那是我自己留下的：camtest 第二轮把传感器
+`V4L2_CID_TEST_PATTERN` 设成 2 后没恢复，驱动保留控件值，libcamera 也不去动它。这张彩条反而是**整条链路
+（传感器 → CSIPHY0 → CSID0 → VFE0 → libcamera → HAL → 应用）通了的铁证**。camtest 已改成退出前清零（⚠️ 未重编，构建机已停）。
+重启复位传感器后，预览是**近黑的噪声底**：房间暗（前摄裸帧均值也只有 28），且 libcamera 没有 ov13b10 的
+sensor helper（增益模型），AGC 提不起来。⬜ 白天或打光再看一眼；⬜ 给 libcamera 补 ov13b10 的 helper 与属性表。
