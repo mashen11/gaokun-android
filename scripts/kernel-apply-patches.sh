@@ -162,6 +162,20 @@ for p in "${UPATCHES[@]}" "${KPATCHES[@]}"; do
         echo "· 已应用，跳过  $p"
         skipped=$((skipped + 1)); continue
     fi
+    # ★ 正向能干净打上 ⇒ 一定【还没打过】，直接打。
+    #   ⚠️★★ 这一步必须排在指纹判据【前面】（2026-09-13 踩的坑）：patches/0031 的新增行是
+    #   `.ops = &clk_rcg2_shared_ops,`，而文件里别处早有 21 行一模一样 ⇒ 指纹"命中"、
+    #   静默跳过，于是那一轮构建出来的内核根本没带修复，而脚本输出看起来完全正常。
+    #   ★ 指纹只能回答"这些行在不在文件里"，回答不了"是不是【这个补丁】放进去的"；
+    #   正向 --check 成功则是确定性的"没打过"。指纹判据只留给"正向打不上"之后的分流。
+    if git apply --check "$f" 2>/dev/null; then
+        if [ "$MODE" = "--check" ]; then
+            echo "→ 可应用（--check 模式，未改动）  $p"
+        else
+            git apply "$f" && echo "✓ 已应用  $p"
+        fi
+        applied=$((applied + 1)); continue
+    fi
     # ★ 指纹判据 —— 专治"用 fuzz 打进去过"的情况，反向检查对它们无效。
     #   少了这一步会把同一个补丁重复打进去（详见 already_applied 的注释）。
     if already_applied "$f"; then
