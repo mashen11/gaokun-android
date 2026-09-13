@@ -380,16 +380,20 @@ buffer_handle_t Session::importBuffer(const StreamBuffer &sb, int32_t w, int32_t
 	}
 	auto &mapper = android::GraphicBufferMapper::get();
 	buffer_handle_t imported = nullptr;
-	/* ⚠️ BLOB 是【一维字节缓冲】：宽 = 字节数、高 = 1。
-	 *    按图像宽高去 import 会得到错误的大小，写 JPEG 时越界。 */
-	const int32_t iw = isBlob ? blobSize : w;
-	const int32_t ih = isBlob ? 1 : h;
-	const int32_t ifmt = isBlob ? HAL_PIXEL_FORMAT_BLOB
-				    : HAL_PIXEL_FORMAT_YCBCR_420_888;
-	android::status_t st = mapper.importBuffer(raw, iw, ih,
-						   /*layerCount=*/1, ifmt,
-						   GRALLOC_USAGE_SW_WRITE_OFTEN,
-						   /*stride=*/iw, &imported);
+	/*
+	 * ⚠️★★ 用 importBufferNoValidate()，不要用带宽高/格式/usage 的那个重载。
+	 *   gralloc4 的 importBuffer() 会拿你传进去的描述符跟缓冲【实际分配时】的
+	 *   参数比对，对不上就返回 BAD_BUFFER(2)。而我们并不知道框架分配时用的
+	 *   确切 usage —— 它是 producerUsage | consumerUsage 再加上框架自己的位，
+	 *   我们只声明了 producer 那一半。实测：BLOB 流每帧都报 "importBuffer 失败: 2"。
+	 *   ★ 判据：错误码 2 = gralloc 的 BAD_BUFFER，不是 errno 的 ENOENT ——
+	 *     一开始按 errno 去查会完全跑偏。
+	 *   NoValidate 版只把句柄导入本进程、不做描述符校验，正是 HAL 要的语义：
+	 *   缓冲的形状由框架保证，我们只负责往里写。
+	 *   （宽高/格式仍然要知道，用在后面的 lock 与转换上，所以参数保留。）
+	 */
+	(void)w; (void)h; (void)isBlob; (void)blobSize;
+	android::status_t st = mapper.importBufferNoValidate(raw, &imported);
 	/* makeFromAidl 造的是一份新句柄，importBuffer 之后就不需要它了。 */
 	native_handle_close(const_cast<native_handle_t *>(raw));
 	native_handle_delete(const_cast<native_handle_t *>(raw));
