@@ -79,14 +79,19 @@ echo "═══ 3. 等装完 ═══"
 #   "Update successfully applied, waiting to reboot."
 DONE=""
 for i in $(seq 1 180); do
+    # ⚠️★ 第三次踩（2026-09-14）：logcat 里【上一轮】残留的 "finished last action
+    #   CleanupPreviousUpdateAction ... kSuccess" 让脚本在装到 30% 时就报"最后一个 action 成功"，
+    #   接着第 4 步把 default 掰回去 —— 而真正装完后 boot_control 又把 default 改成新槽，安全网等于没做。
+    #   ★ 只认 update_attempter_android.cc:770 的 "Update successfully applied"（成功）与
+    #   "Update failed" / 非 kSuccess 的 ErrorCode（失败）；"finished last action" 一律不算。
     L=$(A logcat -d 2>/dev/null | grep "update_engine" \
-        | grep -E "Update successfully applied|finished last action" | tail -1 | tr -d '\r')
+        | grep -E "Update successfully applied|Update failed|ErrorCode::k[A-Za-z]+\)? *$" \
+        | grep -v "kSuccess" | tail -1 | tr -d '\r')
     if [ -n "$L" ]; then DONE="$L"; break; fi
     sleep 5
 done
 if   [ -z "$DONE" ];                       then die "等了 15 分钟没等到终态行 —— 自己看 adb logcat | grep update_engine"
 elif echo "$DONE" | grep -q "Update successfully applied"; then ok "装完：${DONE#*] }"
-elif echo "$DONE" | grep -q "ErrorCode::kSuccess";         then ok "最后一个 action 成功：${DONE#*] }"
 else die "装失败：${DONE#*] }"
 fi
 

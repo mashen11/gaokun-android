@@ -26,7 +26,12 @@
 > 我据此写了"硬挂死、安全阀都没触发"，还让用户去按电源键。实际上它**一直好好地
 > 跑着内核 `#5`**。★ 收窄搜索范围会把假阴性伪装成阳性结论。
 >
-> **⓪f 🚦 v0.6.0-alpha 已构建并传到 staging，【未发布】，等用户审核（2026-09-14 凌晨）。**
+> **⓪f ✅ v0.6.0-alpha 已发布（2026-09-14）**：装机验收全绿（`_b` 槽、戳 `1789318530`、内核 `#18`、47 subdev、
+> 前后摄各 12 帧、PA=21、温控 HAL、0 崩溃 0 stuck），R2 清单已更新，GitHub Release 挂了全部产物
+> （用户决定：以后滚动更新走 GitHub Release，R2 桶要释放；清单 `download` 已改指 GitHub 附件）。
+> ⚠️ `install-ota-local.sh` 第三次被中间态骗：上一轮残留的 `finished last action ...` 让它在 30% 时报成功、
+> 提前掰 default —— 已改成只认 "Update successfully applied"。下面是发布前的原文：
+> **⓪f（原文）🚦 v0.6.0-alpha 已构建并传到 staging，【未发布】，等用户审核（2026-09-14 凌晨）。**
 > 构建戳 **`1789318530`**，包 `crDroidAndroid-16.0-20260913-gaokun3-v12.11.zip`（sha `3e88b8ad…`，1.35 GB），
 > `boot.img` sha `d9bc9203…`（内核 `#18` + 后摄 dtb），四条断言全过；位置 R2 `staging/<包名>/`，
 > **`ota/gaokun3.json` 一字未动，没有用户会收到**。发版说明草稿 `docs/relnotes/v0.6.0-alpha.md`（待审）。
