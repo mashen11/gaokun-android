@@ -1,0 +1,6 @@
+service vendor.camera-provider-gaokun3 /vendor/bin/hw/android.hardware.camera.provider-service.gaokun3
+    class hal
+    user cameraserver
+    group audio camera input drmrpc graphics
+    ioprio rt 4
+    task_profiles CameraServiceCapacity MaxPerformance

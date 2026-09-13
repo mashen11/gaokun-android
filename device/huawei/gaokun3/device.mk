@@ -263,6 +263,21 @@ PRODUCT_SOONG_NAMESPACES += device/generic/goldfish
 PRODUCT_COPY_FILES += \
     $(LOCAL_PATH)/wifi/wpa_supplicant.conf:$(TARGET_COPY_OUT_VENDOR)/etc/wifi/wpa_supplicant.conf
 
+# ─── 相机 HAL（AIDL，基于 libcamera 的软件 ISP）───
+# 背景：三条便宜路都走不通，只能自己写 AIDL（docs/stage4-findings.md #91）：
+#   ❌ HIDL + 上游 provider@2.4-legacy —— 本机 hwservicemanager 根本不存在，
+#      且 FCM 202504 的兼容性矩阵里 camera.provider 只剩 format="aidl"
+#   ❌ libcamera 的 V4L2 垫片 + AOSP 的 ExternalCameraProvider —— 软件 ISP
+#      只出 RGB 族、没有 YUYV（和 #84 撞同一堵墙）
+# ⚠️★ 这一行现在【故意注释着】：libcamera 本体是外部 meson/NDK 构建的产物，
+#   而产物不入库（#89 的决定）。放开之前必须先跑
+#   `bash scripts/camera/build-libcamera-android.sh` 并把 .so 放进
+#   device/huawei/gaokun3/camera/prebuilt/，否则构建会因找不到预编译库而失败。
+#   ⬜ 正解是把 libcamera 移植成 Soong 模块（TODO A7 的 M3），那之前这是一笔
+#   "手动步骤"的债 —— 正是 #82/#85 那种会被遗忘的形状，所以宁可默认关着。
+# PRODUCT_PACKAGES += \
+#     android.hardware.camera.provider-service.gaokun3
+
 # ─── Stage 4: 蓝牙（WCN6855 / hci_qca，AOSP 原装 HAL 直接可用）───
 # ⚠️ 2026-08-19 发现：#34 记了"把这个 HAL 推进 vendor 即可"，但那句话
 #    从没变成一行构建配置 —— Stage 4 是走 adb remount 的 overlay 推的。

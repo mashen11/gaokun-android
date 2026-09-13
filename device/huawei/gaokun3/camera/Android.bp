@@ -1,0 +1,77 @@
+// gaokun3 相机 HAL（AIDL）—— 基于 libcamera 的软件 ISP。
+// 背景与三条路的取舍见本目录 README.md 与 docs/stage4-findings.md #91。
+
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+// libcamera 是【外部构建】的预编译产物，见 README.md 的"构建形态"。
+// ⚠️ 产物不在仓库里：构建 ROM 前必须先跑
+//    scripts/camera/build-libcamera-android.sh，并把 .so 放进 prebuilt/。
+cc_prebuilt_library_shared {
+    name: "libcamera_gaokun3",
+    srcs: ["prebuilt/libcamera.so"],
+    vendor: true,
+    strip: { none: true },
+    check_elf_files: false,
+    shared_libs: ["libcamera_base_gaokun3"],
+}
+
+cc_prebuilt_library_shared {
+    name: "libcamera_base_gaokun3",
+    srcs: ["prebuilt/libcamera-base.so"],
+    vendor: true,
+    strip: { none: true },
+    check_elf_files: false,
+}
+
+cc_binary {
+    name: "android.hardware.camera.provider-service.gaokun3",
+    relative_install_path: "hw",
+    vendor: true,
+    init_rc: ["gaokun3-camera.rc"],
+    vintf_fragments: ["gaokun3-camera.xml"],
+
+    srcs: [
+        "service.cpp",
+        "Provider.cpp",
+        "Device.cpp",
+        "Session.cpp",
+        "Metadata.cpp",
+    ],
+
+    // libcamera 的公开头。⚠️ 其中 control_ids.h / property_ids.h / formats.h
+    // 是【生成】的，在 meson 的构建目录里，所以这里要两个路径。
+    include_dirs: [
+        "device/huawei/gaokun3/camera/include",
+        "device/huawei/gaokun3/camera/include-generated",
+    ],
+
+    shared_libs: [
+        "libbinder_ndk",
+        "liblog",
+        "libutils",
+        "libcutils",
+        "libui",                 // GraphicBufferMapper
+        "libcamera_metadata",
+        "libyuv",                // RGB→YUV（软件 ISP 只出 RGB，见 README）
+        "libaidlcommonsupport",  // makeFromAidl
+        "libcamera_gaokun3",
+        "libcamera_base_gaokun3",
+        "android.hardware.camera.provider-V3-ndk",
+        "android.hardware.camera.device-V3-ndk",
+        "android.hardware.camera.common-V1-ndk",
+        "android.hardware.camera.metadata-V3-ndk",
+        "android.hardware.graphics.common-V5-ndk",
+        "android.hardware.common-V2-ndk",
+    ],
+
+    cflags: [
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Wno-unused-parameter",
+        // libcamera 的公开头要求 C++20（上游 meson.build:9 cpp_std=c++20）
+        "-std=c++20",
+    ],
+}
