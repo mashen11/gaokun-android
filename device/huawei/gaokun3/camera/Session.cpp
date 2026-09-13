@@ -20,7 +20,10 @@
 #include <aidl/android/hardware/camera/device/ICameraOfflineSession.h>
 #include <aidl/android/hardware/camera/device/NotifyMsg.h>
 #include <aidl/android/hardware/camera/device/ShutterMsg.h>
+#include <aidl/android/hardware/camera/device/CameraBlob.h>
+#include <aidl/android/hardware/camera/device/CameraBlobId.h>
 #include <aidlcommonsupport/NativeHandle.h>
+#include <jpeglib.h>
 #include <hardware/gralloc.h>
 #include <libyuv.h>
 #include <log/log.h>
@@ -35,6 +38,8 @@
 using ::aidl::android::hardware::camera::common::Status;
 using ::aidl::android::hardware::camera::device::BufferCache;
 using ::aidl::android::hardware::camera::device::BufferStatus;
+using ::aidl::android::hardware::camera::device::CameraBlob;
+using ::aidl::android::hardware::camera::device::CameraBlobId;
 using ::aidl::android::hardware::camera::device::CameraMetadata;
 using ::aidl::android::hardware::camera::device::CaptureRequest;
 using ::aidl::android::hardware::camera::device::CaptureResult;
@@ -192,7 +197,12 @@ ndk::ScopedAStatus Session::configureStreams(const StreamConfiguration &cfg,
 
 	halStreams_.clear();
 	for (const auto &s2 : cfg.streams) {
-		halStreams_.push_back({ s2.id, s2.width, s2.height });
+		const bool isBlob =
+			s2.format == aidl::android::hardware::graphics::common::PixelFormat::BLOB;
+		/* ⚠️ BLOB 流的 bufferSize 由框架给（Stream::bufferSize）；
+		 *    它是【字节数】，不是像素宽高。 */
+		halStreams_.push_back({ s2.id, s2.width, s2.height, isBlob,
+					isBlob ? s2.bufferSize : 0 });
 
 		HalStream hs;
 		hs.id = s2.id;
@@ -286,9 +296,14 @@ ndk::ScopedAStatus Session::processCaptureRequest(const std::vector<CaptureReque
 				importOk = false;
 				break;
 			}
-			buffer_handle_t imp = importBuffer(ob, w, h);
+			bool isBlob = false;
+			int32_t blobSize = 0;
+			for (const auto &hs : halStreams_)
+				if (hs.id == ob.streamId) { isBlob = hs.isBlob; blobSize = hs.blobSize; }
+			buffer_handle_t imp = importBuffer(ob, w, h, isBlob, blobSize);
 			if (!imp) { importOk = false; break; }
-			p.buffers.push_back({ ob.streamId, ob.bufferId, imp, w, h });
+			p.buffers.push_back({ ob.streamId, ob.bufferId, imp, w, h,
+					      isBlob, blobSize });
 		}
 		if (!importOk) {
 			for (auto &pb : p.buffers) releaseBuffer(pb.imported);
@@ -355,7 +370,8 @@ ndk::ScopedAStatus Session::signalStreamFlush(const std::vector<int32_t> &, int3
 
 namespace gaokun3 {
 
-buffer_handle_t Session::importBuffer(const StreamBuffer &sb, int32_t w, int32_t h)
+buffer_handle_t Session::importBuffer(const StreamBuffer &sb, int32_t w, int32_t h,
+				      bool isBlob, int32_t blobSize)
 {
 	const native_handle_t *raw = ::android::makeFromAidl(sb.buffer);
 	if (!raw) {
@@ -364,11 +380,16 @@ buffer_handle_t Session::importBuffer(const StreamBuffer &sb, int32_t w, int32_t
 	}
 	auto &mapper = android::GraphicBufferMapper::get();
 	buffer_handle_t imported = nullptr;
-	android::status_t st = mapper.importBuffer(raw, w, h,
-						   /*layerCount=*/1,
-						   HAL_PIXEL_FORMAT_YCBCR_420_888,
+	/* ⚠️ BLOB 是【一维字节缓冲】：宽 = 字节数、高 = 1。
+	 *    按图像宽高去 import 会得到错误的大小，写 JPEG 时越界。 */
+	const int32_t iw = isBlob ? blobSize : w;
+	const int32_t ih = isBlob ? 1 : h;
+	const int32_t ifmt = isBlob ? HAL_PIXEL_FORMAT_BLOB
+				    : HAL_PIXEL_FORMAT_YCBCR_420_888;
+	android::status_t st = mapper.importBuffer(raw, iw, ih,
+						   /*layerCount=*/1, ifmt,
 						   GRALLOC_USAGE_SW_WRITE_OFTEN,
-						   /*stride=*/w, &imported);
+						   /*stride=*/iw, &imported);
 	/* makeFromAidl 造的是一份新句柄，importBuffer 之后就不需要它了。 */
 	native_handle_close(const_cast<native_handle_t *>(raw));
 	native_handle_delete(const_cast<native_handle_t *>(raw));
@@ -417,9 +438,18 @@ bool Session::deliver(const uint8_t *rgb, buffer_handle_t dst,
 	uint8_t *du = dy + static_cast<size_t>(dstW) * dstH;
 	uint8_t *dv = du + static_cast<size_t>(cw) * chh;
 
+	/*
+	 * ★★ 用 J420（全范围）而不是 I420（限制范围 16–235）。
+	 *   Android 相机输出的 YUV_420_888 按约定是全范围 BT.601；
+	 *   给限制范围会让预览发灰发闷（对比度被压掉约 13%）。
+	 *   libyuv 的命名：I420 = 限制范围，J420 = 全范围（JPEG 范围）。
+	 *   ⚠️ 这一条是【假说】，靠前后截图 A/B 验证，不是从文档抄来的。
+	 *   字节序照旧：convert.h:959 注释明写 "RGB little endian (bgr in
+	 *   memory) to J420"，与 libcamera 的 RGB888(=BGR24) 对得上。
+	 */
 	int rc;
 	if (dstW == srcWidth_ && dstH == srcHeight_) {
-		rc = libyuv::RGB24ToI420(rgb, srcStride, dy, dstW, du, cw, dv, cw,
+		rc = libyuv::RGB24ToJ420(rgb, srcStride, dy, dstW, du, cw, dv, cw,
 					 dstW, dstH);
 	} else {
 		/*
@@ -434,7 +464,7 @@ bool Session::deliver(const uint8_t *rgb, buffer_handle_t dst,
 		uint8_t *sy = src.data();
 		uint8_t *su = sy + static_cast<size_t>(srcWidth_) * srcHeight_;
 		uint8_t *sv = su + static_cast<size_t>(scw) * schh;
-		rc = libyuv::RGB24ToI420(rgb, srcStride, sy, srcWidth_, su, scw, sv, scw,
+		rc = libyuv::RGB24ToJ420(rgb, srcStride, sy, srcWidth_, su, scw, sv, scw,
 					 srcWidth_, srcHeight_);
 		if (rc == 0)
 			rc = libyuv::I420Scale(sy, srcWidth_, su, scw, sv, scw,
@@ -462,6 +492,97 @@ bool Session::deliver(const uint8_t *rgb, buffer_handle_t dst,
 	} else {
 		ALOGE("deliver: 色彩转换/缩放失败 rc=%d", rc);
 	}
+
+	mapper.unlock(dst);
+	return ok;
+}
+
+/*
+ * 把一帧 RGB 编成 JPEG 写进 Android 的 BLOB 缓冲。
+ *
+ * ★ Android 的约定（`CameraBlob.aidl` / `CameraBlobId.aidl`）：
+ *   JPEG 数据从缓冲开头写，**缓冲末尾**放一个 8 字节的
+ *   `CameraBlob{ blobId = JPEG(0x00FF), blobSizeBytes }`。
+ *   框架按这个结构去找真实长度 —— 少了它，图片会被当成整个缓冲那么大。
+ *
+ * ⚠️ libcamera 给的是 B,G,R 顺序（formats::RGB888 → V4L2_PIX_FMT_BGR24，
+ *    见 formats.cpp:185），而 libjpeg 的 JCS_EXT_BGR 正好对应它 ——
+ *    用 JCS_RGB 会红蓝互换，而且不报任何错。
+ */
+bool Session::deliverJpeg(const uint8_t *rgb, buffer_handle_t dst,
+			  int32_t dstW, int32_t dstH, int32_t blobSize, int quality)
+{
+	auto &mapper = android::GraphicBufferMapper::get();
+	void *raw = nullptr;
+	android::status_t st = mapper.lock(dst, GRALLOC_USAGE_SW_WRITE_OFTEN,
+					   android::Rect(blobSize, 1), &raw);
+	if (st != android::OK || !raw) {
+		ALOGE("deliverJpeg: lock 失败: %d", st);
+		return false;
+	}
+
+	/* 源尺寸与目标不同的话先缩放（JPEG 流常要满分辨率，预览要小图）。 */
+	std::vector<uint8_t> scaled;
+	const uint8_t *src = rgb;
+	int srcStride = srcWidth_ * 3;
+	if (dstW != srcWidth_ || dstH != srcHeight_) {
+		scaled.resize(static_cast<size_t>(dstW) * dstH * 3);
+		if (libyuv::RGBScale(rgb, srcStride, srcWidth_, srcHeight_,
+				     scaled.data(), dstW * 3, dstW, dstH,
+				     libyuv::kFilterBilinear) != 0) {
+			ALOGE("deliverJpeg: 缩放失败");
+			mapper.unlock(dst);
+			return false;
+		}
+		src = scaled.data();
+		srcStride = dstW * 3;
+	}
+
+	struct jpeg_compress_struct cinfo;
+	struct jpeg_error_mgr jerr;
+	cinfo.err = jpeg_std_error(&jerr);
+	jpeg_create_compress(&cinfo);
+
+	/* 直接写进 gralloc 缓冲；留出末尾 8 字节给 CameraBlob。 */
+	const size_t maxJpeg = static_cast<size_t>(blobSize) - sizeof(CameraBlob);
+	unsigned char *out = static_cast<unsigned char *>(raw);
+	unsigned long outSize = maxJpeg;
+	jpeg_mem_dest(&cinfo, &out, &outSize);
+
+	cinfo.image_width = dstW;
+	cinfo.image_height = dstH;
+	cinfo.input_components = 3;
+	cinfo.in_color_space = JCS_EXT_BGR;     /* ★ 见上面的字节序说明 */
+	jpeg_set_defaults(&cinfo);
+	jpeg_set_quality(&cinfo, quality, TRUE);
+	jpeg_start_compress(&cinfo, TRUE);
+	while (cinfo.next_scanline < cinfo.image_height) {
+		JSAMPROW row = const_cast<JSAMPROW>(
+			src + static_cast<size_t>(cinfo.next_scanline) * srcStride);
+		jpeg_write_scanlines(&cinfo, &row, 1);
+	}
+	jpeg_finish_compress(&cinfo);
+	const size_t jpegLen = outSize;
+	jpeg_destroy_compress(&cinfo);
+
+	bool ok = false;
+	if (jpegLen > 0 && jpegLen <= maxJpeg) {
+		/* jpeg_mem_dest 可能自己 malloc 了新缓冲（超出我们给的大小时），
+		 * 那种情况下 out 不再指向 gralloc，要拷回去。 */
+		if (out != raw)
+			memcpy(raw, out, jpegLen);
+		CameraBlob blob;
+		blob.blobId = CameraBlobId::JPEG;
+		blob.blobSizeBytes = static_cast<int32_t>(jpegLen);
+		memcpy(static_cast<uint8_t *>(raw) + blobSize - sizeof(CameraBlob),
+		       &blob, sizeof(CameraBlob));
+		ok = true;
+		ALOGD("JPEG %dx%d 质量%d → %zu 字节", dstW, dstH, quality, jpegLen);
+	} else {
+		ALOGE("deliverJpeg: JPEG 长度异常 %zu（上限 %zu）", jpegLen, maxJpeg);
+	}
+	if (out != raw)
+		free(out);
 
 	mapper.unlock(dst);
 	return ok;
@@ -529,7 +650,10 @@ void Session::onRequestCompleted(libcamera::Request *req)
 
 	std::vector<bool> okv;
 	for (auto &pb : pend.buffers) {
-		bool ok = rgb && deliver(rgb, pb.imported, pb.width, pb.height);
+		bool ok = rgb && (pb.isBlob
+				  ? deliverJpeg(rgb, pb.imported, pb.width, pb.height,
+						pb.blobSize, /*quality=*/90)
+				  : deliver(rgb, pb.imported, pb.width, pb.height));
 		okv.push_back(ok);
 		if (!ok) {
 			NotifyMsg emsg;

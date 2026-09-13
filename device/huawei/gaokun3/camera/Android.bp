@@ -41,6 +41,7 @@ cc_binary {
         "libcamera_metadata",
         "libfmq",                // ICameraDeviceSession 的两个 FMQ 元数据队列
         "libyuv",                // RGB→YUV（软件 ISP 只出 RGB，见 README）
+        "libjpeg",               // 静态拍照（BLOB 流）
         "libcamera_gk3",
         "libcamera_base_gk3",
         // ⚠️ 只列我们直接实现的三个接口。graphics.common / hardware.common /

@@ -73,13 +73,17 @@ private:
 	/* 导入/释放 Android 的 gralloc 缓冲。 */
 	buffer_handle_t importBuffer(
 		const aidl::android::hardware::camera::device::StreamBuffer &sb,
-		int32_t w, int32_t h);
+		int32_t w, int32_t h, bool isBlob, int32_t blobSize);
 	void releaseBuffer(buffer_handle_t h);
 
 	/* 把一帧 RGB（源尺寸 srcWidth_×srcHeight_）交付到一个 gralloc 缓冲，
 	 * 必要时缩放到该路流自己的尺寸。 */
 	bool deliver(const uint8_t *rgb, buffer_handle_t dst,
 		     int32_t dstW, int32_t dstH);
+	/* JPEG 流：把 RGB 编码成 JPEG 写进 BLOB 缓冲。 */
+	bool deliverJpeg(const uint8_t *rgb, buffer_handle_t dst,
+			 int32_t dstW, int32_t dstH, int32_t blobSize,
+			 int quality);
 
 	std::shared_ptr<libcamera::Camera> cam_;
 	SensorFacts facts_;
@@ -102,6 +106,8 @@ private:
 	struct HalStreamInfo {
 		int32_t id = -1;
 		int32_t width = 0, height = 0;
+		bool isBlob = false;        /* JPEG 流 */
+		int32_t blobSize = 0;       /* Stream::bufferSize */
 	};
 	std::vector<HalStreamInfo> halStreams_;
 	/* libcamera 实际输出的尺寸（= 各路里最大的那个）。 */
@@ -128,6 +134,8 @@ private:
 		int64_t bufferId = 0;
 		buffer_handle_t imported = nullptr;
 		int32_t width = 0, height = 0;
+		bool isBlob = false;
+		int32_t blobSize = 0;
 	};
 	struct Pending {
 		int32_t frameNumber = 0;
