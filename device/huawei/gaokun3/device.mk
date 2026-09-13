@@ -269,14 +269,21 @@ PRODUCT_COPY_FILES += \
 #      且 FCM 202504 的兼容性矩阵里 camera.provider 只剩 format="aidl"
 #   ❌ libcamera 的 V4L2 垫片 + AOSP 的 ExternalCameraProvider —— 软件 ISP
 #      只出 RGB 族、没有 YUYV（和 #84 撞同一堵墙）
-# ⚠️★ 这一行现在【故意注释着】：libcamera 本体是外部 meson/NDK 构建的产物，
-#   而产物不入库（#89 的决定）。放开之前必须先跑
-#   `bash scripts/camera/build-libcamera-android.sh` 并把 .so 放进
-#   device/huawei/gaokun3/camera/prebuilt/，否则构建会因找不到预编译库而失败。
-#   ⬜ 正解是把 libcamera 移植成 Soong 模块（TODO A7 的 M3），那之前这是一笔
-#   "手动步骤"的债 —— 正是 #82/#85 那种会被遗忘的形状，所以宁可默认关着。
-# PRODUCT_PACKAGES += \
-#     android.hardware.camera.provider-service.gaokun3
+# ✅ libcamera 现在在 AOSP 里编（external/libcamera，见 patches/libcamera/）。
+#   ⚠️ 仍欠一笔：那 5 个生成的 .cpp 与整批生成头要先跑一次 meson 产出再拷贝，
+#   是手动步骤（#82/#85 的形状）。正解是 Soong genrule 跑 libcamera 自带的
+#   Python 生成器。构建 ROM 前请确认 external/libcamera/generated/ 已就位。
+PRODUCT_PACKAGES += \
+    android.hardware.camera.provider-service.gaokun3 \
+    libcamera_gk3 \
+    libcamera_base_gk3 \
+    libcamera_ipa_softisp_gk3
+
+# ⚠️★ 相机设备节点的权限：主线内核建出来的 /dev/media0 是 `crw------- root root`，
+#   而 HAL 以 cameraserver 用户跑 —— 打不开。症状是 libcamera 报"发现 0 个相机"，
+#   看起来像 camss 没 probe，实际 root 手跑同一个二进制能找到 1 个。
+PRODUCT_COPY_FILES += \
+    $(LOCAL_PATH)/camera/ueventd.gaokun3-camera.rc:$(TARGET_COPY_OUT_VENDOR)/etc/ueventd.rc
 
 # ─── Stage 4: 蓝牙（WCN6855 / hci_qca，AOSP 原装 HAL 直接可用）───
 # ⚠️ 2026-08-19 发现：#34 记了"把这个 HAL 推进 vendor 即可"，但那句话

@@ -1,0 +1,10 @@
+# 相机设备节点的权限。
+#
+# ⚠️★ 少了这个文件的症状极具误导性：HAL 以 cameraserver 用户跑，而主线内核
+#   建出来的 /dev/media0 默认是 `crw------- root root` —— 打不开。
+#   于是 libcamera 报的是 **"发现 0 个相机"**，看起来像 camss 没 probe
+#   或者 dtb 用错了，而实际上 root 手跑同一个二进制能找到 1 个。
+#   ★ 判据：同一个程序 root 跑得通、服务用户跑不通 ⇒ 先查节点权限，别查驱动。
+/dev/media*             0660   media      camera
+/dev/video*             0660   media      camera
+/dev/v4l-subdev*        0660   media      camera
