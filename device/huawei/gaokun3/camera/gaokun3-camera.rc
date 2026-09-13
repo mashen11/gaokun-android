@@ -1,6 +1,23 @@
+# ⚠️★★ 开机就钉住 camss 的 runtime PM —— 这是 #87 那个电源域缺陷的【桥】。
+#
+#   缺陷：titan_top_gdsc 一旦真的塌缩过，就再也上不了电
+#   （dmesg: "titan_top_gdsc status stuck at 'off'" + "Failed to power up
+#    pipeline: -110"），此后相机永久不可用直到重启。
+#   实测：钉住时连跑 5 次 + 空闲 60 秒全过；解钉 8 秒后立刻复现失败。
+#
+#   ⚠️ 必须在【第一次塌缩之前】钉。已经塌缩过再钉会当场触发失败并锁死
+#      runtime_error —— 所以放在 `on boot`，早于任何人碰相机。
+#   ⚠️ 代价是相机电源域常开、功耗未测（TODO：量一次）。
+#   ⬜ 根因未破，六条假说已排除，见 docs/stage4-findings.md #83/#87。
+on boot
+    write /sys/devices/platform/soc@0/ac5a000.camss/power/control on
+
 service vendor.camera-provider-gaokun3 /vendor/bin/hw/android.hardware.camera.provider-service.gaokun3
     class hal
     user cameraserver
-    group audio camera input drmrpc graphics
+    group audio camera input drmrpc graphics media
     ioprio rt 4
-    task_profiles CameraServiceCapacity MaxPerformance
+    # libcamera 自己的日志默认走 stderr，对 init 服务等于丢弃。
+    # 留一条出口：软件 ISP 的失败因果链很长，没有它根本查不动（见 #97）。
+    setenv LIBCAMERA_LOG_FILE /data/vendor/camera/libcamera.log
+    setenv LIBCAMERA_LOG_LEVELS *:INFO

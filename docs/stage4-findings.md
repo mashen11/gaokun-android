@@ -6571,3 +6571,66 @@ Soong 的 `genrule` 跑得动（或者直接把生成结果入库：**它们是�
    **完全看不出跟"句柄不可拷贝"有关**。
 5. `ICameraDeviceSession` 有三个容易漏的纯虚方法：两个 FMQ 元数据队列
    （要 `libfmq`，即使不用也得是有效队列）和 V2 起新增的 `configureStreamsV2`。
+
+---
+
+## #97 📸★★★★★ 相机在 Android 相机应用里出实时预览（2026-09-13）
+
+![相机应用预览](img/gaokun3-camera-app.jpg)
+
+LineageOS 的 Aperture 打开着，预览在跑。`dumpsys media.camera` 里
+`Active Camera Clients` 有 `org.lineageos.aperture`、`State: 2`，logcat 零错误。
+
+**整条链**：`hi846 → CSIPHY3 → CSID0 → VFE0 RDI0 → libcamera simple 流水线
+→ 软件 ISP（去拜耳 + AWB + AGC）→ libyuv RGB→YUV → 自研 AIDL HAL
+→ cameraserver → 相机应用`。
+
+### 从"能编"到"有画面"，修的五件事
+
+| # | 症状 | 真因 |
+|---|---|---|
+| 1 | `addService` 返回 **-3** | VINTF 清单是 servicemanager **开机时**读的（M12 记过同一个码），运行时丢进去看不见 |
+| 2 | libcamera 报 **"发现 0 个相机"** | `/dev/media0` 是 `crw------- root root`，HAL 以 `cameraserver` 跑打不开。★ **root 手跑同一个二进制能找到 1 个** |
+| 3 | HAL 正常、`dumpsys` 有相机，**应用连启动项都没有** | Android 的"有没有相机"**不是自动探测**，要 `/vendor/etc/permissions/` 的 feature 声明 |
+| 4 | `configureStreams` 失败 | 相机应用**一定**配多路（预览+拍照），而我只接 1 路 |
+| 5 | HAL **崩溃**在 `onRequestCompleted` | 竞态：我在**锁外**用 `req->buffers()`，而请求已经还回空闲池、可能被 `reuse()` |
+| 6 | `STREAMON: Invalid argument` | IPA 调优文件没装 —— 见下，**因果链里没有一处提到它** |
+
+### ★★★ 第 6 条值得单独说：一条七环的因果链，末端症状完全不提根因
+
+```
+调优文件不在 /vendor/etc/libcamera/ipa/softisp/
+  → IPASoftIsp::init() 打不开配置文件，返回错误
+  → "Failed to create software ISP, disabling software debayering"
+  → libcamera 退回原始拜耳
+  → 我们要的 RGB888 不再可用
+  → config_->validate() 把配置【调整】成 SGBRG10_CSI2P/RAW
+  → Camera::start() → V4L2 STREAMON: Invalid argument
+```
+
+从末端看到的是"STREAMON 参数无效"，**任谁都会去查 V4L2 格式和 camss**。
+把链条串起来的是 **libcamera 自己的 DEBUG 日志**。
+
+★ 教训：**给第三方库留一条日志出口，是可以事先做的投资。** libcamera 的日志
+默认走 stderr，而 init 服务的 stderr 等于丢弃 —— 我是在瞎调了两轮之后才想起来
+加 `setenv LIBCAMERA_LOG_FILE`。这一条已经写进 `gaokun3-camera.rc`。
+
+### ✅ 两件顺带确认的事
+
+* **`LIBCAMERA_IPA_TRUST_UNSIGNED` 补丁生效**：日志里
+  `IPA module ... trusted without signature` + `initializing softisp proxy
+  in thread` ⇒ IPA 真的跑在**进程内**，那个 proxy 可执行体根本不用编。
+* 中途一次 `STREAMON` 失败是 **[#87](#87) 的电源域缺陷**
+  （`camss=error`、`titan_top_gdsc=off-0`），**不是 HAL 的问题**。
+  重启后在**任何人碰相机之前**钉住 camss 即可。
+
+### ⬜ 离"日常可用"还差的
+
+1. **[#87](#87) 的电源域缺陷**：相机现在要靠"开机即钉住 camss"才能反复使用。
+   已把 `write .../power/control on` 写进 `gaokun3-camera.rc` 的 `on boot`
+   当桥，但**根因未破**、且代价是电源域常开（功耗未测）。
+2. **相机 DTB 不是默认的**：正常启动（内核 `#3` + `gaokun3.dtb`）**没有 camss**，
+   现在靠 oneshot 进 `cam2.conf` 才有相机。要日常可用得让发布内核带上相机 DTB。
+3. **静态拍照（JPEG）**：characteristics 里声明了 `BLOB`，但 `Session` 还没有
+   专门处理 —— 按快门多半会失败。
+4. **画质**：用的是通用 `uncalibrated.yaml`（无 CCM、灰度世界 AWB），偏绿偏暗。

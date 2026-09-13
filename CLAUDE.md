@@ -5,7 +5,7 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M25 — 📷 相机在 Android 上拍出第一张照片（libcamera 软件 ISP 端到端），ROM 已装机验收；下一步相机 HAL 的 AIDL 桥。**★★★ 本轮最大的收获是**抢救**：构建 ROM 前按 M5 的规矩比了两棵设备树的清单，发现 **08-24 一整轮工作躺在构建机上从未入库**（自研真温控 HAL / 触摸模式 / HEVC CSD 合并 / ★ TODO A0 侧滑返回的根因与修法 / Vulkan 1.1→1.3），而我原计划正是**覆盖过去**。随后做了 M17 当年没做的全树普查：1180 个项目扫出 11 个有未提交改动，现在 **10 个可从本仓复现**；并查出 **`patches/0003` 从入库那天起就是坏的**（hunk 头是人话，`git apply` 永远打不上）。见 [#82](docs/stage4-findings.md)。★★ 音量：**用户实听确认 PA=21 响度够、不爆音**，ROM 已构建并拉到本地，两条断言都过，**等用户在场装机**。★★ 相机：camss 电源域缺陷的模型改对了（**GDSC 真的塌缩过就再也上不了电**），排除了五条（camcc suspend / 时钟被关 / RETAIN_FF / MMCX 档位 / 息屏），找到**已验证的规避**（塌缩前钉住 camss 的 runtime PM）与一条**上游候选修复**（`patches/0020`，与我们的 WARN 同一个 GDSC 同一个函数，不在 7.2-rc2 里）——内核 `#5` 已编好放上 ESP，**故意没设 oneshot**，等有人能按电源键再测。见 [#83](docs/stage4-findings.md)。⚠️★★★ 血的教训：**对时钟可能被门控的寄存器块，`/dev/mem` 的【读】和写一样危险** ——我用 devmem 读 camcc 寄存器把内核弄成静默死亡，机器停到用户醒来。规矩见方框。⬜ WPA3（issue #2）已排除三层，缺 WPA3 环境。（每次开工时更新这一行）
+**当前阶段：Stage 6 M26 — 📸 相机在 Android 相机应用里出实时预览（自研 AIDL HAL + libcamera 软件 ISP，全链路在 AOSP 里编）。离日常可用还差：电源域缺陷、相机 DTB 不是默认、静态拍照、画质。**★★★ 本轮最大的收获是**抢救**：构建 ROM 前按 M5 的规矩比了两棵设备树的清单，发现 **08-24 一整轮工作躺在构建机上从未入库**（自研真温控 HAL / 触摸模式 / HEVC CSD 合并 / ★ TODO A0 侧滑返回的根因与修法 / Vulkan 1.1→1.3），而我原计划正是**覆盖过去**。随后做了 M17 当年没做的全树普查：1180 个项目扫出 11 个有未提交改动，现在 **10 个可从本仓复现**；并查出 **`patches/0003` 从入库那天起就是坏的**（hunk 头是人话，`git apply` 永远打不上）。见 [#82](docs/stage4-findings.md)。★★ 音量：**用户实听确认 PA=21 响度够、不爆音**，ROM 已构建并拉到本地，两条断言都过，**等用户在场装机**。★★ 相机：camss 电源域缺陷的模型改对了（**GDSC 真的塌缩过就再也上不了电**），排除了五条（camcc suspend / 时钟被关 / RETAIN_FF / MMCX 档位 / 息屏），找到**已验证的规避**（塌缩前钉住 camss 的 runtime PM）与一条**上游候选修复**（`patches/0020`，与我们的 WARN 同一个 GDSC 同一个函数，不在 7.2-rc2 里）——内核 `#5` 已编好放上 ESP，**故意没设 oneshot**，等有人能按电源键再测。见 [#83](docs/stage4-findings.md)。⚠️★★★ 血的教训：**对时钟可能被门控的寄存器块，`/dev/mem` 的【读】和写一样危险** ——我用 devmem 读 camcc 寄存器把内核弄成静默死亡，机器停到用户醒来。规矩见方框。⬜ WPA3（issue #2）已排除三层，缺 WPA3 环境。（每次开工时更新这一行）
 
 > ## ★★★ 开工前先读：设备正常，两件事等你在场（2026-09-12 中午）
 >
@@ -54,23 +54,31 @@
 > ★★ 根因暂时搁置，**用户选择直接开工 libcamera HAL**。开发期用"开机即钉住
 > camss"当桥（实测有效）；功耗的账留到真要发布时再算（那时再测 pin 的代价）。
 >
-> **③ 📷★★★★★ 相机拍出照片了 —— M1 完成。**
-> 一张能认出来的真实照片（`docs/img/gaokun3-first-photo.jpg`），8 MP，
-> 从 10 位拜耳**纯软件**去马赛克。链路：hi846 → CSIPHY3 → CSID0 → VFE0 RDI0
-> → libcamera `simple` 流水线 → 软件 ISP（去拜耳+AWB+AGC）→ ABGR8888。
-> 案卷 [#88](docs/stage4-findings.md)（可行性）/ [#89](docs/stage4-findings.md)（交叉编译）
-> / [#90](docs/stage4-findings.md)（出帧）/ [#94](docs/stage4-findings.md)（增益标定）
-> / [#95](docs/stage4-findings.md)（出图）。
-> ★ 打通的关键是**自己标定出 hi846 的增益模型** `gain = 1 + code/16`（满量程 16×，
-> 留出验证四档误差 <2.3%）—— 上游没有这条 helper，AGC 就把模拟增益锁死在 0，
-> 画面永远停在黑电平。补丁 `patches/libcamera/0002-*`，**可发上游**。
-> ⚠️ 画面偏暗偏灰是**调优**问题不是通路问题（用的是通用 `uncalibrated.yaml`：
-> 无 CCM、灰度世界 AWB）。要好成片得写 `hi846.yaml`，**但那不挡 HAL**。
-> ⬜ **下一步 M2：camera3 → AIDL 桥**（方案与理由见 [#91](docs/stage4-findings.md)：
-> HIDL 在本机是死的，AIDL 的 `CameraMetadata` 就是 `camera_metadata_t`，
-> 所以 A 是转发、B 是重写）。⬜ M3：meson → Android.bp。
-> ⚠️ 复现构建：`scripts/camera/build-libcamera-android.sh`（坑都写在头部注释里），
-> 产物**故意不入库**。
+> **③ 📸★★★★★ 相机在 Android 相机应用里出实时预览了。**
+> ![预览](docs/img/gaokun3-camera-app.jpg)
+> 整条链：`hi846 → CSIPHY3 → CSID0 → VFE0 RDI0 → libcamera simple 流水线
+> → 软件 ISP（去拜耳+AWB+AGC）→ libyuv RGB→YUV → 自研 AIDL HAL → 相机应用`。
+> 案卷：[#88](docs/stage4-findings.md) 可行性 / [#89](docs/stage4-findings.md) 交叉编译
+> / [#90](docs/stage4-findings.md) 出帧 / [#94](docs/stage4-findings.md) 增益标定
+> / [#95](docs/stage4-findings.md) 出图 / [#96](docs/stage4-findings.md) ABI 翻车
+> / [#97](docs/stage4-findings.md) 进应用。
+> 代码在 `device/huawei/gaokun3/camera/`（自研 AIDL HAL，约 1400 行），
+> libcamera 的 Soong 移植与三个补丁在 `patches/libcamera/`。
+>
+> ⬜ **离"日常可用"还差四件**（见 [#97](docs/stage4-findings.md) 末尾）：
+> 1. ⚠️★ **[#87](docs/stage4-findings.md) 的电源域缺陷** —— 相机要靠
+>    "开机即钉住 camss"才能反复用。已把 `write .../power/control on` 写进
+>    `gaokun3-camera.rc` 的 `on boot` **当桥**，但根因未破、电源域常开、功耗未测。
+> 2. ⚠️★ **相机 DTB 不是默认的** —— 正常启动（内核 `#3` + `gaokun3.dtb`）
+>    **没有 camss**，现在靠 oneshot 进 `cam2.conf`。要日常可用得让发布内核带相机 DTB。
+> 3. 静态拍照（JPEG）：characteristics 声明了 `BLOB` 但 `Session` 没专门处理，
+>    按快门多半失败。
+> 4. 画质：通用 `uncalibrated.yaml`（无 CCM、灰度世界 AWB），偏绿偏暗。
+>
+> ⚠️★ 本轮最贵的一条教训：**给第三方库留一条日志出口是可以事先做的投资。**
+> libcamera 的日志默认走 stderr，init 服务的 stderr 等于丢弃；
+> 而"调优文件缺失 → … → STREAMON 参数无效"是一条七环因果链，
+> **末端症状完全不提根因**，我瞎调了两轮才想起来加 `LIBCAMERA_LOG_FILE`。
 >
 > **③ ⬜ WPA3（[issue #2](https://github.com/vahiru/gaokun-android/issues/2)）本地测不了。**
 > 判据很干净：同一台 ZTE 路由器、同一个 5 GHz 信道 36，只改安全模式就一正一反
