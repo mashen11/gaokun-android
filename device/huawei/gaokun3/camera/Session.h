@@ -70,11 +70,20 @@ private:
 	/* libcamera 的请求完成回调（在 CameraManager 线程上）。 */
 	void onRequestCompleted(libcamera::Request *req);
 
-	/* 导入/释放 Android 的 gralloc 缓冲。 */
-	buffer_handle_t importBuffer(
-		const aidl::android::hardware::camera::device::StreamBuffer &sb,
-		int32_t w, int32_t h, bool isBlob, int32_t blobSize);
-	void releaseBuffer(buffer_handle_t h);
+	/*
+	 * 取得一路流某个 bufferId 对应的 gralloc 句柄（带缓存）。
+	 * ★★ AIDL 的契约（StreamBuffer.aidl 原文）：同一个 bufferId **只在第一次**
+	 *   带有效句柄，之后框架发过来的 `buffer` 字段是【空的】，
+	 *   "HAL must look up the actual buffer handle to use from its own
+	 *    bufferId to buffer handle map"。
+	 *   漏了这个缓存的症状是第二帧起报 "Failed to importBuffer. Bad handle."
+	 */
+	buffer_handle_t getBuffer(
+		const aidl::android::hardware::camera::device::StreamBuffer &sb);
+	/* 按 cachesToRemove 释放；会话结束时全部释放。 */
+	void dropCaches(const std::vector<
+			aidl::android::hardware::camera::device::BufferCache> &caches);
+	void dropAllCaches();
 
 	/* 把一帧 RGB（源尺寸 srcWidth_×srcHeight_）交付到一个 gralloc 缓冲，
 	 * 必要时缩放到该路流自己的尺寸。 */
@@ -132,7 +141,7 @@ private:
 	struct PendingBuffer {
 		int32_t streamId = -1;
 		int64_t bufferId = 0;
-		buffer_handle_t imported = nullptr;
+		buffer_handle_t handle = nullptr;   /* 缓存里的，不拥有 */
 		int32_t width = 0, height = 0;
 		bool isBlob = false;
 		int32_t blobSize = 0;
@@ -143,6 +152,9 @@ private:
 		std::vector<uint8_t> settings;
 	};
 	std::map<libcamera::Request *, Pending> pending_;
+
+	/* (streamId, bufferId) → 已导入的句柄。见 getBuffer() 的说明。 */
+	std::map<std::pair<int32_t, int64_t>, buffer_handle_t> bufferCache_;
 
 	using MetadataQueue = ::android::AidlMessageQueue<
 		int8_t, ::aidl::android::hardware::common::fmq::SynchronizedReadWrite>;

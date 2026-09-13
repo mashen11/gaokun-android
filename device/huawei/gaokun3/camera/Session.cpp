@@ -105,6 +105,7 @@ ndk::ScopedAStatus Session::close()
 	cam_->requestCompleted.disconnect(this, &Session::onRequestCompleted);
 	freeRequests_.clear();
 	pending_.clear();
+	dropAllCaches();
 	allocator_.reset();
 	config_.reset();
 	cam_->release();
@@ -258,10 +259,11 @@ ndk::ScopedAStatus Session::isReconfigurationRequired(const CameraMetadata &,
 }
 
 ndk::ScopedAStatus Session::processCaptureRequest(const std::vector<CaptureRequest> &reqs,
-						  const std::vector<BufferCache> &,
+						  const std::vector<BufferCache> &cachesToRemove,
 						  int32_t *out)
 {
 	std::lock_guard<std::mutex> lk(mutex_);
+	dropCaches(cachesToRemove);
 	*out = 0;
 	if (!streaming_)
 		return err(Status::INTERNAL_ERROR);
@@ -289,24 +291,25 @@ ndk::ScopedAStatus Session::processCaptureRequest(const std::vector<CaptureReque
 		bool importOk = true;
 		for (const auto &ob : r.outputBuffers) {
 			int32_t w = 0, h = 0;
+			bool isBlob = false;
+			int32_t blobSize = 0;
 			for (const auto &hs : halStreams_)
-				if (hs.id == ob.streamId) { w = hs.width; h = hs.height; }
+				if (hs.id == ob.streamId) {
+					w = hs.width; h = hs.height;
+					isBlob = hs.isBlob; blobSize = hs.blobSize;
+				}
 			if (!w || !h) {
 				ALOGE("请求里出现未配置的流 id=%d", ob.streamId);
 				importOk = false;
 				break;
 			}
-			bool isBlob = false;
-			int32_t blobSize = 0;
-			for (const auto &hs : halStreams_)
-				if (hs.id == ob.streamId) { isBlob = hs.isBlob; blobSize = hs.blobSize; }
-			buffer_handle_t imp = importBuffer(ob, w, h, isBlob, blobSize);
-			if (!imp) { importOk = false; break; }
-			p.buffers.push_back({ ob.streamId, ob.bufferId, imp, w, h,
+			buffer_handle_t hnd = getBuffer(ob);
+			if (!hnd) { importOk = false; break; }
+			p.buffers.push_back({ ob.streamId, ob.bufferId, hnd, w, h,
 					      isBlob, blobSize });
 		}
 		if (!importOk) {
-			for (auto &pb : p.buffers) releaseBuffer(pb.imported);
+			/* ⚠️ 不要在这里 free：句柄归缓存所有，下一帧还要用。 */
 			freeRequests_.push_back(std::move(lreq));
 			break;
 		}
@@ -315,8 +318,7 @@ ndk::ScopedAStatus Session::processCaptureRequest(const std::vector<CaptureReque
 
 		if (cam_->queueRequest(key)) {
 			ALOGE("queueRequest 失败 frame=%d", r.frameNumber);
-			for (auto &pb : pending_[key].buffers) releaseBuffer(pb.imported);
-			pending_.erase(key);
+			pending_.erase(key);   /* 句柄归缓存，不在这里释放 */
 			freeRequests_.push_back(std::move(lreq));
 			break;
 		}
@@ -370,56 +372,66 @@ ndk::ScopedAStatus Session::signalStreamFlush(const std::vector<int32_t> &, int3
 
 namespace gaokun3 {
 
-buffer_handle_t Session::importBuffer(const StreamBuffer &sb, int32_t w, int32_t h,
-				      bool isBlob, int32_t blobSize)
+buffer_handle_t Session::getBuffer(const StreamBuffer &sb)
 {
+	const auto key = std::make_pair(sb.streamId, sb.bufferId);
+	auto it = bufferCache_.find(key);
+	if (it != bufferCache_.end())
+		return it->second;
+
+	/*
+	 * 第一次见到这个 bufferId —— 此时（且仅此时）框架给的句柄是有效的。
+	 * ★ StreamBuffer.aidl 原文："If the bufferId has been sent to the HAL
+	 *   before, this buffer handle must be empty and HAL must look up the
+	 *   actual buffer handle to use from its own bufferId to buffer handle map."
+	 */
 	const native_handle_t *raw = ::android::makeFromAidl(sb.buffer);
 	if (!raw) {
-		ALOGE("makeFromAidl 失败");
+		ALOGE("makeFromAidl 失败 stream=%d buffer=%lld", sb.streamId,
+		      (long long)sb.bufferId);
 		return nullptr;
 	}
+
+	/*
+	 * ⚠️★ 用 importBufferNoValidate()，不要用带宽高/格式/usage 的那个重载：
+	 *   gralloc4 会拿传进去的描述符跟缓冲【实际分配时】的参数比对，对不上
+	 *   返回 BAD_BUFFER(2)，而我们并不知道框架分配时用的确切 usage
+	 *   （producerUsage | consumerUsage 再加框架自己的位，我们只声明了一半）。
+	 *   ★ 判据：错误码 2 是 gralloc 的 BAD_BUFFER，不是 errno 的 ENOENT。
+	 */
 	auto &mapper = android::GraphicBufferMapper::get();
 	buffer_handle_t imported = nullptr;
-	/*
-	 * ⚠️★★ 用 importBufferNoValidate()，不要用带宽高/格式/usage 的那个重载。
-	 *   gralloc4 的 importBuffer() 会拿你传进去的描述符跟缓冲【实际分配时】的
-	 *   参数比对，对不上就返回 BAD_BUFFER(2)。而我们并不知道框架分配时用的
-	 *   确切 usage —— 它是 producerUsage | consumerUsage 再加上框架自己的位，
-	 *   我们只声明了 producer 那一半。实测：BLOB 流每帧都报 "importBuffer 失败: 2"。
-	 *   ★ 判据：错误码 2 = gralloc 的 BAD_BUFFER，不是 errno 的 ENOENT ——
-	 *     一开始按 errno 去查会完全跑偏。
-	 *   NoValidate 版只把句柄导入本进程、不做描述符校验，正是 HAL 要的语义：
-	 *   缓冲的形状由框架保证，我们只负责往里写。
-	 *   （宽高/格式仍然要知道，用在后面的 lock 与转换上，所以参数保留。）
-	 */
-	(void)w; (void)h; (void)isBlob; (void)blobSize;
 	android::status_t st = mapper.importBufferNoValidate(raw, &imported);
-	/* makeFromAidl 造的是一份新句柄，importBuffer 之后就不需要它了。 */
 	native_handle_close(const_cast<native_handle_t *>(raw));
 	native_handle_delete(const_cast<native_handle_t *>(raw));
 	if (st != android::OK || !imported) {
-		ALOGE("importBuffer 失败: %d", st);
+		ALOGE("importBuffer 失败: %d (stream=%d buffer=%lld)", st,
+		      sb.streamId, (long long)sb.bufferId);
 		return nullptr;
 	}
+
+	bufferCache_[key] = imported;
 	return imported;
 }
 
-void Session::releaseBuffer(buffer_handle_t h)
+void Session::dropCaches(const std::vector<BufferCache> &caches)
 {
-	if (h)
-		android::GraphicBufferMapper::get().freeBuffer(h);
+	for (const auto &c : caches) {
+		auto it = bufferCache_.find(std::make_pair(c.streamId, c.bufferId));
+		if (it == bufferCache_.end())
+			continue;
+		android::GraphicBufferMapper::get().freeBuffer(it->second);
+		bufferCache_.erase(it);
+	}
 }
 
-/*
- * 把 libcamera 的一帧 RGB 转成 YUV 写进 gralloc 缓冲。
- *
- * ★★ 字节序是【核过源码】的，不是按名字猜的 —— 猜错是红蓝互换，而且不报错：
- *      · libcamera 的 formats::RGB888 映射到 V4L2_PIX_FMT_BGR24
- *        （src/libcamera/formats.cpp:185）⇒ 内存里 B,G,R
- *      · libyuv 的 "RGB24" 对应 FOURCC_24BG（video_common.h:81）也是 B,G,R；
- *        R,G,B 那个在 libyuv 里叫 "RAW"
- *    ⇒ 用 RGB24ToI420()，不是 RAWToI420()。
- */
+void Session::dropAllCaches()
+{
+	for (auto &kv : bufferCache_)
+		android::GraphicBufferMapper::get().freeBuffer(kv.second);
+	bufferCache_.clear();
+}
+
 bool Session::deliver(const uint8_t *rgb, buffer_handle_t dst,
 		      int32_t dstW, int32_t dstH)
 {
@@ -672,9 +684,9 @@ void Session::onRequestCompleted(libcamera::Request *req)
 	std::vector<bool> okv;
 	for (auto &pb : pend.buffers) {
 		bool ok = rgb && (pb.isBlob
-				  ? deliverJpeg(rgb, pb.imported, pb.width, pb.height,
+				  ? deliverJpeg(rgb, pb.handle, pb.width, pb.height,
 						pb.blobSize, /*quality=*/90)
-				  : deliver(rgb, pb.imported, pb.width, pb.height));
+				  : deliver(rgb, pb.handle, pb.width, pb.height));
 		okv.push_back(ok);
 		if (!ok) {
 			NotifyMsg emsg;
@@ -687,7 +699,6 @@ void Session::onRequestCompleted(libcamera::Request *req)
 			emsgs.push_back(std::move(emsg));
 			cb_->notify(emsgs);
 		}
-		releaseBuffer(pb.imported);
 	}
 	if (srcMap != MAP_FAILED)
 		munmap(srcMap, srcLen);
