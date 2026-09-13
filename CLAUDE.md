@@ -5,7 +5,7 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M29 — camss 电源域：第二个候选修复也被否（第七条），但同一轮的单变量实验把触发条件挪到了【下电】那一侧。**★★★★★ **决定性对照**（同一次开机、同一个域、同一个内核，只差一个变量）：**无流量的塌缩之后上电 ✅ 成功 12 帧；跑过一轮 camtest 再塌缩，上电 ❌ −110。**⇒ 触发条件**不是"塌缩过"，是"跑过流量之后再塌缩"**。这同时修掉 [#83](docs/stage4-findings.md) 的后半句模型，并解释了**前面七条假说为什么全部落空**—— 它们全在查上电路径缺什么，而 A/B 两格**在上电那一刻的状态完全相同**，差别只在历史里。⚠️ A/B 还分不开两种读法（真有 DMA 流量 vs. 那段 ON 期间开了一整套 camcc 时钟与 CSIPHY 稳压器），**下一步必须把这两件事拆开**（阶梯实验见 [#102](docs/stage4-findings.md)）。❌ `patches/0021`（给 titan_top 加 NoC 投票）被否，且是干净的阴性结果：失败**之后**那条 icc 投票**还留在 1/1** ⇒ NoC 全程是抬起来的，照样起不来。⚠️★ 本轮我把机器弄挂了一次 —— 在 camss 已 `runtime_error` 时 unbind 它会**拖死整机**，用户长按电源键才救回；而我真正想测的 `patches/0022` 本该在**健康状态**下测，**至今未验证**。⬜ WPA3 已结案（是密码不是 WPA3，见 [#100](docs/stage4-findings.md)）。⬜ 相机日常可用，欠账：电源域靠开机钉住当桥、画质未标定。（每次开工时更新这一行）
+**当前阶段：Stage 6 M30 — camss 电源域：触发点已经钉到【一次 STREAMON/STREAMOFF 循环】，而且与帧数无关、与时钟泄漏无关。**★★★★★ 用 `camtest --stop N` 做了五级阶梯，探针是 `echo on > camss/power/control`（一次朴素 genpd resume，实测无害 ⇒ **没毒化的那一级不消耗这次开机**，一次开机跑完五级）：1 接链 / 2 设格式 / 3 REQBUFS+QBUF **都不毒化**（它们根本没让域上电），**第 4 级 —— STREAMON 后立刻 STREAMOFF、0 帧 —— 毒化**。⇒ 不是"搬运了数据"，是那个开关循环本身；而且它跑的时候域**全程供电**，所以损坏是在"子设备开了又关"这段造成的，塌缩只是把它暴露出来。❌ 顺手否掉一条极像的假说：`STREAMOFF` 之后确实**泄漏了 8 个 camcc 时钟**（cpas_ahb/camnoc_axi/pll0/cci_2…），但钉着等 10 秒它们会自己释放，**等到 0 个再塌缩照样坏** ⇒ 与"带着时钟塌缩"无关。★ 收敛：**只有 titan_top 这样**，`ife_0..3` 子域每次拍照都完整下电上电从不出错；titan_top 管的是整个相机 NoC/CPAS 桥，而主线 camss **没有 CPAS 驱动** —— ⚠️ 这是形状不是结论。见 [#103](docs/stage4-findings.md)。⬜ 下一步：内核侧在 `gdsc_toggle_logic()` 超时时打 GDSCR/CFG_GDSCR 全字段（走 regmap，**不碰 `/dev/mem`**）；以及把第 4 级再劈一刀（REQBUFS 但不 QBUF = 真零 DMA）。⬜ `patches/0021` 已否（第七条），`patches/0022` **仍未验证**。⬜ WPA3 已结案（是密码不是 WPA3，[#100](docs/stage4-findings.md)）。（每次开工时更新这一行）
 
 > ## ★★★ 开工前先读：设备正常，相机可用（2026-09-13 晚）
 >
@@ -42,6 +42,19 @@
 > 的 pipeline PM），而 A 格只是朴素的 genpd resume。**下一步必须拆开这两件事**，
 > 阶梯实验见 [#102](docs/stage4-findings.md)（★ 关键性质：没毒化的那一级不消耗这次开机）。
 > ⚠️ 阶梯的第 1–4 级需要给 `camtest` 加一个"停在第 N 步"的开关，它现在是固定流程。
+>
+> **⓪b2 ★★★★★ 触发点已钉到"一次 STREAMON/STREAMOFF 循环"（[#103](docs/stage4-findings.md)）。**
+> `camtest --stop N` 五级阶梯，探针用 `echo on > .../camss/power/control`
+> （朴素 genpd resume，实测无害 ⇒ **没毒化的那一级不消耗这次开机**）：
+> 1/2/3 级（接链、设格式、REQBUFS+QBUF）**都不毒化**——它们根本没让域上电；
+> **第 4 级（STREAMON 后立刻 STREAMOFF、0 帧）毒化**。
+> ❌ 并否掉"时钟泄漏"：`STREAMOFF` 后确实泄漏 8 个 camcc 时钟，
+> 但钉着等 10 秒会自己释放，**等到 0 个再塌缩照样坏**。
+> ⚠️ 诚实边界：第 4 级仍 `QBUF` 过，排除的是**持续数据流**，
+> 没排除"DMA 引擎被启动过又没干净停下"。
+> ⬜ 下一步两件：① 内核侧在 `gdsc_toggle_logic()` 超时时打 GDSCR/CFG_GDSCR
+> 全字段（**走 regmap，不碰 `/dev/mem`**，这是目前唯一安全的"看硬件内部"办法）；
+> ② `REQBUFS` 但不 `QBUF` 再 `STREAMON` = 真正的零 DMA。
 >
 > **⓪c ⚠️★★★ 一条新的操作禁忌（用一次强制关机换来的）**：
 > **camss 已经 `runtime_error` 时，不要 unbind 它 —— 会拖死整机**
