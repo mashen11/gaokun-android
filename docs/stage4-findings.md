@@ -7301,3 +7301,150 @@ retry-FAIL:      GDSCR=0x68282800  CFG=0x010e0000
   camss 开机钉住、`titan_top=on`、34 个 `/dev/video*`。
 * ⚠️ ESP 只剩 20 MB：内核 `#6` 的副本已回收（它与现役 `#5` 的 sha 不同，
   是先核对过 sha 才删的）；`slot_cam4` 现在放的是 `#10`。
+
+## #105 ★★★★★ camss 电源域：根因找到并修好 —— CAMNOC AXI 的时钟发生器停在一个已熄灭的 PLL 上（2026-09-13 夜 → 09-14 凌晨）
+
+[#104](#104) 结束时手里是一条硬件级证据链和三条被否的修法。本条从第八条假说落空开始，
+用两轮内核（`#11`、`#12`）把触发点二分到**一段时钟开关**，再用 clk debugfs 直接看见了
+那个坏状态，最后在 `#13` 上让预先声明的判据**全部达成**。**根因：`camcc-sc8280xp` 里
+`camnoc_axi_clk_src` / `slow_ahb_clk_src` / `fast_ahb_clk_src` 三个 RCG 用的是普通
+`clk_rcg2_ops`，关闭时不停靠到 XO；camss 用完相机后 CAMNOC 的时钟源指着一个已经关掉的 PLL，
+GDSC 掉电/上电与 CAMNOC 的握手因此永远等不到。修法 `patches/0031`（三行）。**
+
+### ❌ 一、第八条假说：等待值（`patches/0027`）—— 依据是真的，结论是错的
+
+上游线索：`gdsc_init()`（`gdsc.c:435-444`）在驱动没给 `en_rest/en_few/clk_dis` 时用
+MSM8974 的 `2/8/2` **覆盖硬件复位值**（Konrad Dybcio 在 lkml 上明说过这组是 8974 的）；
+同代同偏移的 `camcc-sm8150.c`/`camcc-sc8180x.c` 全写 `2/2/0xf`，而本机驱动一个都没写。
+`#104` 转储里的 `GDSCR=0x00282801` 正是 `2/8/2`。`CLK_DIS_WAIT` 只在域里有时钟跑过时才起作用，
+形状与"干净塌缩无害、流过之后必坏"吻合 —— 于是 `0027` 把八个 GDSC 都改成 `2/2/0xf`，
+并用 `patches/0028` 加了个 debugfs 表，在 `gdsc_init()` 覆盖**之前**记下原始寄存器。
+
+内核 `#11` 实测：
+* ★ `gdsc-dbg/init_raw`：**全部八个 camcc GDSC（连 gcc 那批也一样）复位值 = `0x0022f001`**
+  ⇒ `EN_REST=2 EN_FEW=2 CLK_DIS=15`。`0027` 写的正是硬件值，这一半成立。
+* ❌ 但脏塌缩照旧 `after-OFF CFG=0x00008000`、上电照旧冻在 `0x010e0000`，轨迹一字不差。
+* ★ 顺带看清一件事：**`before-ON` 瞬态本来就是 `0x010e0000`**，成功时它走到 `0x00070000`。
+  所以 bit 24 不是错误标志，`[19:16]=E` 是**正常的中间态**，只是失败时走不出去。
+  #104 把它读成"卡死态"是把"停在哪"和"为什么停"混了。
+
+`0027` 留在 KPATCHES 里 —— 它是正确的硬件值、上游同代驱动都这么写，只是不是本缺陷的根因。
+
+### 二、把"域里什么被弄脏了"切开：两组旋钮（`patches/0029`、`0030`）
+
+`#103` 的阶梯停在"一次 STREAMON/STREAMOFF"，那一步同时做四件事（CSIPHY、CSID、VFE、传感器），
+用户态切不开。于是给内核 `#12` 装两组旋钮：
+
+* `0029`：`gdsc-dbg/raw` —— 绕开 genpd **裸翻转任一 camcc GDSC**（三道安全阀：只许 camcc 家族；
+  genpd 认为开着的域不许裸关；父域没开不许裸开子域）；`flags_mask` 屏蔽 `RETAIN_FF`；
+  `pre_off_delay_ms`。
+* `0030`：camss 模块参数 `dbg_skip`，按位跳过 CSIPHY/CSID/VFE/传感器的 **`s_power`+`s_stream`**。
+
+**T1（不经 camss）：裸开关一次子域 `ife_0`，再塌缩 `titan_top` → ✅ 上电成功，`after-OFF=0x00088000`。**
+⇒ 子 GDSC 的翻转本身不是触发点。而且这个实验不消耗开机。
+
+**二分结果（每个毒化的格子都是一次重启）**：
+
+| `dbg_skip` | 还在跑的 | 结果 |
+|---|---|---|
+| 8（跳传感器） | CSIPHY+CSID+VFE，**没有 MIPI 数据** | ❌ 毒化 |
+| 1 / 2 / 4（各跳一块） | 其余三块 | ❌ 全毒化 |
+| 11（只留 VFE） | VFE 自己的 s_power/s_stream | ❌ 毒化 |
+| 13（只留 CSID） | CSID + 它拉起的 `vfe_get()` | ❌ 毒化 |
+| 12（只留 CSIPHY+CSID） | 同上 + CSIPHY | ❌ 毒化 |
+| 14（只留 CSIPHY） | — | 💥 **内核 panic**，见第五节 |
+
+三个"只留一块"的组合唯一的公共部分是 **`vfe_get()`/`vfe_put()`**：ife_0 上电、
+**`camss_enable_clocks()`（先 `clk_set_rate`）**、VFE 全局复位、读版本号、然后关时钟、ife_0 下电。
+裸翻转 ife_0 又是干净的 ⇒ 嫌疑收敛到**时钟**。
+
+### ★★★★★ 三、直接看见坏状态：CAMNOC AXI 的 RCG 指着一个熄灭的 PLL
+
+在钉住的域上（不塌缩）只跑一次 `camtest --stop 4 --noqbuf`，前后读 `/sys/kernel/debug/clk`
+（读 debugfs 不碰硬件，`clk.c:334`）：
+
+```
+之前  camcc_camnoc_axi_clk_src  rate=19200000   parent=bi_tcxo              en=0
+之后  camcc_camnoc_axi_clk_src  rate=150000000  parent=camcc_pll0_out_even  en=0
+      camcc_pll0 / camcc_pll0_out_even                                       en=0
+```
+
+开机默认 CAMNOC AXI 挂在常开的 XO 上；camss 的 VFE 路径按像素时钟给 `camnoc_axi` 设成 150 MHz
+（`ftbl_camcc_camnoc_axi_clk_src`：源 `PLL0_OUT_EVEN`），用完关掉分支时钟，PLL 因无人引用而熄灭，
+**RCG 的 CFG 仍指着它**。这就是 #102 A/B 两格之间**唯一的硬件差别** —— 而它恰好不在 #102 当时
+对比的那几样东西里（clk_summary 只显示"使能计数"，RCG 的源选择要看 `clk_parent`）。
+
+驱动侧的差别一目了然（`refs/linux-v7.2-rc2/drivers/clk/qcom/camcc-sc8280xp.c`）：
+43 个 RCG 里 21 个已是 `clk_rcg2_shared_ops`（bps/icp/ife*/ipe/jpeg/lrme），
+但 **`camnoc_axi` / `slow_ahb`（= `cpas_ahb` 的源）/ `fast_ahb` 是普通 `clk_rcg2_ops`**。
+`clk_rcg2_shared_disable()`（`clk-rcg2.c:1448`）会在关闭时把 RCG **停靠到安全源 XO**，
+`clk_rcg2_shared_init()`（:1514）在 probe 时也先停靠；普通 ops 没有 disable 回调。
+上游同代驱动：`camcc-sm8150.c`/`camcc-sc8180x.c`（GDSC 与寄存器偏移与本机逐个相同）**全部 RCG 都是 shared**；
+`camcc-x1e80100.c` 恰好把 `camnoc_axi_rt`/`slow_ahb`/`fast_ahb`/`csid` 标 shared、cci/cphy_rx/phytimer/mclk 留普通。
+`patches/0031` 照 x1e80100 的口径只改这三个 `.ops`。
+
+### ✅ 四、判据达成（内核 `#13`）
+
+预先声明的判据（写在 `0031` 头部）：noqbuf 一次 + 完整 camtest 五次，每次塌缩后探针能上电，
+且 `after-OFF` 回到 `0x00088000`。实测：
+
+* `--noqbuf` → 塌缩 → ✅；完整 camtest ×5（各 12 帧）→ 塌缩 → ✅ ×5；
+  **每一次 `after-OFF CFG=0x00088000`**，上电每一次都从 `0x010e0000` 走到 `0x00070000`。
+* 真实使用形态：解钉（`control=auto`），连跑 6 次，每次用完 1–2 秒自然塌缩（`camss=suspended`），
+  中间空闲 60 秒，第 6 次照样 12 帧，dmesg 里 `stuck at` **0 行**。
+
+### 五、为什么前面每一条证据都与这个根因吻合（回头对账）
+
+* **触发在掉电侧、干净塌缩无害**（#102）：没设过频率的 RCG 挂在 XO 上，CAMNOC 有活时钟。
+* **`--noqbuf` 照样毒化、传感器不出流也毒化**：`clk_set_rate` 在 `vfe_get()` 里，与数据无关。
+* **签名 bit 19 在掉电那一刻就没了**（#104）：GDSC 掉电要与 CAMNOC 握手（clamp/halt），
+  CAMNOC 没时钟就握不上，isolation 那一步被跳过。
+* **复位全部 BCR 让 bit 19 回来了但上电仍失败**（#104）：CAMNOC 被复位成空闲，掉电侧的握手过了；
+  上电侧同样需要 CAMNOC 有时钟 —— 还是没有。★ 这也解释了为什么"判据达成而缺陷照旧"。
+* **重试永远救不回来**：塌缩/上电都需要那个时钟，重做多少次都一样。
+* **0021（NoC 投票）无关、0020（gdsc_clk）无关、0027（等待值）无关**：都不改 RCG 的源。
+* **裸翻转 ife_0 干净**：不动任何 RCG。
+* **X13s 上游没人报**：上游 camss 在 x13s 的用法多半没让 camnoc_axi 离开 XO（或者根本没人做过"用完再用"）。
+  这一条是**推测**，没验。
+
+### 💥 六、本轮自己造的两个坑
+
+1. **`dbg_skip=14`（只留 CSIPHY）让内核 panic**。pstore 抓到了：`Comm: camtest-ladder`，
+   `vfe_flush_buffers+0x54` 空指针。CSID 和 VFE **同时**被跳掉 ⇒ `vfe_get()` 从没跑过 ⇒
+   `vfe_init_outputs()` 没跑 ⇒ `output->pending` 链表是零 ⇒ STREAMOFF 冲刷缓冲踩空。
+   `dbg_skip=4`（只跳 VFE）不炸是因为 CSID 的 `parent_dev_ops->get()` 替它跑了 `vfe_get()`。
+   ⚠️ 我当场把它读成"CSIPHY 写了没供电的 clk-mux 寄存器"——**读了 pstore 才知道不是**。
+   规矩：**跳步旋钮的组合要保住原有的依赖顺序，CSID 与 VFE 不能同时跳。**
+   ⚠️ 更糟的是那个循环把后两格（skip=3/12）**在设备已丢失时**判成了"未毒化"——
+   判据只 grep 了"仍毒化"，设备不在 ⇒ grep 不中 ⇒ 阴性。**"没拿到明确结果"必须是第三种状态。**
+2. **`patches/0031` 第一次根本没打进内核**（`#13` 第一版 = `#12`）。`kernel-apply-patches.sh` 的
+   指纹判据把新增行 `.ops = &clk_rcg2_shared_ops,` 在文件里别处的 **21 处**当成"已应用"，
+   静默跳过，而脚本输出看起来完全正常。★ **指纹只能回答"这些行在不在文件里"，
+   回答不了"是不是这个补丁放进去的"。** 已改成：正向 `git apply --check` 成功 ⇒ 确定没打过 ⇒ 直接打；
+   指纹只留给正向打不上之后的分流。同时把 4 个诊断补丁挪进 `DIAG_PATCHES`（`--with-diag` 才打），
+   发版路径若发现树里还有诊断补丁会**大声退出**。
+
+顺带的几个小坑：`pkill -f build-k12.sh` 把正在执行的 ssh 命令行（含同名字串）自己杀了，
+后面的 heredoc 没写出去，`nohup` 跑了个空文件、日志 0 字节；在 scratch 仓里
+`git checkout -- .` 之后重生成补丁，把 `0029` 写成了"只有头没有 diff"——靠**与构建机上真正
+编进内核的 `gdsc.c` 逐字节比对**才发现；`#12` 第一次开机 USB 没枚举（等待期间屏幕息了、
+USB 切到 host），用户重启后才回来 —— 已把 `screen_off_timeout` 调到 30 分钟。
+
+### ★ 七、pstore 里的另一份意外收获：#83 那次"unbind 拖死整机"其实是 panic
+
+pstore 里同时压着内核 `#6` 的记录：`Comm: sh`，`kobject: tried to init an initialized object` ×4
+→ `gdsc_register()` → `of_genpd_add_provider_onecell()` → `device_add()` → `kobject_get()` 的
+WARN 里打印名字时踩到已释放内存 → Oops → panic。也就是说 **camcc rebind 时 genpd 的 kobject 被
+重复初始化** —— 这正是 `patches/0022`（上游 `86b23609d5e1`）修的那个缺陷。
+"USB 仍枚举、adbd 不应答"是 panic 没配 `panic=` 时的样子。`0022` 因此从"未验证的顺手补丁"
+变成"有 pstore 证据支持的必要补丁"（它本身的实测验证仍欠：健康状态下 unbind/rebind camcc）。
+
+### 八、产物与下一步
+
+* `patches/0031`（修复，3 行）、`0027`（硬件等待值）—— 进发版内核；`0022` 一并带上。
+* `patches/0028`/`0029`/`0030`（诊断）与 `0023` 一起挪入 `DIAG_PATCHES`，**不进发版内核**。
+* 内核 `#13` = `#12` + 0031（含诊断，验证用）；**`#14` = 发版形态**（0020/0022/0027/0031，无诊断）。
+* ⬜ `#14` 装进默认槽 `slot_a`；`device/huawei/gaokun3/camera/gaokun3-camera.rc:13` 的开机钉住
+  可以撤（要等 ROM 的内核换成带 0031 的那一版，否则撤了就回到 #83）。
+* ⬜ 上游投稿：`camcc-sc8280xp: Mark RCGs shared where applicable`（照 x1e80100 口径）+ 等待值。
+* 本轮共 11 次重启（其中 1 次 panic 自动回落、1 次用户手动重启）、构建 4 次，**全程用户在场**。

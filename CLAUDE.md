@@ -5,7 +5,7 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M31 — camss 电源域拿到了硬件级证据链：触发点、签名、以及"救不回来"的证明；三条修法被否（其中一条顺带否掉了我自己的判据）。根因仍未破。**★★★★★ 用内核里的寄存器转储（`patches/0023`，走 regmap，**全程不碰 `/dev/mem`**）拿到：① **与 DMA 无关** —— `--noqbuf`（一个缓冲都不入队）照样毒化 ⇒ 是 `s_stream` 的开关序列本身；② **硬件签名**：干净掉电后 `CFG_GDSCR=0x00088000`（6/6），脏掉电后 `0x00008000`（2/2），**`GDSCR` 四次读数完全相同，只差 bit 19**，而且在**掉电那一刻**就能看见；③ **软件侧不可逆** —— 重做"掉电→上电"3 次全败，且重做时 `POWER_DOWN_COMPLETE` **再也没置起过** ⇒ FSM 冻结在 `0xE`，两个方向都不响应（这解释了 [#83](docs/stage4-findings.md) 的"只有重启"）。❌ 否掉三条：塌缩前复位 CAMNOC+CPAS、塌缩前复位**全部 21 个** BCR、以及上电后重试。⚠️★★★ 全 BCR 复位那次**让我的预先声明判据达成了（after-OFF 变回 `0x00088000`）而缺陷照旧** ⇒ **bit 19 是相关量不是充分条件**。[#73](docs/stage4-findings.md) 记过"判据在两种结果下会不会不同"，这次补上另一半：**还要问它能不能在【没修好】时被满足**。见 [#104](docs/stage4-findings.md)。⬜ 下一步性价比最高的是**带着完整寄存器轨迹去问上游**：sc8280xp 的 titan_top，`CFG_GDSCR[19:16]` 是什么、什么情况下掉电会落在 `0` 而不是 `8`。⬜ 现有规避不变（开机钉住 camss），相机日常可用。（每次开工时更新这一行）
+**当前阶段：Stage 6 M32 — ★★★★★ camss 电源域缺陷【根因找到并修好】：`camcc-sc8280xp` 的 `camnoc_axi` / `slow_ahb` / `fast_ahb` 三个 RCG 用了普通 `clk_rcg2_ops`，关闭时不停靠 XO；camss 用完相机后 CAMNOC AXI 的时钟源指着一个已熄灭的 PLL（clk debugfs 实测 `parent=camcc_pll0_out_even`、PLL `en=0`），GDSC 掉电/上电与 CAMNOC 的握手因此永远等不到。修法 `patches/0031`（三行，照 x1e80100 口径标 shared）。内核 `#13` 上预先声明的判据全部达成（noqbuf + 完整 ×5，每次 `after-OFF` 回到 `0x00088000`）；真实形态（解钉、自然塌缩、60 秒空闲）6/6；发版形态 `#14`（0020/0022/0027/0031，无诊断）4/4。路上否掉第八条假说 `0027`（等待值——硬件复位值确实是 2/2/0xf，写对了但不是根因，保留）；4 个诊断补丁挪进 `DIAG_PATCHES`（`--with-diag` 才打）。⚠️★★ 两个自己造的坑：`kernel-apply-patches.sh` 的指纹判据把 0031 当"已应用"静默跳过（第一版 `#13` 其实是 `#12`）——**指纹只回答"在不在"，回答不了"是谁放的"**，已改成正向 `--check` 优先；`dbg_skip=14` 同时跳 CSID+VFE 触发 `vfe_flush_buffers` 空指针 panic——旋钮组合必须保住硬件依赖顺序。★ pstore 顺带揭示 #83 的"unbind 拖死整机"其实是 rebind 时 `gdsc_register()` kobject 重复初始化 panic = `patches/0022` 修的缺陷。见 [#105](docs/stage4-findings.md)。⬜ 下一步：`#14` 进默认槽并撤掉 `gaokun3-camera.rc:13` 的开机钉住；上游投稿 0031+0027；后摄。（每次开工时更新这一行）**
 
 > ## ★★★ 开工前先读：设备正常，相机可用（2026-09-13 晚）
 >
@@ -25,6 +25,26 @@
 > **在搜索范围外 10 分钟没找到，而那看起来和"内核挂死了"一模一样** ——
 > 我据此写了"硬挂死、安全阀都没触发"，还让用户去按电源键。实际上它**一直好好地
 > 跑着内核 `#5`**。★ 收窄搜索范围会把假阴性伪装成阳性结论。
+>
+> **⓪d ★★★★★ 电源域缺陷已根治（[#105](docs/stage4-findings.md)，2026-09-14 凌晨）。**
+> 根因 = `camcc-sc8280xp` 里 `camnoc_axi_clk_src`/`slow_ahb_clk_src`/`fast_ahb_clk_src` 用普通
+> `clk_rcg2_ops`（关闭时不停靠 XO）。camss 用完相机后 CAMNOC AXI 的 RCG **指着一个已熄灭的 PLL**
+> （clk debugfs：`parent=camcc_pll0_out_even`、`camcc_pll0 en=0`），GDSC 掉电/上电与 CAMNOC 握手
+> 等不到 ⇒ 正是 #104 的 bit 19 签名与 `0xE` 冻结。修法 `patches/0031`（3 行）。
+> ★ 路径：`#11` 否掉等待值假说（`0027`，硬件复位值确实是 2/2/0xf，保留）→ `#12` 用 `0029/0030`
+> 旋钮二分：裸翻转 ife_0 干净、任何组合只要跑过 `vfe_get()` 就毒化 → 直接读 clk debugfs 看见死源。
+> ★ 前面每条证据都对得上：BCR 复位让 bit 19 回来但上电仍要时钟；重试无用；0020/0021 都不改 RCG 源。
+> ⚠️★★ **两个自己造的坑**：① `kernel-apply-patches.sh` 的指纹判据把 0031 的新增行（文件里别处已有 21 行
+> 一样的）当成"已应用"静默跳过 —— **第一版 `#13` 根本没带修复**；现已改成正向 `--check` 优先。
+> **指纹只回答"这些行在不在"，回答不了"是不是这个补丁放的"。** ② `dbg_skip=14` 同时跳 CSID+VFE
+> ⇒ `vfe_get()` 没跑 ⇒ `vfe_flush_buffers` 空指针 panic（`panic=10` 自动回落）；我当场误读成
+> "CSIPHY 写了没电的寄存器"，**读了 pstore 才纠正**。旋钮组合要保住硬件依赖顺序；
+> 循环里"没拿到明确结果"必须是第三种状态，不能当阴性。
+> ★ pstore 里还压着 `#6` 的记录：#83 那次"unbind 拖死整机"其实是 rebind 时 `gdsc_register()`
+> kobject 重复初始化的 panic —— 正是 `patches/0022` 修的缺陷。
+> ⬜ 发版形态 `#14`（0020/0022/0027/0031，无诊断）已编出并在测试槽验过 4/4，待进默认槽；
+> 进了才可撤 `device/huawei/gaokun3/camera/gaokun3-camera.rc:13` 的开机钉住。
+> 诊断补丁 0023/0028/0029/0030 已挪进 `DIAG_PATCHES`，发版路径发现树里有它们会大声退出。
 >
 > **⓪ ❌ 内核 `#6` 已上机测完 —— `patches/0021` 被否（第七条）。**
 > 补丁确实生效（`ad00000.clock-controller` 作为 interconnect 消费者出现、

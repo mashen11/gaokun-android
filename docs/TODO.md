@@ -258,7 +258,18 @@ URL 是 **36.9 MB/s**。对"用户走系统内 OTA 升级"有实际影响（1 GB
 再换一个不同 CDN 的大文件对照 —— 先分清是"到 Cloudflare 这条路"还是
 "设备的 TCP 行为"。
 
-### A7. 摄像头 —— ★★ 前摄在 V4L2 层已打通，缺 HAL
+### A7. 摄像头 —— ★★ 前摄可用，★★★★★ 电源域缺陷已根治（#105）
+
+> **★★★★★ 2026-09-14 更新：[#87](stage4-findings.md) 的电源域缺陷【根因找到并修好】**
+> （[#105](stage4-findings.md)）。根因是 `camcc-sc8280xp` 里 `camnoc_axi`/`slow_ahb`/`fast_ahb`
+> 三个 RCG 没标 `clk_rcg2_shared_ops`，用完相机后 CAMNOC AXI 的时钟源停在一个熄灭的 PLL 上。
+> 修法 `patches/0031`（3 行）。内核 `#13`（含诊断）与 `#14`（发版形态）实测：解钉、自然塌缩、
+> 空闲后再用，全部成功。**下面那段"量一次钉住 camss 的功耗"已经不需要了** —— 钉住本身可以撤。
+> ⬜ 待办：① `#14` 进默认槽 `slot_a`（换日常内核，要有人在场）；② 撤掉
+> `device/huawei/gaokun3/camera/gaokun3-camera.rc:13` 的 `power/control on`（要等 ROM 的内核
+> 带上 0031，否则撤了就回到 #83）；③ 上游投稿 `camcc-sc8280xp: Mark RCGs shared where applicable`
+> （照 x1e80100 口径）+ 等待值 `0027`；④ `patches/0022` 在健康状态下补一次 unbind/rebind 验证
+> （pstore 证明 #83 的"拖死整机"就是它修的 panic）。
 
 > **★★ 2026-09-12 libcamera 可行性摸底完成（[#88](stage4-findings.md)）——
 > 结论比预期好得多，上游已经认识我们这台机器**：

@@ -64,7 +64,6 @@ KPATCHES=(
     0022-clk-qcom-gdsc-tear-down-genpds-in-unregister.patch
     # ⚠️ 0023 是【诊断补丁，不要进发版内核】：每次 titan 域翻转打两行寄存器转储。
     #    它存在的意义是把"读 GDSCR"从 /dev/mem（本机会静默死内核）换成 regmap。
-    0023-clk-qcom-gdsc-dump-gdscr-on-toggle-and-timeout.patch
     # ❌ 0024 / 0025 / 0026 三条试验补丁**已被内核 #10 实测否掉**（#104：上电后重试、
     #    塌缩前复位 CAMNOC+CPAS、塌缩前复位全部 21 个 BCR，都救不回来），故意【不列】。
     #    文件留在 patches/ 下作案卷。它们都依赖 0023，若要复现顺序不能反。
@@ -74,19 +73,43 @@ KPATCHES=(
     0027-clk-qcom-camcc-sc8280xp-gdsc-wait-vals.patch
     # ⚠️ 0028 是【诊断补丁，不要进发版内核】，**依赖 0023**（用它的 gdsc_is_watched）。
     #    debugfs gdsc-dbg/init_raw 读硬件复位值（核实 0027 的依据）、wait_override 运行时改等待值。
-    0028-clk-qcom-gdsc-debugfs-init-raw-and-wait-override.patch
     # ❌ 0027 已被内核 #11 实测否掉（#105）：硬件复位值确实是 2/2/0xf（0028 读出），
     #    但改回去之后脏塌缩签名与上电冻死一字不差。留在列表里是因为它**就是正确的硬件值**
     #    （上游同代驱动全这么写），只是不是这个缺陷的根因。
     # ⚠️ 0029 是【诊断补丁，不要进发版内核】，依赖 0023/0028：裸翻转 GDSC、屏蔽 RETAIN_FF、塌缩前延时。
-    0029-clk-qcom-gdsc-debugfs-raw-toggle-flags-mask-pre-off-delay.patch
     # ⚠️ 0030 是【诊断补丁，不要进发版内核】：camss 按块跳过 s_power/s_stream（module 参数 dbg_skip）。
-    0030-media-camss-dbg-skip-per-block-stream-power.patch
     # ★ 0031 候选根因修复（#105）：camnoc_axi / slow_ahb / fast_ahb 三个 RCG 标成 shared，
     #    关闭时停靠 XO。实测一次出流后 camnoc_axi_clk_src 指着已熄灭的 pll0_out_even。
     #    改的是 camcc-sc8280xp.c 里三个 .ops 行，与 0020/0027 的 hunk 不相交。
     0031-clk-qcom-camcc-sc8280xp-mark-camnoc-ahb-rcgs-shared.patch
 )
+
+# ⚠️ 诊断补丁【不进发版内核】：只在带 --with-diag 时打。顺序有依赖：0028/0029 依赖 0023，
+#   0029 依赖 0028；0030 独立。反向撤掉时要倒序（0030 0029 0028 0023）。
+#   它们是 #103–#105 取证用的（regmap 转储 / debugfs 旋钮 / camss 按块跳过），
+#   发版内核里留着只会在每次 titan 域翻转时刷两行 pr_err。
+DIAG_PATCHES=(
+    0023-clk-qcom-gdsc-dump-gdscr-on-toggle-and-timeout.patch
+    0028-clk-qcom-gdsc-debugfs-init-raw-and-wait-override.patch
+    0029-clk-qcom-gdsc-debugfs-raw-toggle-flags-mask-pre-off-delay.patch
+    0030-media-camss-dbg-skip-per-block-stream-power.patch
+)
+WITH_DIAG=0
+for a in "$@"; do [ "$a" = "--with-diag" ] && WITH_DIAG=1; done
+if [ "$WITH_DIAG" = 1 ]; then
+    KPATCHES+=("${DIAG_PATCHES[@]}")
+    echo "⚠️ --with-diag：诊断补丁也会打（${#DIAG_PATCHES[@]} 个），这不是发版内核"
+else
+    # 发版路径：诊断补丁若还在树里，要大声说出来 —— 否则会把带 pr_err 转储的内核发出去
+    for p in "${DIAG_PATCHES[@]}"; do
+        f="$REPO/patches/$p"
+        [ -f "$f" ] || continue
+        if git -C "$TREE" apply --check -R "$f" 2>/dev/null; then
+            echo "✗ 诊断补丁 $p 还在树里 —— 发版内核不能带它。撤掉：git apply -R patches/$p（倒序）" >&2
+            exit 1
+        fi
+    done
+fi
 
 # ★★ 指纹判据：补丁是否【已在树里】。
 #
