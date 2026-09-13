@@ -6761,3 +6761,222 @@ JPEG 1280x960 质量90 → 242753 字节
 触发，我就当成"文件不存在"。**文件其实在。**
 ⇒ **判据教训：一条命令里查多个目标时，`||` 的语义是"任一失败"，不是"都不存在"。**
 已改成把相机规则**并进**原文件。
+
+---
+
+## #100 ★★★★★ WPA3 结案：不是 WPA3 的问题 —— 密码对不上，而且是两条独立算法各自证明的（2026-09-13）
+
+用户给了自家的 AP 让我修 WPA3。⚠️ **SSID、密码、BSSID 一律不写进本仓**
+（这是公开仓库），下文记作 `<SSID>` / `<PW>` / `<BSSID-2G4>` / `<BSSID-5G>`。
+**本轮第一次真正把这件事查到底，结论与题面相反。**
+
+### ★★ 一、终于拿到了缺的那件工具：`wpa_cli`
+
+此前所有诊断都卡在"看不见 supplicant 内部"：`cmd wifi set-verbose-logging`
+在 user 版被拒、`.rc` 里的 `-dd` 输出到不了 logcat、自己起一个私有
+`wpa_supplicant` 实例零输出。
+
+**解法是 `m wpa_cli`**（AOSP 自带、170 KB），推到 `/data/local/tmp` 就能
+`-p /data/vendor/wifi/wpa/sockets -i wlan0` 挂上**正在运行的**那个 supplicant。
+⇒ 于是可以**绕开 Android 框架**直接下发网络配置。
+
+★★ 这一步的真正价值不是"看日志"，而是**绕开了 `config_wifiSaeUpgradeEnabled`**：
+框架对这个 AP 会把 WPA2 自动升级成 WPA3，所以**用 `cmd wifi` 根本做不出
+WPA2 对照组**。`wpa_cli` 直接 `set_network <id> key_mgmt WPA-PSK` 就做得出。
+
+### ★★★ 二、2×2 对照：密码是唯一能解释的变量
+
+同一台 AP、同一台机器，只改 `key_mgmt` 与密码：
+
+| | `<PW>`（用户给的） | `wrongpass123`（故意写错） |
+|---|---|---|
+| **SAE** | 认证被拒 `status 15`，发生在 **Confirm**（第二帧） | **完全相同** |
+| **WPA-PSK** | 关联成功（`status=0 aid=3`）后 `4WAY_HANDSHAKE_TIMEOUT` | **完全相同** |
+
+```
+wlan0: authenticate with <BSSID-5G>
+wlan0: send auth to ... (try 1/3)        ← SAE Commit
+wlan0: authenticate with <BSSID-5G>
+wlan0: send auth to ... (try 1/3)        ← SAE Confirm
+wlan0: <BSSID-5G> denied authentication (status 15)
+```
+
+* `status 15` = `WLAN_STATUS_CHALLENGE_FAIL`，**AP 端 hostapd 校验 SAE Confirm
+  失败时发的就是它** —— 也就是说 AP **收到并算过**我们的 Confirm，只是对不上。
+* SAE 的 PWE 只由 **(密码, STA MAC, AP MAC, 群)** 决定，**与 SSID 无关**；
+  而 PSK 走的是 `PBKDF2(密码, SSID)`。**两条算法毫无共同中间量，只共用密码。**
+* 两条同时在"校验"那一步失败 ⇒ 共因只能是密码。
+
+### ⚠️ 三、把另外三条可能性逐个排掉（都不是推理，是实测）
+
+1. **MAC 黑名单/过滤** —— 把 wlan0 改成路由器从没见过的 `02:1a:2b:3c:4d:5e`
+   再测，SAE 与 PSK **失败一模一样** ⇒ 排除。
+   （`ip link set wlan0 down/address/up` 会让 supplicant 丢掉 wlan0 的 ctrl
+   socket，要 `svc wifi disable && svc wifi enable` 才回来。）
+2. **打错了邻居家的同名 AP** —— `<SSID>` 是一个极常见的家庭 SSID。
+   扫描确认全场**只有 2 个** BSS 带这串字节（`<BSSID-2G4>` @2412、
+   `<BSSID-5G>` @5180，同一台路由器，MAC 只差 2），RSSI **−15/−18** ⇒ 就在旁边，是本机那台。
+   ⚠️ `wpa_cli` 的 `scan_results` 会把非 ASCII SSID 打成 `\xNN` 转义
+   （`printf_encode()`），**直接 grep 中文永远是 0 条** —— 我因此一度以为 AP 消失了。
+3. **`sae_pwe`（H2E ↔ hunt-and-peck）不匹配** —— AP 广告 `[SAE-H2E]`，
+   而 H2E/HnP 的 PWE 不同，**同样会得到 `status 15`**，是个真实的混淆项。
+   实测 `sae_pwe` = 0 / 1 / 2 **三种全是 `status 15`**，且**每一次 AP 都接受了
+   Commit**（否则不会有第二帧）⇒ 排除。★ 另记：本机默认值本来就是
+   **`sae_pwe = 1`（H2E only）**，与 AP 广告的一致 —— 配置一开始就是对的。
+4. 两个频段都试了（2412 与 5180），PSK 与 SAE 表现相同 ⇒ 不是单频段的配置差异。
+
+### ★ 四、`WifiConfigStore.xml` 里存的密码，与用户给的**逐字相同**
+
+`/data/misc/apexdata/com.android.wifi/WifiConfigStore.xml` 里该 SSID 的
+`PreSharedKey` 长度 10、与 `<PW>` 字符串相等（**只比对，没有打印**）。
+且该网络**没有任何连接成功的历史**（`HasEverConnected` 不存在，
+`NetworkSelectionStatus/Status = 1`）—— 这台机器从没连上过它。
+
+⇒ 所以"手机上输过一次、能连"这种反证并不存在：**用户记的密码与设备里存的
+是同一个值，而这个值 AP 不认。**
+
+### ⬜ 五、于是 issue #2 仍然没有被复现
+
+本轮**没有**复现 [issue #2](https://github.com/vahiru/gaokun-android/issues/2)
+报告的现象（"连上之后被踢"）。我们连**认证**这一关都没过，
+而报告者的机器是过了认证、关联之后才断。**两者不是同一个故障。**
+
+★ 可以给出的一条正面结论：**本机的 SAE 栈在机制上是活的** ——
+群协商、Commit 收发、RSNXE、H2E 全部走通，AP 接受 Commit 并**处理**了我们的
+Confirm。一个"WPA3 坏掉"的实现通常死在 Commit（status 77/1）或根本不发。
+
+⬜ 要真正推进 issue #2，仍然需要**一个我们知道密码正确的 WPA3 AP**。
+
+### ⚠️ 六、方法论
+
+* ★★ **"用户给的参数"也是一个待验证的变量。** 我前面几轮一直把
+  `<PW>` 当成已知正确的常量去找 WPA3 的 bug ——
+  **因为它来自用户，我默认它不需要对照组。** 真正解题的一步是给它做了阴性对照。
+* ★ **阴性对照的价值在这里是压倒性的**：光有"失败了"说明不了什么，
+  但"和故意写错的密码**逐行同形**"直接定了性。
+* ⚠️ 本轮还有一次自己骗自己：`az vm deallocate` 报了 SSL 错误，我用
+  `| tail -3` 取 `$?`，拿到的是 `tail` 的退出码 ⇒ 打印"已下发"，**其实没停机**。
+  **本仓第三次栽在同一个管道退出码上**（M14 记过、M13 记过）。
+  真解是 `AZURE_CLI_DISABLE_CONNECTION_VERIFICATION=1`（本机代理做 MITM）。
+* ⚠️ 运维新坑：**主机名 `cicd` 经本机代理解析成 fake-IP `198.18.0.92`，
+  ssh 过去必被掐断**；用真实 IP 直连就稳。之前记的"沙箱代理掐 ssh"
+  在这台 Mac 上的实际形态是这个。
+
+### ⚠️★★★ 七、差一点把用户的 WiFi 密码推上公开仓库
+
+本条案卷的初稿把 **SSID 与密码的明文**写进了 `docs/` 与 `CLAUDE.md`，
+**并且写进了提交信息**。`git push` 前的例行扫描才拦下来。
+
+* 幸运的部分：这四个标识符（SSID / 密码 / AP 的两个 BSSID）**在公开历史里
+  一个都没出现过**（`git log origin/main -S` 全是 0），所以清掉工作树
+  再 `--amend` 那一个未推送的提交就是**完整**修复，不需要再改写历史。
+* ★ 本仓 M6 公开前**正是为了"家里 WiFi 的 SSID"改写过 77 个提交**，
+  规矩早就写着"用户给的密码只用于操作他自己的设备，不得写入任何入库文件"。
+  **我读过那条规矩，然后照样违反了它** —— 因为写案卷时我处在
+  "记录实验条件"的模式里，而密码在那个语境下只是一个实验变量。
+* ⇒ 教训不是"要小心"，而是**把它变成一个步骤**：
+  **推送前先对新提交扫一遍敏感串（密码 / SSID / BSSID / 构建机 IP），
+  扫描要同时覆盖【文件内容】和【提交信息】** —— 我第一版只扫了文件，
+  提交信息里那一份是第二遍才发现的。
+* 现在文中一律用 `<SSID>` / `<PW>` / `<BSSID-2G4>` / `<BSSID-5G>` 占位。
+  **占位符不损失任何技术信息** —— 本条的论证靠的是"两条算法都在校验那一步
+  失败"，与密码的字面值无关。
+
+---
+
+## #101 ★★★★ camss 电源域：找到第二个候选修复，这次是**机制**吻合而不只是文本吻合（2026-09-13）
+
+[#83](#83) / [#87](#87) 排掉了六条，根因仍未破。本轮**没有碰 `/dev/mem`**
+（用户不在场，规矩如此），改从源码与上游提交去查，找到一条明显更有分量的线索。
+
+### ★★★ 一、上游 `bd09d87c55d6` 的提交说明，就是我们的症状
+
+> On newer SoCs like Milos the **CAMSS_TOP_GDSC** power domains requires the
+> enablement of the **multimedia NoC**, otherwise the **GDSC will be stuck on 'off'**.
+> — Luca Weiss, 2026-05-01
+
+**同一个 GDSC、同一个方向（起不来）、同一句症状。** 而且这一版把
+`needs_icc` / `icc_path_index` / `gdsc_toggle_logic()` 里的 `icc_set_bw()`
+**全都加进了 `gdsc.c`，本机 v7.2-rc2 里已经有**
+（`drivers/clk/qcom/gdsc.c:152` 与 `:188`，`gdsc.h:79-81`）——
+**只是只给 `camcc-milos` 接了线**（`camcc-milos.c:1978` `.needs_icc = true`），
+sc8280xp 的 `titan_top_gdsc` 没有。
+
+DT 那一半在 `milos.dtsi` 的 camcc 节点：
+```
+interconnects = <&mmss_noc MASTER_CAMNOC_HF   QCOM_ICC_TAG_ALWAYS
+                 &mmss_noc SLAVE_MNOC_HF_MEM_NOC QCOM_ICC_TAG_ALWAYS>;
+```
+sc8280xp 的绑定头里这两个 ID **都在**
+（`include/dt-bindings/interconnect/qcom,sc8280xp.h:189` 与 `:202`）。
+
+### ★★★ 二、它能解释此前六条排除**为什么全部落空**
+
+这是它比 [#87](#87) 那条候选更有分量的地方 —— 不是文本像，是**机制自洽**：
+
+| 已排除的 | 为什么与本模型不矛盾 |
+|---|---|
+| camcc 处于 runtime-suspend | NoC 不在 camcc 的寄存器路径上；而且 GDSCR 的**写确实生效**（SW_COLLAPSE 1→0），只有 PWR_ON 起不来 ⇒ 寄存器总线是活的，卡的是**状态机握手** |
+| 某个时钟被关（clk_summary 逐行相同） | NoC 不是时钟，不出现在 `clk_summary` 里 |
+| `RETAIN_FF_ENABLE` | 与握手无关 |
+| MMCX 父域档位 / 息屏（钉在 416 仍失败） | MMCX ≠ MM NoC，是两个东西 |
+| 上游 `unregister CAMCC_GDSC_CLK`（0020） | 那条只管 GDSC 的时钟分支，不管 NoC |
+
+★★ **还多解释了一条以前没人问过的事实**：`ife_0..3` 的 GDSC **每次拍照都完整
+下电又上电，从来没出过错，只有 `titan_top` 起不来。** 差别正好在这里 ——
+`ife_N` 翻转时 camss 已经 resume，`camss_runtime_resume()` 的四条 icc 投票是活的
+（`camss.c:5781-5795`）；而 `titan_top` 的翻转由 **PM core 在驱动回调之外**
+完成，那一刻投票是 0 —— 因为 `camss_runtime_suspend()`（`camss.c:5766-5779`）
+**在域掉电之前**就把四条路全清零了。
+
+### ⚠️ 三、一条对不上的观察，必须写在这里
+
+**开机之后的第一次上电是成功的**，而按本模型那一次的 icc 投票同样应该是 0。
+可能的解释是 interconnect 的 `sync_state` 还没把引导器的初始带宽放掉，
+**但没有验证**。
+
+★ [#87](#87) 的教训就是为这种时刻写的：**文本相似度不是证据，
+一条对不上的实测比十条对得上的字面匹配更有分量。**
+所以这条照旧标成**待验证假说**，判据与 #87 逐字相同才可比：
+
+```
+① 开机后第一次 camtest → 应 12 帧、titan_top_gdsc = on
+② 等 pm_genpd_summary 里它变成 off-0
+③ 再跑一次 —— 成功 = 修好了；仍 −110 = 假说被否
+```
+
+### 产物
+
+* `patches/0021-clk-qcom-camcc-sc8280xp-icc-vote-for-titan-top-gdsc.patch`
+  —— 驱动 + DT 两半，**必须一起上**（只打驱动是无害但无效的：
+  `devm_of_icc_get_by_index()` 找不到属性返回 −ENODEV，`icc_path` 置 NULL，
+  `icc_set_bw(NULL,…)` 是空操作，见 `gdsc.c:611-617`）。
+* `patches/0022-clk-qcom-gdsc-tear-down-genpds-in-unregister.patch`
+  —— 上游 `86b23609d5e1`，修 [#87](#87) 顺带查出的 unbind 撞名
+  （`gdsc_unregister()` 从不 `pm_genpd_remove()`）。**与相机判据零交叉**，
+  只在解绑时生效，所以放进同一个内核不破坏单变量测试。
+* 内核 `#6` 已编译并放上 ESP，**故意没设 oneshot** ——
+  ⚠️ 新内核第一次上机要有人能按电源键。
+
+### ⚠️ 四、顺带加固了 `kernel-apply-patches.sh` 的指纹判据
+
+`0022` **移动**了两行代码（`gdsc_pm_subdomain_remove()` 与
+`of_genpd_del_provider()` 调了个个儿），于是它们同时出现在 `-` 和 `+` 两侧
+—— 而 `+` 侧那两行**在未打补丁的文件里本来就在**。指纹探针挑"最长的三条新增行"，
+其中两条就是它们，**第三条正好是唯一的那条 `pm_genpd_remove(&scs[i]->pd);`，
+靠一次长度并列的排序侥幸救了场。**
+
+⇒ 这不是"抓到了一次事故"，是**看见了一次差一点**。已加一条过滤：
+**凡是也出现在删除行里的新增行，不作探针**。正反两棵树验过
+（未打→`NOT_APPLIED`，已打→`APPLIED`）。
+★ 与 [#82](#82) 里 0009 那次是同一类（探针撞上既有代码），
+只是来源从"巧合"升级成了"必然"。
+
+### ⬜ 五、还欠什么
+
+* **上机测 0021** —— 要用户在场。
+* 若 0021 也被否：下一步才轮到 `/dev/mem` 对比 `CFG_GDSCR`（+0x4），
+  **且必须先钉住 camcc 并确认现场有人能按电源键**。
+* ⚠️ **实验成本的约束要写明**：一旦触发失败，camss 就锁死 `runtime_error`，
+  **只有重启能恢复**。所以"先复现再观察"这条路在用户不在场时是关着的 ——
+  这不是懒，是本轮所有实验都只能在"不触发失败"的前提下做的原因。

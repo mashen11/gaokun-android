@@ -57,6 +57,14 @@ KPATCHES=(
     # ⚠️ 0020 是上游 7.3 的 backport，用来验证 camss 电源域缺陷（#83）的一个
     #    【待验证假说】—— 它与相机一起用，单独打上无害（只是少注册一个没人用的时钟）。
     0020-clk-qcom-camcc-sc8280xp-unregister-gdsc-clk.patch
+    # ★★ 0021 是 camss 电源域缺陷的【第二个候选修复】，依据是上游
+    #    bd09d87c55d6 的提交说明："CAMSS_TOP_GDSC ... requires the enablement
+    #    of the multimedia NoC, otherwise the GDSC will be stuck on 'off'"。
+    #    ⚠️ 驱动与 DT 两半在同一个补丁里，**必须一起上**（只打驱动无害但无效）。
+    #    ⚠️ 仍是待验证假说 —— 见补丁头与 docs/stage4-findings.md #100。
+    0021-clk-qcom-camcc-sc8280xp-icc-vote-for-titan-top-gdsc.patch
+    # 0022 与相机判据零交叉，只在驱动解绑时生效；修 #87 查到的 rebind 撞名。
+    0022-clk-qcom-gdsc-tear-down-genpds-in-unregister.patch
 )
 
 # ★★ 指纹判据：补丁是否【已在树里】。
@@ -88,10 +96,17 @@ KPATCHES=(
 # ⚠️ 为什么不怕假阴性：fuzz 影响的是【上下文】匹配，新增行本身一定是逐字写入的。
 #    万一仍误判成"没打过"，后面 `git apply --check` 会失败并走 fuzz，
 #    fuzz 再失败就【大声报错】—— 方向是对的：宁可吵，也不要静默跳过。
+#    ③ ⚠️★ 2026-09-13 又补一条：**把"只是被搬家"的行从探针里剔掉。**
+#       `patches/0022` 把 `gdsc_pm_subdomain_remove()` 与 `of_genpd_del_provider()`
+#       两行调了个个儿，于是它们同时出现在 `-` 和 `+` 两侧 ——
+#       而 `+` 侧的行**在未打补丁的文件里本来就在**，三条探针会全部命中，
+#       整个补丁被静默跳过。这与 0009 那次是**同一类事故**（探针撞上既有代码），
+#       只是来源从"巧合"变成了"必然"。判据：凡是也出现在删除行里的，不作数。
 already_applied() {
     local f="$1" probes files ff hit n
     probes=$(grep -E '^\+[^+]' "$f" | sed 's/^+//' \
              | grep -vE '^[[:space:]]*$' \
+             | grep -vxF -f <(grep -E '^-[^-]' "$f" | sed 's/^-//') \
              | awk 'length($0) > 25' | sort -u \
              | awk '{ print length($0), $0 }' | sort -rn | head -3 | cut -d' ' -f2-)
     [ -n "$probes" ] || return 1

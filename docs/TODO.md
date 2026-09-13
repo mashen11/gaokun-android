@@ -76,6 +76,17 @@ AOSP 默认 `config_showNavigationBar=false`
 
 ### A6b. ⬜ WPA3(SAE) 连上即断 —— [issue #2](https://github.com/vahiru/gaokun-android/issues/2)
 
+> **★★★ 2026-09-13 更新：用户提供的那台 AP 已经查完，但它【不是】issue #2。**
+> 用户给了自家的 AP 让我复现（⚠️ SSID/密码不写进本仓），结果是**密码 AP 不认**：
+> SAE 被拒在 Confirm（`status 15` = hostapd 校验失败）、WPA2-PSK 关联后
+> `4WAY_HANDSHAKE_TIMEOUT`，**两条独立算法都在校验那一步失败**，
+> 且与故意写错的密码**失败签名逐行同形**。换全新 MAC、确认不是同名邻居、
+> `sae_pwe` 0/1/2 全试 —— 都排掉了。完整案卷 [#100](stage4-findings.md)。
+> ⇒ **issue #2 仍未复现**：我们连认证都没过，报告者是关联之后才被踢。
+> ★ 但拿到了一条正面结论：**本机 SAE 栈机制上是活的**
+> （群协商 / Commit / RSNXE / H2E 全通，AP 接受 Commit 并处理了我们的 Confirm）。
+> ⇒ 下面"还没排除的候选"里，**第 1 条（`sae_pwe`）可以划掉了**。
+
 **报告者 robbin15**（GK-W76 / BIOS 2.16 / **v0.2.0-alpha** / 安装脚本全新安装）：
 5 GHz 用 **WPA3-SAE** 或 **WPA2-PSK/WPA3-SAE 混合**时"连接秒断"，**每次都出**；
 把路由器 5G 改回 **WPA2-PSK 就正常**。路由器是 ZTE，5G 在**信道 36（5180 MHz，非 DFS）**，
@@ -100,17 +111,19 @@ AOSP 默认 `config_showNavigationBar=false`
 ★ **看一个函数的返回值，要把函数读完，不能靠 grep 的上下文窗口。**
 
 **还没排除的候选**：
-1. ★ **`sae_pwe` 没设**。WPA3 的 PWE 推导有 hunt-and-peck 与 H2E 两种，
-   本仓 `device/huawei/gaokun3/wifi/wpa_supplicant.conf` 只有三行、**没有这一项**。
-   ⚠️ 但它通常表现为**认证阶段就失败**，与"连上即断"对不太上 —— 优先级不该排第一。
+1. ~~★ **`sae_pwe` 没设**~~ ❌ **2026-09-13 排除**：`wpa_cli get sae_pwe` 实测
+   本机默认就是 **`1`（H2E only）**，与 AP 广告的 `[SAE-H2E]` 一致；
+   而且 0/1/2 三种全试过，AP 每次都**接受 Commit**（若 PWE 方法不匹配，
+   分歧会在 Commit 阶段暴露）。⇒ 这一条不成立。见 [#100](stage4-findings.md)。
 2. ★★ **SAE 之后的 4 次握手 / 密钥安装**。这与"关联后被踢"的形状最吻合。
    `ath11k_install_key()` 等 `install_key_done` 最多 1 秒，超时返回 `-ETIMEDOUT`。
 3. WCN6855 固件对 SAE 的行为（我们发的是 linux-firmware ≥ 20241210 那份）。
 4. ⚠️ 报告者用的是 **v0.2.0-alpha**（2026-08-21），此后内核与 ROM 都换过多轮 ——
    **有没有可能已经变了，没人验证过。**
 
-**本地测不了**：宿舍周围一个 WPA3 网络都没有（框架计数器
-`numWpa3PersonalNetworkScanResults=0`，唯一加密的 `Redmi K40S` 是 WPA2）。
+**本地测不了** ⚠️ **这条已过时**：2026-09-13 用户提供了 WPA3 transition-mode
+的 AP（用户自家那台，2412 与 5180 双频，`[WPA2-PSK+SAE+PSK-SHA256-CCMP][SAE-H2E]`），
+**环境有了**；缺的变成了**一个我们知道密码正确的 WPA3 AP**。
 
 ✅ **顺带一条（2026-09-12 已办）**：镜像里**没装 `wpa_cli`**（实测 `which wpa_cli`
 为空），于是"不刷机改一下 supplicant 参数做 A/B"这条最快的验证路子走不通 ——
@@ -122,6 +135,12 @@ AOSP 默认 `config_showNavigationBar=false`
 checkout —— 构建时若报 "non-existent modules in PRODUCT_PACKAGES" 就去树里再 grep。
 ⚠️ `/data/vendor/wifi/wpa/sockets` 是 0770 wifi:wifi，**shell 不在 wifi 组** ⇒ 要 root。
 ⚠️ **这条要等下一次构建 ROM 才生效**，当前镜像里仍然没有。
+✅ **2026-09-13 已用上**：`m wpa_cli` 单编（170 KB）→ push 到 `/data/local/tmp`
+→ `-p /data/vendor/wifi/wpa/sockets -i wlan0` 挂上**运行中的** supplicant，
+`status` / `list_networks` / `add_network` / `set_network` / `select_network` 全可用。
+★★ 它真正的价值不是看日志，而是**绕开框架的 `config_wifiSaeUpgradeEnabled`**
+—— 该 AP 会被 Android 自动 WPA2→WPA3 升级，所以 **`cmd wifi` 根本做不出 WPA2 对照组**，
+而这个对照组正是 [#100](stage4-findings.md) 定案的那一击。
 
 **第一步（二选一）**：
 * 有 WPA3 热点时，跑 `scripts/wifi/wpa3-probe.sh "<SSID>" "<密码>"` ——
@@ -349,20 +368,42 @@ hi846 的完整控件表在 [#81](stage4-findings.md) 第六节。
    同一次开机内的 A/B：钉住时连跑 5 次 + 空闲 60 秒后再跑**全部成功**，
    解钉 8 秒后立刻复现失败。⚠️ **必须在塌缩之前钉**（已塌缩后再钉会当场触发失败）。
    ⚠️ 代价是相机电源域常开，功耗未测 —— **在相机 HAL 落地之前不要写进 ROM**。
-   ★★★ **下一步已经备好，只差启动**（[#83](stage4-findings.md) 第九节）：
-   上游 `499b4cb6710f`（`clk: qcom: camcc-sc8280xp: unregister CAMCC_GDSC_CLK`，
-   进 7.3，**不在我们的 7.2-rc2 里**）报告的是**同一个 GDSC、同一个函数、同一条 WARN**
-   （它是 stuck at `'on'`，我们是 `'off'`，方向相反但机制同源：GDSC 要靠
-   `CAMCC_GDSC_CLK` 才能翻转，而那个时钟被注册成普通时钟后会被 sync_state 关掉）。
-   已 backport 成 `patches/0020`、编出内核 `#5`（sha `8f39390e…`，产物验过
-   `camcc_gdsc_clk` 字符串已消失），**放在 ESP 的 `android/slot_cam2/` + `…-cam2.conf`，
-   故意没设 oneshot** —— 新内核第一次上机要有人能按电源键。
-   **测法**：oneshot 过去 → 跑一次 camtest（应 12 帧）→ 等 `titan_top_gdsc` 变
-   `off-0` → **再跑一次**。成功 = 假说成立；仍 −110 = 假说被否。
-   ⚠️ 这是**待验证假说**，本机有一条反证：`camcc_gdsc_clk` 现在
-   hardware enable 仍是 `Y` 而 `state_synced` 已是 1，与"被关掉"对不上。
-   已排除：camcc 处于 suspend、时钟被关（`clk_summary` 141 行逐行相同）、
-   `RETAIN_FF`、**MMCX 父域档位/息屏**（屏强制常亮时 mmcx 全程 `on/416`，照样失败）。
+   ❌ **第一个候选修复（`patches/0020`，上游 `499b4cb6710f`）已上机实测被否**
+   （内核 `#5`，[#87](stage4-findings.md)）：补丁确实生效（`camcc_gdsc_clk` 出现 0 次），
+   故障一字不差复现。⇒ 至此排除**六条**：camcc 处于 suspend、时钟被关
+   （`clk_summary` 141 行逐行相同）、`RETAIN_FF`、**MMCX 父域档位/息屏**
+   （屏强制常亮时 mmcx 全程 `on/416`，照样失败）、息屏、以及 0020。
+   ⚠️ `slot_cam2/Image` 与现役 `slot_a/Image` sha256 逐字节相同（同一个 `#5`），
+   2026-09-13 已把副本与 `…-cam2.conf` 删掉回收 15 MB（ESP 只有 296 MB）。
+   ★★★★ **第二个候选修复已备好，只差启动**（[#101](stage4-findings.md)）：
+   上游 `bd09d87c55d6`（Luca Weiss，**已在 v7.2-rc2 里**）的提交说明原文 ——
+   "On newer SoCs like Milos the **CAMSS_TOP_GDSC** power domains requires the
+   enablement of the **multimedia NoC**, otherwise the **GDSC will be stuck on 'off'**"。
+   它把 `needs_icc` / `icc_path_index` / `gdsc_toggle_logic()` 里的 `icc_set_bw()`
+   都加进了 `gdsc.c`（本机 `gdsc.c:152`/`:188`、`gdsc.h:79-81` 都在），
+   **但只给 `camcc-milos` 接了线**。`patches/0021` 给 sc8280xp 接上同样的线
+   （驱动 `.needs_icc = true` + DT 的 `&camcc { interconnects = <&mmss_noc
+   MASTER_CAMNOC_HF 0 &mmss_noc SLAVE_MNOC_HF_MEM_NOC 0>; }`，**两半必须一起上**）。
+   ★★ 它比 0020 有分量的地方是**机制自洽**，能解释六条排除为什么全落空
+   （NoC 不是时钟、不是 MMCX、不在 camcc 的寄存器路径上；而 GDSCR 的**写确实生效**，
+   只有 PWR_ON 起不来 ⇒ 卡的是握手不是总线），
+   还解释了一条以前没人问过的事实：**`ife_0..3` 每次拍照都完整下电上电却从不出错** ——
+   它们翻转时 camss 已 resume、icc 投票是活的（`camss.c:5781-5795`），
+   而 `titan_top` 的翻转由 PM core 在驱动回调**之外**完成，那一刻
+   `camss_runtime_suspend()`（`camss.c:5766-5779`）已经把四条路清零了。
+   ⚠️ **仍是待验证假说**，有一条对不上：**开机后第一次上电是成功的**，
+   而按本模型那次投票同样应该是 0（可能是 icc `sync_state` 还没放掉引导器的初始带宽，
+   **未验证**）。
+   内核 `#6` 已编好：`android/slot_cam3/{Image,gaokun3.dtb}`（sha `6facbde1…`/`1273a6a9…`，
+   与构建机逐字节交叉校验过）+ `…-cam3.conf`，**故意没设 oneshot**。
+   同内核还带 `patches/0022`（上游 `86b23609d5e1`，修 [#87](stage4-findings.md) 那个
+   unbind 撞名；只在解绑时生效，**与相机判据零交叉**）。
+   **测法**（与 #87 逐字相同才可比）：oneshot 过去 → 跑一次 camtest（应 12 帧）
+   → 等 `titan_top_gdsc` 变 `off-0` → **再跑一次**。
+   成功 = 假说成立；仍 −110 = 假说被否。
+   ⚠️ 新内核第一次上机要有人能按电源键。
+   ⚠️★ **实验成本**：一旦触发失败，camss 就锁死 `runtime_error`，**只有重启能恢复**
+   ⇒ 用户不在场时"先复现再观察"这条路是关着的，这不是懒。
    ⚠️⚠️ **读那些寄存器之前先把 camcc 钉住**（`power/control=on`）并确认
    `runtime_status=active` —— 否则 `devmem` 的【读】就能让内核静默死亡，
    2026-09-12 已经这么弄挂过一次。★ 并且**用户不在场时不做这类探针**。
