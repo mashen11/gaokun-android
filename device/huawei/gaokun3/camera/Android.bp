@@ -5,25 +5,11 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
-// libcamera 是【外部构建】的预编译产物，见 README.md 的"构建形态"。
-// ⚠️ 产物不在仓库里：构建 ROM 前必须先跑
-//    scripts/camera/build-libcamera-android.sh，并把 .so 放进 prebuilt/。
-cc_prebuilt_library_shared {
-    name: "libcamera_gaokun3",
-    srcs: ["prebuilt/libcamera.so"],
-    vendor: true,
-    strip: { none: true },
-    check_elf_files: false,
-    shared_libs: ["libcamera_base_gaokun3"],
-}
-
-cc_prebuilt_library_shared {
-    name: "libcamera_base_gaokun3",
-    srcs: ["prebuilt/libcamera-base.so"],
-    vendor: true,
-    strip: { none: true },
-    check_elf_files: false,
-}
+// ⚠️★★ libcamera 现在在 AOSP 里编（external/libcamera/Android.bp）。
+// 一开始的规划是"用 NDK 预编译 + Soong 只编 HAL"，那是【错的】：
+// NDK 的 libc++ 用内联命名空间 std::__ndk1，AOSP 平台用 std::__1，
+// 凡签名带标准库类型的符号两边就对不上 —— 实测链接报
+// "undefined symbol: ...generateConfigurationENSt3__14span..."。见 #96。
 
 cc_binary {
     name: "android.hardware.camera.provider-service.gaokun3",
@@ -40,11 +26,10 @@ cc_binary {
         "Metadata.cpp",
     ],
 
-    // libcamera 的公开头。⚠️ 其中 control_ids.h / property_ids.h / formats.h
-    // 是【生成】的，在 meson 的构建目录里，所以这里要两个路径。
+    // libcamera 的公开头 + 我们为 Soong 写的 config.h/生成头。
     include_dirs: [
-        "device/huawei/gaokun3/camera/include",
-        "device/huawei/gaokun3/camera/include-generated",
+        "external/libcamera/include",
+        "external/libcamera/generated/include",
     ],
 
     shared_libs: [
@@ -56,8 +41,8 @@ cc_binary {
         "libcamera_metadata",
         "libfmq",                // ICameraDeviceSession 的两个 FMQ 元数据队列
         "libyuv",                // RGB→YUV（软件 ISP 只出 RGB，见 README）
-        "libcamera_gaokun3",
-        "libcamera_base_gaokun3",
+        "libcamera_gk3",
+        "libcamera_base_gk3",
         // ⚠️ 只列我们直接实现的三个接口。graphics.common / hardware.common /
         //    camera.metadata 【不要写死版本】：它们由上面这些传递带进来，
         //    自己再声明一份会撞 "depends on multiple versions of the same
