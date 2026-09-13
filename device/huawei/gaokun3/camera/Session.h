@@ -72,12 +72,14 @@ private:
 
 	/* 导入/释放 Android 的 gralloc 缓冲。 */
 	buffer_handle_t importBuffer(
-		const aidl::android::hardware::camera::device::StreamBuffer &sb);
+		const aidl::android::hardware::camera::device::StreamBuffer &sb,
+		int32_t w, int32_t h);
 	void releaseBuffer(buffer_handle_t h);
 
-	/* 把一帧 RGB 交付到【已导入的】 gralloc 缓冲里。 */
-	bool deliver(const libcamera::FrameBuffer *fb, buffer_handle_t dst,
-		     int32_t width, int32_t height);
+	/* 把一帧 RGB（源尺寸 srcWidth_×srcHeight_）交付到一个 gralloc 缓冲，
+	 * 必要时缩放到该路流自己的尺寸。 */
+	bool deliver(const uint8_t *rgb, buffer_handle_t dst,
+		     int32_t dstW, int32_t dstH);
 
 	std::shared_ptr<libcamera::Camera> cam_;
 	SensorFacts facts_;
@@ -91,9 +93,19 @@ private:
 	std::unique_ptr<libcamera::FrameBufferAllocator> allocator_;
 	libcamera::Stream *stream_ = nullptr;
 
-	/* 配置好的 Android 流（我们只支持一路）。 */
-	int32_t halStreamId_ = -1;
-	int32_t halWidth_ = 0, halHeight_ = 0, halFormat_ = 0;
+	/*
+	 * 配置好的 Android 流。
+	 * ★ 相机应用【一定】会配多路（预览 + 拍照，实测 Aperture 要 2 路）。
+	 *   libcamera 这边只开一路（按最大请求尺寸），再用 libyuv 缩放分发到每一路
+	 *   —— 软件 ISP 是 CPU 瓶颈，开多路等于把同一份拜耳去马赛克多次。
+	 */
+	struct HalStreamInfo {
+		int32_t id = -1;
+		int32_t width = 0, height = 0;
+	};
+	std::vector<HalStreamInfo> halStreams_;
+	/* libcamera 实际输出的尺寸（= 各路里最大的那个）。 */
+	int32_t srcWidth_ = 0, srcHeight_ = 0;
 
 	/* 空闲的 libcamera 请求。 */
 	std::deque<std::unique_ptr<libcamera::Request>> freeRequests_;
@@ -111,11 +123,15 @@ private:
 	 *    ⇒ 收到请求时就把 gralloc 缓冲导入，这里只存导入后的句柄和 id，
 	 *      完成时直接往里写，然后 freeBuffer。这样也顺带省掉一次导入。
 	 */
-	struct Pending {
-		int32_t frameNumber = 0;
+	struct PendingBuffer {
 		int32_t streamId = -1;
 		int64_t bufferId = 0;
 		buffer_handle_t imported = nullptr;
+		int32_t width = 0, height = 0;
+	};
+	struct Pending {
+		int32_t frameNumber = 0;
+		std::vector<PendingBuffer> buffers;
 		std::vector<uint8_t> settings;
 	};
 	std::map<libcamera::Request *, Pending> pending_;

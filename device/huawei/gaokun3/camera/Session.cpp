@@ -115,17 +115,22 @@ ndk::ScopedAStatus Session::configureStreams(const StreamConfiguration &cfg,
 
 	if (cfg.streams.empty())
 		return err(Status::ILLEGAL_ARGUMENT);
-	if (cfg.streams.size() > 1) {
-		/* ⚠️ 如实拒绝：软件去拜耳 8 MP 一路就吃满 CPU，多路只会都卡。
-		 *    characteristics 里也声明了只支持 1 路输出。 */
-		ALOGE("请求了 %zu 路流，本 HAL 只支持 1 路", cfg.streams.size());
-		return err(Status::ILLEGAL_ARGUMENT);
-	}
 
-	const auto &s = cfg.streams[0];
-	ALOGI("configureStreams: id=%d %dx%d fmt=0x%x usage=0x%llx",
-	      s.id, s.width, s.height, static_cast<int>(s.format),
-	      static_cast<unsigned long long>(s.usage));
+	/*
+	 * ★ 相机应用一定会配多路（预览 + 拍照）。libcamera 只开【一路】，
+	 *   尺寸取各路里最大的那个，再用 libyuv 缩放分发 ——
+	 *   软件 ISP 是 CPU 瓶颈，开多路等于把同一份拜耳去马赛克多次。
+	 */
+	int32_t maxW = 0, maxH = 0;
+	for (const auto &s2 : cfg.streams) {
+		ALOGI("  请求流 id=%d %dx%d fmt=0x%x", s2.id, s2.width, s2.height,
+		      static_cast<int>(s2.format));
+		if (static_cast<int64_t>(s2.width) * s2.height >
+		    static_cast<int64_t>(maxW) * maxH) {
+			maxW = s2.width;
+			maxH = s2.height;
+		}
+	}
 
 	if (streaming_) {
 		cam_->stop();
@@ -142,10 +147,9 @@ ndk::ScopedAStatus Session::configureStreams(const StreamConfiguration &cfg,
 		return err(Status::INTERNAL_ERROR);
 	}
 	libcamera::StreamConfiguration &sc = config_->at(0);
-	sc.size = libcamera::Size(s.width, s.height);
-	/* 固定要 RGB888 —— 下面用 libyuv 转成 Android 要的格式。
-	 * ⚠️ 用 3 字节的 RGB888 而不是 4 字节的 ABGR8888：8 MP 下每帧少搬
-	 *    8 MB，而软件去拜耳本来就是 CPU 瓶颈。 */
+	sc.size = libcamera::Size(maxW, maxH);
+	/* 固定要 RGB888。⚠️ 用 3 字节的 RGB888 而不是 4 字节的 ABGR8888：
+	 * 8 MP 下每帧少搬 8 MB，而软件去拜耳本来就是 CPU 瓶颈。 */
 	sc.pixelFormat = libcamera::formats::RGB888;
 	sc.bufferCount = 4;
 
@@ -163,6 +167,9 @@ ndk::ScopedAStatus Session::configureStreams(const StreamConfiguration &cfg,
 	}
 
 	stream_ = sc.stream();
+	srcWidth_ = sc.size.width;
+	srcHeight_ = sc.size.height;
+
 	allocator_ = std::make_unique<libcamera::FrameBufferAllocator>(cam_);
 	if (allocator_->allocate(stream_) < 0) {
 		ALOGE("分配 libcamera 缓冲失败");
@@ -183,29 +190,33 @@ ndk::ScopedAStatus Session::configureStreams(const StreamConfiguration &cfg,
 	}
 	streaming_ = true;
 
-	halStreamId_ = s.id;
-	halWidth_ = sc.size.width;
-	halHeight_ = sc.size.height;
-	halFormat_ = static_cast<int32_t>(s.format);
+	halStreams_.clear();
+	for (const auto &s2 : cfg.streams) {
+		halStreams_.push_back({ s2.id, s2.width, s2.height });
 
-	HalStream hs;
-	hs.id = s.id;
-	/* IMPLEMENTATION_DEFINED 要由 HAL 定成具体格式；我们交付 YCbCr_420_888。 */
-	hs.overrideFormat = (s.format ==
-			     aidl::android::hardware::graphics::common::PixelFormat::IMPLEMENTATION_DEFINED)
-				    ? aidl::android::hardware::graphics::common::PixelFormat::YCBCR_420_888
-				    : s.format;
-	hs.producerUsage = aidl::android::hardware::graphics::common::BufferUsage::CPU_WRITE_OFTEN;
-	hs.consumerUsage = static_cast<aidl::android::hardware::graphics::common::BufferUsage>(0);
-	hs.maxBuffers = 4;
-	hs.overrideDataSpace = s.dataSpace;
-	hs.physicalCameraId = "";
-	hs.supportOffline = false;
-	hs.enableHalBufferManager = false;
-	out->push_back(hs);
+		HalStream hs;
+		hs.id = s2.id;
+		/* IMPLEMENTATION_DEFINED 要由 HAL 定成具体格式；我们交付 YCbCr_420_888。 */
+		hs.overrideFormat =
+			(s2.format == aidl::android::hardware::graphics::common::PixelFormat::
+					      IMPLEMENTATION_DEFINED)
+				? aidl::android::hardware::graphics::common::PixelFormat::YCBCR_420_888
+				: s2.format;
+		hs.producerUsage =
+			aidl::android::hardware::graphics::common::BufferUsage::CPU_WRITE_OFTEN;
+		hs.consumerUsage =
+			static_cast<aidl::android::hardware::graphics::common::BufferUsage>(0);
+		hs.maxBuffers = 4;
+		hs.overrideDataSpace = s2.dataSpace;
+		hs.physicalCameraId = "";
+		hs.supportOffline = false;
+		hs.enableHalBufferManager = false;
+		out->push_back(hs);
+	}
 
-	ALOGI("流已配置：%dx%d，libcamera 输出 %s",
-	      halWidth_, halHeight_, sc.pixelFormat.toString().c_str());
+	ALOGI("流已配置：%zu 路，libcamera 源 %dx%d 输出 %s",
+	      halStreams_.size(), srcWidth_, srcHeight_,
+	      sc.pixelFormat.toString().c_str());
 	return ndk::ScopedAStatus::ok();
 }
 
@@ -257,29 +268,39 @@ ndk::ScopedAStatus Session::processCaptureRequest(const std::vector<CaptureReque
 		auto lreq = std::move(freeRequests_.front());
 		freeRequests_.pop_front();
 
-		const auto &ob = r.outputBuffers[0];
-		/* ⚠️ 现在就导入：AIDL 的 StreamBuffer 不可拷贝（见 Session.h 的说明），
-		 *    而且完成回调里再导入等于多绕一圈。 */
-		buffer_handle_t imported = importBuffer(ob);
-		if (!imported) {
-			ALOGE("导入 gralloc 缓冲失败 frame=%d", r.frameNumber);
-			freeRequests_.push_back(std::move(lreq));
-			break;
-		}
-
 		lreq->reuse(libcamera::Request::ReuseBuffers);
 		libcamera::Request *key = lreq.get();
 		Pending p;
 		p.frameNumber = r.frameNumber;
-		p.streamId = ob.streamId;
-		p.bufferId = ob.bufferId;
-		p.imported = imported;
 		p.settings = r.settings.metadata;
+
+		/* ⚠️ 现在就导入每一路的缓冲：AIDL 的 StreamBuffer 不可拷贝
+		 *    （见 Session.h 的说明），而入参是 const&，move 不出来。 */
+		bool importOk = true;
+		for (const auto &ob : r.outputBuffers) {
+			int32_t w = 0, h = 0;
+			for (const auto &hs : halStreams_)
+				if (hs.id == ob.streamId) { w = hs.width; h = hs.height; }
+			if (!w || !h) {
+				ALOGE("请求里出现未配置的流 id=%d", ob.streamId);
+				importOk = false;
+				break;
+			}
+			buffer_handle_t imp = importBuffer(ob, w, h);
+			if (!imp) { importOk = false; break; }
+			p.buffers.push_back({ ob.streamId, ob.bufferId, imp, w, h });
+		}
+		if (!importOk) {
+			for (auto &pb : p.buffers) releaseBuffer(pb.imported);
+			freeRequests_.push_back(std::move(lreq));
+			break;
+		}
+
 		pending_[key] = std::move(p);
 
 		if (cam_->queueRequest(key)) {
 			ALOGE("queueRequest 失败 frame=%d", r.frameNumber);
-			releaseBuffer(imported);
+			for (auto &pb : pending_[key].buffers) releaseBuffer(pb.imported);
 			pending_.erase(key);
 			freeRequests_.push_back(std::move(lreq));
 			break;
@@ -334,7 +355,7 @@ ndk::ScopedAStatus Session::signalStreamFlush(const std::vector<int32_t> &, int3
 
 namespace gaokun3 {
 
-buffer_handle_t Session::importBuffer(const StreamBuffer &sb)
+buffer_handle_t Session::importBuffer(const StreamBuffer &sb, int32_t w, int32_t h)
 {
 	const native_handle_t *raw = ::android::makeFromAidl(sb.buffer);
 	if (!raw) {
@@ -343,11 +364,11 @@ buffer_handle_t Session::importBuffer(const StreamBuffer &sb)
 	}
 	auto &mapper = android::GraphicBufferMapper::get();
 	buffer_handle_t imported = nullptr;
-	android::status_t st = mapper.importBuffer(raw, halWidth_, halHeight_,
+	android::status_t st = mapper.importBuffer(raw, w, h,
 						   /*layerCount=*/1,
 						   HAL_PIXEL_FORMAT_YCBCR_420_888,
 						   GRALLOC_USAGE_SW_WRITE_OFTEN,
-						   /*stride=*/halWidth_, &imported);
+						   /*stride=*/w, &imported);
 	/* makeFromAidl 造的是一份新句柄，importBuffer 之后就不需要它了。 */
 	native_handle_close(const_cast<native_handle_t *>(raw));
 	native_handle_delete(const_cast<native_handle_t *>(raw));
@@ -374,69 +395,75 @@ void Session::releaseBuffer(buffer_handle_t h)
  *        R,G,B 那个在 libyuv 里叫 "RAW"
  *    ⇒ 用 RGB24ToI420()，不是 RAWToI420()。
  */
-bool Session::deliver(const libcamera::FrameBuffer *fb, buffer_handle_t dst,
-		      int32_t width, int32_t height)
+bool Session::deliver(const uint8_t *rgb, buffer_handle_t dst,
+		      int32_t dstW, int32_t dstH)
 {
-	const auto &planes = fb->planes();
-	if (planes.empty()) {
-		ALOGE("deliver: libcamera 帧没有 plane");
-		return false;
-	}
-	const libcamera::FrameBuffer::Plane &p = planes[0];
-
-	void *src = mmap(nullptr, p.offset + p.length, PROT_READ, MAP_SHARED,
-			 p.fd.get(), 0);
-	if (src == MAP_FAILED) {
-		ALOGE("deliver: mmap libcamera 帧失败: %s", strerror(errno));
-		return false;
-	}
-	const uint8_t *rgb = static_cast<const uint8_t *>(src) + p.offset;
-	const int rgbStride = width * 3;
+	const int srcStride = srcWidth_ * 3;
 
 	auto &mapper = android::GraphicBufferMapper::get();
 	android_ycbcr ycbcr = {};
 	android::status_t st = mapper.lockYCbCr(dst, GRALLOC_USAGE_SW_WRITE_OFTEN,
-						android::Rect(width, height), &ycbcr);
-	bool ok = false;
-	if (st == android::OK && ycbcr.y) {
-		/*
-		 * ⚠️ 先转 I420 再按目标布局搬一次。多一次拷贝，但 gralloc 给的
-		 *    可能是平面(I420)也可能是半平面(NV12/NV21)，由 chroma_step
-		 *    决定 —— 直接写会在某些布局上悄悄写错。
-		 *    ⬜ 之后可按 chroma_step 分支省掉这次拷贝。
-		 */
-		const int cw = (width + 1) / 2, chh = (height + 1) / 2;
-		std::vector<uint8_t> i420(static_cast<size_t>(width) * height +
-					  static_cast<size_t>(cw) * chh * 2);
-		uint8_t *dy = i420.data();
-		uint8_t *du = dy + static_cast<size_t>(width) * height;
-		uint8_t *dv = du + static_cast<size_t>(cw) * chh;
-
-		if (libyuv::RGB24ToI420(rgb, rgbStride, dy, width, du, cw, dv, cw,
-					width, height) == 0) {
-			for (int y = 0; y < height; y++)
-				memcpy(static_cast<uint8_t *>(ycbcr.y) + y * ycbcr.ystride,
-				       dy + static_cast<size_t>(y) * width, width);
-			for (int y = 0; y < chh; y++) {
-				uint8_t *cb = static_cast<uint8_t *>(ycbcr.cb) + y * ycbcr.cstride;
-				uint8_t *cr = static_cast<uint8_t *>(ycbcr.cr) + y * ycbcr.cstride;
-				const uint8_t *su = du + static_cast<size_t>(y) * cw;
-				const uint8_t *sv = dv + static_cast<size_t>(y) * cw;
-				for (int x = 0; x < cw; x++) {
-					cb[x * ycbcr.chroma_step] = su[x];
-					cr[x * ycbcr.chroma_step] = sv[x];
-				}
-			}
-			ok = true;
-		} else {
-			ALOGE("deliver: RGB24ToI420 失败");
-		}
-		mapper.unlock(dst);
-	} else {
+						android::Rect(dstW, dstH), &ycbcr);
+	if (st != android::OK || !ycbcr.y) {
 		ALOGE("deliver: lockYCbCr 失败: %d", st);
+		return false;
 	}
 
-	munmap(src, p.offset + p.length);
+	bool ok = false;
+	const int cw = (dstW + 1) / 2, chh = (dstH + 1) / 2;
+	std::vector<uint8_t> i420(static_cast<size_t>(dstW) * dstH +
+				  static_cast<size_t>(cw) * chh * 2);
+	uint8_t *dy = i420.data();
+	uint8_t *du = dy + static_cast<size_t>(dstW) * dstH;
+	uint8_t *dv = du + static_cast<size_t>(cw) * chh;
+
+	int rc;
+	if (dstW == srcWidth_ && dstH == srcHeight_) {
+		rc = libyuv::RGB24ToI420(rgb, srcStride, dy, dstW, du, cw, dv, cw,
+					 dstW, dstH);
+	} else {
+		/*
+		 * 需要缩放：先在源尺寸上转成 I420，再缩放到目标尺寸。
+		 * ⚠️ 顺序不能反 —— libyuv 没有"RGB24 直接缩放到 I420"的接口，
+		 *    而先缩放 RGB 再转会多搬一次 3 字节/像素的数据。
+		 * ⬜ 这条路每帧多一次全图拷贝；多路预览时值得再优化。
+		 */
+		const int scw = (srcWidth_ + 1) / 2, schh = (srcHeight_ + 1) / 2;
+		std::vector<uint8_t> src(static_cast<size_t>(srcWidth_) * srcHeight_ +
+					 static_cast<size_t>(scw) * schh * 2);
+		uint8_t *sy = src.data();
+		uint8_t *su = sy + static_cast<size_t>(srcWidth_) * srcHeight_;
+		uint8_t *sv = su + static_cast<size_t>(scw) * schh;
+		rc = libyuv::RGB24ToI420(rgb, srcStride, sy, srcWidth_, su, scw, sv, scw,
+					 srcWidth_, srcHeight_);
+		if (rc == 0)
+			rc = libyuv::I420Scale(sy, srcWidth_, su, scw, sv, scw,
+					       srcWidth_, srcHeight_,
+					       dy, dstW, du, cw, dv, cw,
+					       dstW, dstH, libyuv::kFilterBilinear);
+	}
+
+	if (rc == 0) {
+		for (int y = 0; y < dstH; y++)
+			memcpy(static_cast<uint8_t *>(ycbcr.y) + y * ycbcr.ystride,
+			       dy + static_cast<size_t>(y) * dstW, dstW);
+		/* 按 chroma_step 同时支持平面(I420)与半平面(NV12/NV21)。 */
+		for (int y = 0; y < chh; y++) {
+			uint8_t *cb = static_cast<uint8_t *>(ycbcr.cb) + y * ycbcr.cstride;
+			uint8_t *cr = static_cast<uint8_t *>(ycbcr.cr) + y * ycbcr.cstride;
+			const uint8_t *su2 = du + static_cast<size_t>(y) * cw;
+			const uint8_t *sv2 = dv + static_cast<size_t>(y) * cw;
+			for (int x = 0; x < cw; x++) {
+				cb[x * ycbcr.chroma_step] = su2[x];
+				cr[x * ycbcr.chroma_step] = sv2[x];
+			}
+		}
+		ok = true;
+	} else {
+		ALOGE("deliver: 色彩转换/缩放失败 rc=%d", rc);
+	}
+
+	mapper.unlock(dst);
 	return ok;
 }
 
@@ -462,6 +489,21 @@ void Session::onRequestCompleted(libcamera::Request *req)
 	const libcamera::FrameBuffer *fb = req->buffers().begin()->second;
 	const int64_t timestamp = fb->metadata().timestamp;
 
+	/* mmap 一次，分发给所有流。 */
+	const auto &planes = fb->planes();
+	const uint8_t *rgb = nullptr;
+	void *srcMap = MAP_FAILED;
+	size_t srcLen = 0;
+	if (!planes.empty()) {
+		srcLen = planes[0].offset + planes[0].length;
+		srcMap = mmap(nullptr, srcLen, PROT_READ, MAP_SHARED,
+			      planes[0].fd.get(), 0);
+		if (srcMap != MAP_FAILED)
+			rgb = static_cast<const uint8_t *>(srcMap) + planes[0].offset;
+		else
+			ALOGE("mmap libcamera 帧失败: %s", strerror(errno));
+	}
+
 	/* ── 顺序要求：先 shutter，后结果 ── */
 	NotifyMsg msg;
 	ShutterMsg shutter;
@@ -473,19 +515,25 @@ void Session::onRequestCompleted(libcamera::Request *req)
 	msgs.push_back(std::move(msg));
 	cb_->notify(msgs);
 
-	bool ok = deliver(fb, pend.imported, halWidth_, halHeight_);
-	if (!ok) {
-		NotifyMsg emsg;
-		ErrorMsg e;
-		e.frameNumber = pend.frameNumber;
-		e.errorStreamId = pend.streamId;
-		e.errorCode = ErrorCode::ERROR_BUFFER;
-		emsg.set<NotifyMsg::Tag::error>(e);
-		std::vector<NotifyMsg> emsgs;
-		emsgs.push_back(std::move(emsg));
-		cb_->notify(emsgs);
+	std::vector<bool> okv;
+	for (auto &pb : pend.buffers) {
+		bool ok = rgb && deliver(rgb, pb.imported, pb.width, pb.height);
+		okv.push_back(ok);
+		if (!ok) {
+			NotifyMsg emsg;
+			ErrorMsg e;
+			e.frameNumber = pend.frameNumber;
+			e.errorStreamId = pb.streamId;
+			e.errorCode = ErrorCode::ERROR_BUFFER;
+			emsg.set<NotifyMsg::Tag::error>(e);
+			std::vector<NotifyMsg> emsgs;
+			emsgs.push_back(std::move(emsg));
+			cb_->notify(emsgs);
+		}
+		releaseBuffer(pb.imported);
 	}
-	releaseBuffer(pend.imported);
+	if (srcMap != MAP_FAILED)
+		munmap(srcMap, srcLen);
 
 	CaptureResult result;
 	result.frameNumber = pend.frameNumber;
@@ -494,12 +542,15 @@ void Session::onRequestCompleted(libcamera::Request *req)
 	/* ⬜ 结果元数据暂时回传请求里的设置；之后应填 libcamera 的实际曝光/增益。 */
 	result.result.metadata = pend.settings;
 
-	StreamBuffer sb;
-	sb.streamId = pend.streamId;
-	sb.bufferId = pend.bufferId;
-	sb.status = ok ? BufferStatus::OK : BufferStatus::ERROR;
-	/* ⚠️ buffer/fence 都留空：框架按 bufferId 认，回传句柄会被当成一次新导入。 */
-	result.outputBuffers.push_back(std::move(sb));
+	for (size_t i = 0; i < pend.buffers.size(); i++) {
+		StreamBuffer sb;
+		sb.streamId = pend.buffers[i].streamId;
+		sb.bufferId = pend.buffers[i].bufferId;
+		sb.status = okv[i] ? BufferStatus::OK : BufferStatus::ERROR;
+		/* ⚠️ buffer/fence 都留空：框架按 bufferId 认，
+		 *    回传句柄会被当成一次新导入。 */
+		result.outputBuffers.push_back(std::move(sb));
+	}
 	result.inputBuffer.streamId = -1;
 	result.inputBuffer.bufferId = 0;
 
