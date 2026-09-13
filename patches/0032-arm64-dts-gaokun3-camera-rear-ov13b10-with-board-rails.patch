@@ -24,7 +24,7 @@ MCLK4 **19.2 MHz**（上游 ov13b10 的寄存器表按 19.2 MHz 写，Windows �
 后摄 probe 成功（读到 chip id 0x560d42）后再提升。⚠️ diff 由 `git diff` 生成。
 
 diff --git a/arch/arm64/boot/dts/qcom/sc8280xp-huawei-gaokun3-camera.dtsi b/arch/arm64/boot/dts/qcom/sc8280xp-huawei-gaokun3-camera.dtsi
-index 690db45..23ebd08 100644
+index 690db45..937eda9 100644
 --- a/arch/arm64/boot/dts/qcom/sc8280xp-huawei-gaokun3-camera.dtsi
 +++ b/arch/arm64/boot/dts/qcom/sc8280xp-huawei-gaokun3-camera.dtsi
 @@ -60,6 +60,10 @@
@@ -69,7 +69,7 @@ index 690db45..23ebd08 100644
  
  		port@3 {
  			csiphy3_ep: endpoint@0 {
-@@ -163,7 +176,48 @@
+@@ -163,7 +176,46 @@
  	 *
  	 * This sensor has never been detected on 2023 model
  	 */
@@ -112,8 +112,6 @@ index 690db45..23ebd08 100644
 +				link-frequencies = /bits/ 64 <560000000>;
 +				remote-endpoint = <&csiphy0_ep>;
 +			};
-+		};
-+	};
 +		};
 +	};
  
