@@ -1,3 +1,7 @@
+⚠️⚠️⚠️ 【已被实测否掉的方向，只留作案卷】2026-09-14：内核 #16 用它把轨拉起来扫总线，
+0x36（OV13B10）与 0x50 应答、0x10 无人 —— 本机后摄不是 S5K3L6。后摄走 patches/0032（v2）+ 0034。
+它的价值是那个"轨亮着时扫总线"的诊断动作，以及 Windows 上电序列的实现参考。
+
 media: i2c: S5K3L6XX 驱动（来自 patches/camera-wip 归档）+ gaokun3 共用轨处理（⚠️ 试验补丁，不进 KPATCHES）
 
 = `patches/camera-wip/media-i2c-s5k3l6xx.patch`（Librem5 树的 s5k3l6xx 驱动 + Kconfig/Makefile 接线）

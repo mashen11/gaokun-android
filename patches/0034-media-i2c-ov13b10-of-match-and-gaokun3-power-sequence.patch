@@ -1,0 +1,105 @@
+media: i2c: ov13b10: 加 OF 匹配表 + gaokun3 的上电序列与共用轨处理（⚠️ 试验补丁，随 0032 一起上测试槽）
+
+上游 `ov13b10.c`（v7.2-rc2）只有 ACPI 匹配表，DT 节点 `ovti,ov13b10` 绑不上 —— 加 `of_device_id`。
+`power_on()` 改成板子自己的序列（`patches/0032` 头部）：先拉住复位 → `avdd` 请求 2.8V → 上轨 → 1ms →
+放开复位 → 10ms → MCLK → 5ms；`power_off()` 把 `avdd` 的请求放回 1.8–2.8V 区间（L2B 与面板 VDDI 共用，
+面板驱动只 enable 不投电压，框架选最低 = 1.8V）。chip id 识别成功时打一行 `dev_info`。
+
+⚠️ diff 由 `git diff` 生成。
+
+diff --git a/drivers/media/i2c/ov13b10.c b/drivers/media/i2c/ov13b10.c
+index b0d3414..ad079f8 100644
+--- a/drivers/media/i2c/ov13b10.c
++++ b/drivers/media/i2c/ov13b10.c
+@@ -6,6 +6,7 @@
+ #include <linux/delay.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/i2c.h>
++#include <linux/mod_devicetable.h>
+ #include <linux/module.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/regulator/consumer.h>
+@@ -1190,6 +1191,7 @@ static int ov13b10_identify_module(struct ov13b10 *ov13b)
+ 		return -EIO;
+ 	}
+ 
++	dev_info(ov13b->dev, "chip id 0x%06x identified\n", val);
+ 	ov13b->identified = true;
+ 
+ 	return 0;
+@@ -1206,6 +1208,12 @@ static int ov13b10_power_off(struct device *dev)
+ 
+ 	clk_disable_unprepare(ov13b10->img_clk);
+ 
++	/*
++	 * gaokun3: AVDD (LDO2_B) is shared with the display panel's VDDI, which
++	 * votes 1.8V. Hand our 2.8V request back so the rail returns to 1.8V.
++	 */
++	regulator_set_voltage(ov13b10->supplies[1].consumer, 1800000, 2800000);
++
+ 	return 0;
+ }
+ 
+@@ -1215,20 +1223,40 @@ static int ov13b10_power_on(struct device *dev)
+ 	struct ov13b10 *ov13b10 = to_ov13b10(sd);
+ 	int ret;
+ 
+-	ret = clk_prepare_enable(ov13b10->img_clk);
++	/*
++	 * gaokun3 (HUAWEI MateBook E Go): follow the board's own power table
++	 * (Windows CAMS_RES_QRD.bin): reset asserted -> rails -> 1ms ->
++	 * reset released -> 10ms -> MCLK. AVDD is LDO2_B, shared with the
++	 * panel's VDDI (1.8V vote); the board raises it to 2.8V for the
++	 * sensor and RPMh takes the max, so request 2.8V here.
++	 */
++	gpiod_set_value_cansleep(ov13b10->reset, 1);
++
++	ret = regulator_set_voltage(ov13b10->supplies[1].consumer, 2800000, 2800000);
+ 	if (ret < 0) {
+-		dev_err(dev, "failed to enable imaging clock: %d", ret);
++		dev_err(dev, "avdd: cannot request 2.8V: %d\n", ret);
+ 		return ret;
+ 	}
++
+ 	ret = regulator_bulk_enable(ARRAY_SIZE(ov13b10_supply_names),
+ 				    ov13b10->supplies);
+ 	if (ret < 0) {
+ 		dev_err(dev, "failed to enable regulators\n");
+-		clk_disable_unprepare(ov13b10->img_clk);
+ 		return ret;
+ 	}
+ 
++	usleep_range(1000, 1500);
+ 	gpiod_set_value_cansleep(ov13b10->reset, 0);
++	usleep_range(10000, 11000);
++
++	ret = clk_prepare_enable(ov13b10->img_clk);
++	if (ret < 0) {
++		dev_err(dev, "failed to enable imaging clock: %d", ret);
++		regulator_bulk_disable(ARRAY_SIZE(ov13b10_supply_names),
++				       ov13b10->supplies);
++		return ret;
++	}
++
+ 	/* 5ms to wait ready after XSHUTDN assert */
+ 	usleep_range(5000, 5500);
+ 
+@@ -1705,11 +1733,18 @@ static const struct acpi_device_id ov13b10_acpi_ids[] = {
+ MODULE_DEVICE_TABLE(acpi, ov13b10_acpi_ids);
+ #endif
+ 
++static const struct of_device_id ov13b10_of_ids[] = {
++	{ .compatible = "ovti,ov13b10" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, ov13b10_of_ids);
++
+ static struct i2c_driver ov13b10_i2c_driver = {
+ 	.driver = {
+ 		.name = "ov13b10",
+ 		.pm = pm_ptr(&ov13b10_pm_ops),
+ 		.acpi_match_table = ACPI_PTR(ov13b10_acpi_ids),
++		.of_match_table = ov13b10_of_ids,
+ 	},
+ 	.probe = ov13b10_probe,
+ 	.remove = ov13b10_remove,
