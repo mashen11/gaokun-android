@@ -448,6 +448,13 @@ hi846 的完整控件表在 [#81](stage4-findings.md) 第六节。
 ⬜ 应用层实测；⬜ libcamera：`camera_sensor_properties` 加 ov13b10、增益模型 helper、`ov13b10.yaml`；
 ⬜ 上游 `ov13b10.c` 补 `get_selection`；⬜ 读 EEPROM@0x50（模组标定）；⬜ `rotation` FIXME；
 ⚠️ 稳健性：任一传感器没绑上前后摄一起消失（v7.2 camss 不查端点可用性）。
+✅ 2026-09-14 收尾：用户手电筒照镜头看到景物/亮度变化 ⇒ **`#18` + 后摄 dtb 已设为默认槽**，`#14` 留 `slot_cam4` 回落，
+prebuilt-boot 同步。
+⬜ **闪光灯**：Windows 的 `\_SB.FLSH` 资源块为空（无 GPIO/I2C），驱动包只有 `IrLedCurrentMilliampere=700`
+⇒ 走 **PMIC 闪光模块**（`pmc8280c` = PM8350C，主线 `leds-qcom-flash` 支持 `qcom,pm8350c-flash-led`）。
+实测 GPIO93（现役 DT 里的 `white:flash` GPIO LED）打脉冲**不亮**（用户确认）。要做：`LEDS_CLASS_FLASH` +
+`LEDS_QCOM_FLASH` =y、`pmc8280c` 下加 `led-controller@ee00` 节点、**`led-sources` 通道未知**（PM8350C 有 4 路，
+得低电流逐路试）、再把 `flash-leds` 接到 ov13b10 节点。
 
 测试条目 `…-cam.conf` + `android/slot_cam/` 留在 ESP 上供继续实验（15.7 MB）。
 
