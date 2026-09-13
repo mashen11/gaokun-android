@@ -375,7 +375,25 @@ hi846 的完整控件表在 [#81](stage4-findings.md) 第六节。
    （屏强制常亮时 mmcx 全程 `on/416`，照样失败）、息屏、以及 0020。
    ⚠️ `slot_cam2/Image` 与现役 `slot_a/Image` sha256 逐字节相同（同一个 `#5`），
    2026-09-13 已把副本与 `…-cam2.conf` 删掉回收 15 MB（ESP 只有 296 MB）。
-   ★★★★ **第二个候选修复已备好，只差启动**（[#101](stage4-findings.md)）：
+   ❌ **第二个候选修复（`patches/0021`）也已上机实测被否**（内核 `#6`，
+   [#102](stage4-findings.md)）—— 这是**第七条**。补丁确实生效
+   （`ad00000.clock-controller` 作为 interconnect 消费者出现、投票随 GDSC 起落），
+   而且**失败之后那条 icc 投票还留在 1/1** ⇒ NoC 全程抬着也没用。
+   ★★★★★ **但同一轮的单变量实验把触发条件挪到了【下电】那一侧**：
+   同一次开机、同一个域 —— **无流量塌缩 → 上电 ✅ 12 帧；跑过 camtest 再塌缩 → ❌ −110。**
+   ⇒ "只要塌缩过就必败"这个模型**也不对**，塌缩本身无害；
+   触发条件是**"跑过流量之后再塌缩"**。
+   ★ 而 A/B 两格在**上电那一刻的状态完全相同**，差别只在历史里
+   —— 这解释了前面七条假说（全在查上电缺什么）**为什么必然全部落空**。
+   ⚠️ A/B 分不开两种读法（真有 DMA 流量 vs. 那段 ON 期间开了一整套 camcc 时钟与
+   CSIPHY 稳压器），**下一步必须拆开**，阶梯实验见 [#102](stage4-findings.md)。
+   ⚠️★ 新禁忌：**camss 已 `runtime_error` 时不要 unbind 它，会拖死整机**
+   （2026-09-13 用一次强制关机换来的）。
+   ⬜ `patches/0022`（unbind/rebind 的 genpd 注销）**至今未验证** ——
+   要在干净开机、camss **健康**时测，不能拿一个已经 wedged 的子系统去试。
+
+   <details><summary>（已否）第二个候选修复当时的依据</summary>
+
    上游 `bd09d87c55d6`（Luca Weiss，**已在 v7.2-rc2 里**）的提交说明原文 ——
    "On newer SoCs like Milos the **CAMSS_TOP_GDSC** power domains requires the
    enablement of the **multimedia NoC**, otherwise the **GDSC will be stuck on 'off'**"。
@@ -404,6 +422,7 @@ hi846 的完整控件表在 [#81](stage4-findings.md) 第六节。
    ⚠️ 新内核第一次上机要有人能按电源键。
    ⚠️★ **实验成本**：一旦触发失败，camss 就锁死 `runtime_error`，**只有重启能恢复**
    ⇒ 用户不在场时"先复现再观察"这条路是关着的，这不是懒。
+   </details>
    ⚠️⚠️ **读那些寄存器之前先把 camcc 钉住**（`power/control=on`）并确认
    `runtime_status=active` —— 否则 `devmem` 的【读】就能让内核静默死亡，
    2026-09-12 已经这么弄挂过一次。★ 并且**用户不在场时不做这类探针**。
