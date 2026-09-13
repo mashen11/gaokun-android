@@ -75,6 +75,13 @@ KPATCHES=(
     # ⚠️ 0028 是【诊断补丁，不要进发版内核】，**依赖 0023**（用它的 gdsc_is_watched）。
     #    debugfs gdsc-dbg/init_raw 读硬件复位值（核实 0027 的依据）、wait_override 运行时改等待值。
     0028-clk-qcom-gdsc-debugfs-init-raw-and-wait-override.patch
+    # ❌ 0027 已被内核 #11 实测否掉（#105）：硬件复位值确实是 2/2/0xf（0028 读出），
+    #    但改回去之后脏塌缩签名与上电冻死一字不差。留在列表里是因为它**就是正确的硬件值**
+    #    （上游同代驱动全这么写），只是不是这个缺陷的根因。
+    # ⚠️ 0029 是【诊断补丁，不要进发版内核】，依赖 0023/0028：裸翻转 GDSC、屏蔽 RETAIN_FF、塌缩前延时。
+    0029-clk-qcom-gdsc-debugfs-raw-toggle-flags-mask-pre-off-delay.patch
+    # ⚠️ 0030 是【诊断补丁，不要进发版内核】：camss 按块跳过 s_power/s_stream（module 参数 dbg_skip）。
+    0030-media-camss-dbg-skip-per-block-stream-power.patch
 )
 
 # ★★ 指纹判据：补丁是否【已在树里】。
