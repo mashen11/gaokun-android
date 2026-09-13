@@ -147,15 +147,27 @@ int main(int argc, char **argv) {
        留在原地会让 atoi("--stop") = 0，宽度变成 0 而不报错 —— 这类
        "静默地把参数解析成 0" 正是本仓反复踩的那种坑。 */
     int stop_at = 5;
+    /* ★ --noqbuf：REQBUFS/QUERYBUF/mmap 都做，但【不 QBUF】。
+       camss 没有设 min_queued_buffers（camss-video.c 里搜不到），vb2 默认 0，
+       所以 STREAMON 照样会走 start_streaming → 沿链 s_stream(1)
+       （camss-video.c:252-287）；但 VFE 手里一个缓冲地址都没有
+       ⇒ 这是目前能造出来的、最接近"零 DMA"的一格。
+       配合 --stop 4 用，回答 #103 留下的那个问题：
+       毒化电源域的到底是"DMA 被启动过"，还是 s_stream 的开关序列本身。 */
+    int no_qbuf = 0;
     for (int i = argbase; i < argc; ) {
         if (strcmp(argv[i], "--stop") == 0 && i + 1 < argc) {
             stop_at = atoi(argv[i + 1]);
             for (int k = i; k + 2 < argc; k++) argv[k] = argv[k + 2];
             argc -= 2;
+        } else if (strcmp(argv[i], "--noqbuf") == 0) {
+            no_qbuf = 1;
+            for (int k = i; k + 1 < argc; k++) argv[k] = argv[k + 1];
+            argc -= 1;
         } else i++;
     }
     if (stop_at < 1 || stop_at > 5) stop_at = 5;
-    printf("=== 阶梯：--stop %d ===\n", stop_at);
+    printf("=== 阶梯：--stop %d%s ===\n", stop_at, no_qbuf ? " --noqbuf" : "");
     const char *RDI   = use_pix ? "msm_vfe0_pix"    : "msm_vfe0_rdi0";
     const char *VNODE = use_pix ? "msm_vfe0_video3" : "msm_vfe0_video0";
     const uint32_t CSID_SRC_PAD = use_pix ? 4 : 1;
@@ -316,8 +328,9 @@ int main(int argc, char **argv) {
         bufs[i] = mmap(NULL, blen, PROT_READ | PROT_WRITE, MAP_SHARED, vfd, boff);
         lens[i] = blen;
         if (bufs[i] == MAP_FAILED) DIE("mmap 失败: %s", strerror(errno));
-        if (xioctl(vfd, VIDIOC_QBUF, &b, "QBUF") < 0) DIE("QBUF 失败");
+        if (!no_qbuf && xioctl(vfd, VIDIOC_QBUF, &b, "QBUF") < 0) DIE("QBUF 失败");
     }
+    if (no_qbuf) printf("  ⚠️ --noqbuf：一个缓冲都没入队（VFE 没有可写的地址）\n");
     int type = btype;
     if (stop_at <= 3) {
         printf("\n[stop 3] 缓冲已申请并入队，未 STREAMON（电源域应当【没有】上电）。\n");

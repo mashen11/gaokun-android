@@ -57,14 +57,21 @@ KPATCHES=(
     # ⚠️ 0020 是上游 7.3 的 backport，用来验证 camss 电源域缺陷（#83）的一个
     #    【待验证假说】—— 它与相机一起用，单独打上无害（只是少注册一个没人用的时钟）。
     0020-clk-qcom-camcc-sc8280xp-unregister-gdsc-clk.patch
-    # ★★ 0021 是 camss 电源域缺陷的【第二个候选修复】，依据是上游
-    #    bd09d87c55d6 的提交说明："CAMSS_TOP_GDSC ... requires the enablement
-    #    of the multimedia NoC, otherwise the GDSC will be stuck on 'off'"。
-    #    ⚠️ 驱动与 DT 两半在同一个补丁里，**必须一起上**（只打驱动无害但无效）。
-    #    ⚠️ 仍是待验证假说 —— 见补丁头与 docs/stage4-findings.md #100。
-    0021-clk-qcom-camcc-sc8280xp-icc-vote-for-titan-top-gdsc.patch
+    # ❌ 0021（给 titan_top 加 NoC 投票）**已被实测否掉**（内核 #6，见 #102），
+    #    故意【不列】在这里。文件仍留在 patches/ 下，头部有醒目的"已否"横幅。
     # 0022 与相机判据零交叉，只在驱动解绑时生效；修 #87 查到的 rebind 撞名。
+    #    ⬜ 它本身**至今未验证** —— 要在干净开机、camss 健康时测（#102 第四节）。
     0022-clk-qcom-gdsc-tear-down-genpds-in-unregister.patch
+    # ⚠️ 0023 是【诊断补丁，不要进发版内核】：每次 titan 域翻转打两行寄存器转储。
+    #    它存在的意义是把"读 GDSCR"从 /dev/mem（本机会静默死内核）换成 regmap。
+    0023-clk-qcom-gdsc-dump-gdscr-on-toggle-and-timeout.patch
+    # ⚠️ 0024 同样是【试验补丁，不要进发版内核】，而且**依赖 0023**
+    #    （用它的 gdsc_dump_regs / gdsc_is_watched）。顺序不能反。
+    0024-clk-qcom-gdsc-retry-collapse-on-power-up-timeout.patch
+    # ⚠️ 0025 同样是【试验补丁】，也依赖 0023。它在塌缩前复位 CAMNOC/CPAS。
+    0025-clk-qcom-reset-camnoc-cpas-before-titan-collapse.patch
+    # ⚠️ 0026 依赖 0025（它只是把 0025 的复位清单扩成全部 21 个 BCR）。试验补丁。
+    0026-clk-qcom-camcc-sc8280xp-reset-all-bcrs-before-collapse.patch
 )
 
 # ★★ 指纹判据：补丁是否【已在树里】。
