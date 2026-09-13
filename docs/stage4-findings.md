@@ -7565,3 +7565,28 @@ s5k3l6xx 1-0010: bus scan on Qualcomm-CCI: 2 device(s) answered
 （传感器 → CSIPHY0 → CSID0 → VFE0 → libcamera → HAL → 应用）通了的铁证**。camtest 已改成退出前清零（⚠️ 未重编，构建机已停）。
 重启复位传感器后，预览是**近黑的噪声底**：房间暗（前摄裸帧均值也只有 28），且 libcamera 没有 ov13b10 的
 sensor helper（增益模型），AGC 提不起来。⬜ 白天或打光再看一眼；⬜ 给 libcamera 补 ov13b10 的 helper 与属性表。
+
+## #107 ✅ WPA3 补记：#100 的判断被证实 —— 密码记错了；改对之后 SAE 一次连上，3 分钟浸泡零掉线（2026-09-14 凌晨）
+
+用户在手机上查了已连接网络的密码：**与此前给我的那串数字不同（数字顺序记错）**。这正是 #100 的结论 —— SAE 与 WPA2-PSK
+两条互不相关的算法都在"校验密码"那一步被拒，与故意写错密码的失败签名逐行相同。今晚先重做了一次两格对照
+（SAE：Confirm 被拒 `status_code=15`；WPA2：`4WAY_HANDSHAKE_TIMEOUT`、框架判 `WRONG_KEY`），然后用正确密码
+`cmd wifi connect-network <SSID> wpa3 <PW>`：
+
+```
+key_mgmt=SAE  sae_group=19  sae_h2e=1  pmf=1  pairwise=CCMP  wpa_state=COMPLETED
+5180 MHz · 11ax · 1200 Mbps · RSSI −28 · IP 192.168.10.x · NetworkCapabilities: VALIDATED
+```
+
+**issue #2 的判据**（报告者：关联之后被踢）：带流量浸泡 3 分钟 —— LAN ping 350/350 零丢包、WAN 通、
+supplicant 里 `DISCONNECTED/deauth/disassoc/beacon loss` **0 条**，BSSID 全程不变。
+⇒ 在这台华为路由器（WPA2/WPA3 过渡模式、SAE-H2E、PMF 可选）上 **WPA3 完全正常，#2 不复现**。
+#2 报告者那台是 ZTE 路由器、5 GHz 信道 36、只改安全模式就一正一反 —— 仍然只能请报告者跑
+`scripts/wifi/wpa3-probe.sh`；我们这边能给的正面结论升级为：**本机 SAE 栈端到端实测可用**（不只是"机制上活着"）。
+
+★ 教训写在 #100 第七节的基础上再加一条：**"用户给的密码"与"路由器上配的密码"是两个不同的事实**，
+前者需要在**另一台已连上的设备**上核对一次才算证据。我在 #100 里把它当成已知量用了两轮实验。
+
+⚠️ 一如既往：SSID / 密码 / BSSID 不写进本仓（公开仓库），本条与命令历史里一律占位符。
+顺带：平板现在回到局域网了（TCP adb 可用），CLAUDE.md 里"找不到平板"的那些运维注记里，
+"AP 不认密码"这一条原因已消失。

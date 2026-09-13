@@ -76,6 +76,10 @@ AOSP 默认 `config_showNavigationBar=false`
 
 ### A6b. ⬜ WPA3(SAE) 连上即断 —— [issue #2](https://github.com/vahiru/gaokun-android/issues/2)
 
+> ✅ **2026-09-14 结案（[#107](stage4-findings.md)）**：#100 的"AP 不认密码"被证实 —— 用户在手机上核对出密码记错了。
+> 改对后 **WPA3-SAE 一次连上**（group 19 / H2E / PMF），3 分钟带流量浸泡 0 次掉线。本机 SAE 栈端到端可用。
+> issue #2（关联后被踢）在这台华为 AP 上不复现；要推进它仍需报告者在那台 ZTE 上跑 `scripts/wifi/wpa3-probe.sh`。
+
 > **★★★ 2026-09-13 更新：用户提供的那台 AP 已经查完，但它【不是】issue #2。**
 > 用户给了自家的 AP 让我复现（⚠️ SSID/密码不写进本仓），结果是**密码 AP 不认**：
 > SAE 被拒在 Confirm（`status 15` = hostapd 校验失败）、WPA2-PSK 关联后
