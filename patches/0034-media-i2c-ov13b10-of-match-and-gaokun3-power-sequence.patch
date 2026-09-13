@@ -1,3 +1,6 @@
+✅ 【已验证，2026-09-14 内核 #18】ov13b10 绑上（chip id 通过）、47 个 subdev、`camtest --rear 2104 1560` 出帧、
+HAL 枚举 2 个相机 —— 已进 KPATCHES。头部下文写"试验补丁"是历史，保留以示来路。
+
 media: i2c: ov13b10: 加 OF 匹配表 + gaokun3 的上电序列与共用轨处理（⚠️ 试验补丁，随 0032 一起上测试槽）
 
 上游 `ov13b10.c`（v7.2-rc2）只有 ACPI 匹配表，DT 节点 `ovti,ov13b10` 绑不上 —— 加 `of_device_id`。

@@ -7448,3 +7448,107 @@ WARN 里打印名字时踩到已释放内存 → Oops → panic。也就是说 *
   可以撤（要等 ROM 的内核换成带 0031 的那一版，否则撤了就回到 #83）。
 * ⬜ 上游投稿：`camcc-sc8280xp: Mark RCGs shared where applicable`（照 x1e80100 口径）+ 等待值。
 * 本轮共 11 次重启（其中 1 次 panic 自动回落、1 次用户手动重启）、构建 4 次，**全程用户在场**。
+
+## #106 ★★★★★ 后摄：从 Windows 驱动包解出板级电源表 → 总线扫描发现它是 OV13B10 → 出帧、HAL 枚举出两个相机（2026-09-14 凌晨）
+
+用户在 #105 收尾时提的第二件事："把后摄修了"。此前本仓对后摄只有一句 08-31 的记录：
+S5K3L6 在 CCI 上 NAK，"vdda(l2b) 被 DSI vddi 钉在 1.8V"，并据此在 `patches/0018` 里把后摄节点删掉。
+本条把三个未知全部落地：**它的电源到底怎么接、L2B 到底能不能抬、以及它到底是哪颗传感器。**
+
+### ★★★ 一、板级证据：华为 Windows 驱动包里的相机资源表
+
+`github.com/matebook-e-go/uup-drivers-sc8280xp` 的 release `200.0.10.0.zip`（176 MB）里有
+`qccamrearsensor_extension8280.cab` / `qccamfrontsensor_extension8280.cab` / `qccamplatform_ext8280.cab`。
+解开（macOS 自带 `bsdtar` 能解 .cab）后，`CAMS_RES_QRD.bin`（QRD 平台 = 本机，与 SSC 那边 `hw_platform=QRD` 一致）
+是后摄设备 `\_SB.CAMS` 的电源序列，一个简单的 TLV（`AeoB` 头，`[u16 type][u16 len]` 记录，字串 type=1、
+u32/u64 数值 type=0）。解出来：
+
+| 步 | 后摄 `CAMS_RES_QRD` | 前摄 `CAMF_RES_QRD`（对照） |
+|---|---|---|
+| 上电前 | rail_mmcx、gcc_camera_xo/ahb、cam_cc_gdsc_clk、**titan_top_gdsc**、camnoc_axi、cpas_ahb | 同 |
+| GPIO | **7** 低（复位）、**92** 高、**93** 低 | **15** 低（复位） |
+| LDO | **LDO2_B 2.8V**、**LDO2_C 1.8V**、**LDO7_B 2.8V** | **LDO11_C 2.8V**、**LDO2_C 1.8V** |
+| 然后 | 1 ms → GPIO7 高 → 10 ms → **mclk4 24 MHz** → 1 ms | GPIO44 高 → 1 ms → **mclk3 24 MHz** → 20 ms → GPIO15 高 → 10 ms |
+
+★ **前摄那一列与现役 DT 里 hi846 的接线逐项一致**（reset gpio15 / vdda=l11c / vddio=l2c / camf_1p2 由 gpio44 使能 / MCLK3）
+—— 格式解读由此校准，不是猜的。于是后摄：`avdd = LDO2_B 2.8V`，`dovdd = LDO2_C 1.8V`，核心轨由 GPIO92 门控
+（= DT 里的 `vreg_camr`），VCM 走 LDO7_B，复位 GPIO7，MCLK4。**旧节点的 `vddio=vreg_camr, vddd=l2c` 是接反的。**
+
+### ★★ 二、L2B 到底能不能抬到 2.8V —— 能，Windows 就是这么干的
+
+DSDT（`refs/matebook-e-go-linux/docs/acpi/DSDT_216.dsl:3164-3210`）显示设备 `\_SB.GPU0` 的 PEP 表投三条 LDO：
+`LDO3_B 0x124F80`=1.2V（= DT 的 DSI vdda l3b）、`LDO6_B 0xD6D80`=0.88V（= DSI PHY vdds l6b）、
+**`LDO2_B 0x1B7740`=1.8V（= 面板 vddi l2b）**。后摄那边投 **LDO2_B 2.8V**。RPMh 对同一条 LDO 取所有投票的最大值
+⇒ **Windows 下只要后摄开着，面板 VDDI 就跑在 2.8V**。这是板子的设计行为。Linux 里面板驱动
+（`panel-himax-hx83121a.c:94`）只 `regulator_bulk_enable` 不投电压，所以传感器驱动在 `power_on()` 里
+`regulator_set_voltage(avdd, 2.8V, 2.8V)`、`power_off()` 放回 1.8–2.8V 区间（框架取最低 = 面板的 1.8V），行为与 Windows 一致。
+08-31 那次 NAK 的真正原因是**没人把 L2B 抬起来**，不是"被钉住"。
+
+### ★★★★★ 三、总线扫描：后摄不是 S5K3L6，是 OV13B10
+
+驱动包里后摄有**两个**模组：`com.qti.sensormodule.ofilm_ov13b10.bin`（INF 注释 "Makena(8280)"）与
+`com.qti.sensormodule.lijing_s5k3l6.bin`（"Makena RFC(8280)"）；`SCFG_REAR_QRD.bin` 默认指向 s5k3l6。
+内核 `#15`（归档的 s5k3l6xx 驱动 + 修正供电）：probe 跑到 `power_ON`、MCLK 24 MHz，读 MODEL_ID **NAK（-6）**。
+内核 `#16` 给驱动加了两样：按 Windows 顺序上电（**先拉住复位再上轨**，归档驱动原来在 probe 时就放开复位从不再拉），
+以及 **ID 读失败时在轨还亮着的时候扫整条 CCI 总线**（0x08–0x77 零长度写）：
+
+```
+s5k3l6xx 1-0010: model id low read failed: -6 (sensor not answering on CCI?)
+s5k3l6xx 1-0010: bus scan: ACK at 0x36
+s5k3l6xx 1-0010: bus scan: ACK at 0x50
+s5k3l6xx 1-0010: bus scan on Qualcomm-CCI: 2 device(s) answered
+```
+
+**0x36 = OV13B10 的 7 位地址，0x50 = 模组 EEPROM**（旧 dtsi 注释里那句 `eeprom@50/51`），0x10 无人。
+⇒ 本机（2022 款）后摄是 OV13B10；这也解释了 buildbot 作者"2023 款从没探到过 S5K3L6"。
+★ "轨亮着时扫总线"这个动作把"模组/地址不对"与"没供电/接错总线"一刀切开，值得留成通用手法。
+
+### 四、接上 OV13B10：三个坑
+
+1. 上游 `ov13b10.c`（v7.2-rc2）**只有 ACPI 匹配表**，DT 节点绑不上 ⇒ `patches/0034` 加 `of_device_id`，
+   并把 `power_on()` 改成板子的序列 + avdd 2.8V 请求。MCLK 用 **19.2 MHz**（上游寄存器表按 19.2 写，
+   Windows 模组的 24 MHz 是它自己那份表的）。`link-frequencies = 560 MHz`（上游唯一支持的一档），4 lane。
+2. 内核 `#17` 第一次 `make dtbs` **编译失败**（我替换节点时多留了两行 `};`），而我**没把 RC 当门禁**就把
+   旧 dtb 配新内核部署上去了 —— 结果自然是什么都没绑上。规矩：**部署前看 RC，不看 sha 变没变。**
+3. dtb 修好后 `ov13b10` 绑上了（chip id 校验通过，`vreg_l2b` 出现第二个消费者），但 `/dev/v4l-subdev*` 仍是 0。
+   `/sys/kernel/debug/v4l2-async/pending_async_subdevices` 直接给出答案：
+   ```
+   qcom-camss ac5a000.camss:
+   hi846 2-0020:
+   ov13b10 1-0036:
+    [fwnode] dev=1-000c, node=/soc@0/cci@ac4b000/i2c-bus@0/vcm@c
+   ```
+   ov13b10 的 `lens-focus` 等对焦马达 DW9714，而 **`CONFIG_VIDEO_DW9714=m`** —— 本仓第 **15** 个「=m 坑」。
+   没模块的机器上它永远绑不上 ⇒ 整条 notifier 卡住 ⇒ **前后摄一个 subdev 都不出**。
+   改 `=y`（内核 `#18`），`VIDEO_OV13B10`/`VIDEO_DW9714` 一并进 `kernel-config-android.sh` 的 MUST_Y。
+
+### ✅ 五、结果（内核 `#18`）
+
+* 三个 I2C 设备全绑上：`ov13b10 1-0036`、`dw9714 1-000c`、`hi846 2-0020`；`/dev/v4l-subdev*` **47** 个（前摄独占时 45）。
+* `camtest --rear 2104 1560 3`：**每帧 4,118,400 字节**（2104×1560 十位打包，行距 2640），真实画面
+  （非零 95.6%、均值 22.9，暗环境），切传感器测试图案后均值跳到 60.9/95.2，帧序号连续。
+* 同一次开机里 **前 → 后 → 前** 交替都出帧。⚠️ 前摄第一次 `SETUP_LINK` 报 EBUSY：两个传感器共用 CSID0 的 sink，
+  HAL 启动时把链路配成了它最后碰的那个相机 ⇒ camtest 加了 `links_reset()`（先断开所有已使能可改链路）。
+* **`dumpsys media.camera`：provider 报 2 个设备**（`device@1.1/internal/0` 与 `/1`）。libcamera 给 ov13b10 建了相机，
+  但有一串告警：无静态属性、无 sensor helper（AGC 拿不到增益模型）、驱动不支持 `get_selection`、无 `ov13b10.yaml`。
+
+### ⬜ 六、还欠的
+
+* **应用层实测**（切后摄、看画面）—— 请用户做。⚠️ 同时看**后摄开着时屏幕有没有异常**：那时面板 VDDI 在 2.8V
+  （与 Windows 相同，但 Linux 侧是第一次）。
+* libcamera：`camera_sensor_properties.cpp` 加 ov13b10（单元像元 1.12 µm、测试图案表）、
+  `camera_sensor_helper.cpp` 加 ov13b10 增益模型（OV 系是线性 `gain = code/128`？要查手册/上游其它 OV 驱动，**没查前不写**）、
+  `ov13b10.yaml` 调优；上游 `ov13b10.c` 补 `get_selection`。
+* EEPROM @0x50：模组标定数据（AWB/LSC/AF）就在里面，值得读出来。
+* 稳健性：v7.2 的 camss 要求端点上**所有**传感器都绑上，任何一个没绑（比如某次 I2C 抖动）前后摄一起消失
+  （0018 当初就是为此删节点）。上游后续版本有没有改"可用性检查"，待查。
+* `rotation = <180>` 是 FIXME，`lens-focus` 的 AF 在 simple 流水线里没有自动对焦。
+* Windows 模组用 24 MHz MCLK；我们用 19.2 MHz 走上游表。两者都能出图，但帧率/链路频率以上游表为准。
+
+### 七、产物与纪律
+
+* `patches/0032`（DT：OV13B10 @0x36，板级供电，叠在 0018 之后）、`0034`（ov13b10 OF 匹配 + 板级上电序列）
+  —— **已进 KPATCHES**（probe + 出帧 + HAL 枚举三关都过）；`0033`（s5k3l6xx 驱动）留作案卷，头部有"已否"横幅。
+* `scripts/camera/camtest.c`：`--rear` 与 `links_reset()`。
+* 内核 `#18` 在 `slot_cam5`（+ 新 dtb `6af27026…`），默认槽仍是 `#14`（前摄 only）。
+* ⚠️ 本轮新踩：`pkill -f "dmesg -w"` 写在 adb 一行命令里会把自己杀掉（命令行含同一字串）—— 放进脚本文件才安全。

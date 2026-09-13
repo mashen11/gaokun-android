@@ -5,7 +5,7 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M32 — ★★★★★ camss 电源域缺陷【根因找到并修好】：`camcc-sc8280xp` 的 `camnoc_axi` / `slow_ahb` / `fast_ahb` 三个 RCG 用了普通 `clk_rcg2_ops`，关闭时不停靠 XO；camss 用完相机后 CAMNOC AXI 的时钟源指着一个已熄灭的 PLL（clk debugfs 实测 `parent=camcc_pll0_out_even`、PLL `en=0`），GDSC 掉电/上电与 CAMNOC 的握手因此永远等不到。修法 `patches/0031`（三行，照 x1e80100 口径标 shared）。内核 `#13` 上预先声明的判据全部达成（noqbuf + 完整 ×5，每次 `after-OFF` 回到 `0x00088000`）；真实形态（解钉、自然塌缩、60 秒空闲）6/6；发版形态 `#14`（0020/0022/0027/0031，无诊断）4/4。路上否掉第八条假说 `0027`（等待值——硬件复位值确实是 2/2/0xf，写对了但不是根因，保留）；4 个诊断补丁挪进 `DIAG_PATCHES`（`--with-diag` 才打）。⚠️★★ 两个自己造的坑：`kernel-apply-patches.sh` 的指纹判据把 0031 当"已应用"静默跳过（第一版 `#13` 其实是 `#12`）——**指纹只回答"在不在"，回答不了"是谁放的"**，已改成正向 `--check` 优先；`dbg_skip=14` 同时跳 CSID+VFE 触发 `vfe_flush_buffers` 空指针 panic——旋钮组合必须保住硬件依赖顺序。★ pstore 顺带揭示 #83 的"unbind 拖死整机"其实是 rebind 时 `gdsc_register()` kobject 重复初始化 panic = `patches/0022` 修的缺陷。见 [#105](docs/stage4-findings.md)。⬜ 下一步：`#14` 进默认槽并撤掉 `gaokun3-camera.rc:13` 的开机钉住；上游投稿 0031+0027；后摄。（每次开工时更新这一行）**
+**当前阶段：Stage 6 M32 — ★★★★★ camss 电源域缺陷【根因找到并修好】：`camcc-sc8280xp` 的 `camnoc_axi` / `slow_ahb` / `fast_ahb` 三个 RCG 用了普通 `clk_rcg2_ops`，关闭时不停靠 XO；camss 用完相机后 CAMNOC AXI 的时钟源指着一个已熄灭的 PLL（clk debugfs 实测 `parent=camcc_pll0_out_even`、PLL `en=0`），GDSC 掉电/上电与 CAMNOC 的握手因此永远等不到。修法 `patches/0031`（三行，照 x1e80100 口径标 shared）。内核 `#13` 上预先声明的判据全部达成（noqbuf + 完整 ×5，每次 `after-OFF` 回到 `0x00088000`）；真实形态（解钉、自然塌缩、60 秒空闲）6/6；发版形态 `#14`（0020/0022/0027/0031，无诊断）4/4。路上否掉第八条假说 `0027`（等待值——硬件复位值确实是 2/2/0xf，写对了但不是根因，保留）；4 个诊断补丁挪进 `DIAG_PATCHES`（`--with-diag` 才打）。⚠️★★ 两个自己造的坑：`kernel-apply-patches.sh` 的指纹判据把 0031 当"已应用"静默跳过（第一版 `#13` 其实是 `#12`）——**指纹只回答"在不在"，回答不了"是谁放的"**，已改成正向 `--check` 优先；`dbg_skip=14` 同时跳 CSID+VFE 触发 `vfe_flush_buffers` 空指针 panic——旋钮组合必须保住硬件依赖顺序。★ pstore 顺带揭示 #83 的"unbind 拖死整机"其实是 rebind 时 `gdsc_register()` kobject 重复初始化 panic = `patches/0022` 修的缺陷。见 [#105](docs/stage4-findings.md)。⬜ 下一步：`#14` 进默认槽并撤掉 `gaokun3-camera.rc:13` 的开机钉住；上游投稿 0031+0027。★★★★ **后摄同一夜也通了**（[#106](docs/stage4-findings.md)）：Windows 驱动包里的 `CAMS_RES_QRD.bin` 给出板级电源序列（LDO2_B 2.8V / LDO2_C 1.8V / GPIO92 门控 / 复位 GPIO7 / MCLK4），DSDT 证明 L2B 与面板 VDDI 共用、RPMh 取最大（Windows 下后摄开着时面板 VDDI 就是 2.8V）；轨亮着时扫总线发现 **它是 OV13B10（0x36）不是 S5K3L6**；上游 ov13b10 驱动加 OF 匹配 + 板级上电（`0034`）、DT 节点（`0032`）、`VIDEO_DW9714=m`→`=y`（第 15 个 =m 坑）之后：47 个 subdev、`camtest --rear` 出 2104×1560 帧、HAL 枚举 2 个相机。内核 `#18` 在 `slot_cam5`，默认槽仍 `#14`。⬜ 应用层实测 + libcamera 的 ov13b10 属性/增益模型/调优文件 + EEPROM@0x50。（每次开工时更新这一行）**
 
 > ## ★★★ 开工前先读：设备正常，相机可用（2026-09-13 晚）
 >
@@ -25,6 +25,18 @@
 > **在搜索范围外 10 分钟没找到，而那看起来和"内核挂死了"一模一样** ——
 > 我据此写了"硬挂死、安全阀都没触发"，还让用户去按电源键。实际上它**一直好好地
 > 跑着内核 `#5`**。★ 收窄搜索范围会把假阴性伪装成阳性结论。
+>
+> **⓪e ★★★★ 后摄通了：它是 OV13B10（[#106](docs/stage4-findings.md)，2026-09-14 凌晨）。**
+> 板级证据来自华为 Windows 驱动包（`uup-drivers-sc8280xp` release 200.0.10.0 → `qccamrearsensor_extension8280.cab`
+> → `CAMS_RES_QRD.bin`，简单 TLV，`bsdtar` 能解 .cab）：LDO2_B 2.8V / LDO2_C 1.8V / GPIO92 门控 / 复位 GPIO7 / MCLK4；
+> 前摄同格式解出来与现役 DT **逐项一致**（格式由此校准）。DSDT 显示设备投 LDO2_B **1.8V**、后摄投 **2.8V**，
+> RPMh 取最大 ⇒ 共用轨是板子的设计；驱动 `power_on()` 请求 2.8V、`power_off()` 放回。
+> ★ 决定性一步：ID 读 NAK 时**在轨亮着的时候扫整条 CCI 总线** —— 0x36（OV13B10）与 0x50（EEPROM）应答、0x10 无人。
+> ⚠️ 两个坑：`make dtbs` 失败而我没看 RC 就部署（旧 dtb 配新内核）；`VIDEO_DW9714=m`（第 15 个 =m 坑）让
+> ov13b10 的 `lens-focus` 永远等不到 vcm ⇒ **前后摄一个 subdev 都不出**，`pending_async_subdevices` 一眼看穿。
+> ✅ 内核 `#18`：47 个 subdev、`camtest --rear 2104 1560` 出帧、前→后→前交替出帧、HAL 枚举 2 个相机。
+> ⬜ 应用层实测（顺便看后摄开着时屏幕有没有异常）；libcamera 侧 ov13b10 属性/增益模型/`ov13b10.yaml`；EEPROM@0x50。
+> ⚠️ 稳健性：v7.2 camss 要求端点上所有传感器都绑上，任一没绑前后摄一起消失（0018 当初的理由）。
 >
 > **⓪d ★★★★★ 电源域缺陷已根治（[#105](docs/stage4-findings.md)，2026-09-14 凌晨）。**
 > 根因 = `camcc-sc8280xp` 里 `camnoc_axi_clk_src`/`slow_ahb_clk_src`/`fast_ahb_clk_src` 用普通

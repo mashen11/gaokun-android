@@ -441,8 +441,13 @@ hi846 的完整控件表在 [#81](stage4-findings.md) 第六节。
    ⇒ 硬解静默回落软解。`crdroid-tree-fixes.py` 第 7 条已修（上界 10→64），
    **必须随相机一起进 ROM**。相机内核因此**没有提升为常驻**，设备仍跑 `#3`。
 
-**后摄**：上游作者自己判"画质差、不值得"，08-31 还记着供电轨冲突（l2b 被 DSI 钉在 1.8V，
-S5K3L6 要 2.8V）。驱动归档在 `patches/camera-wip/`，不应用，不追。
+**后摄** ★★★★ **2026-09-14 通了，而且不是 S5K3L6 —— 是 OV13B10**（[#106](stage4-findings.md)）。
+板级电源序列来自华为 Windows 驱动包的 `CAMS_RES_QRD.bin`；L2B 与面板 VDDI 共用、RPMh 取最大（Windows 同款行为）；
+轨亮着时扫总线 0x36/0x50 应答。`patches/0032`（DT）+ `0034`（ov13b10 OF 匹配 + 板级上电）+ `VIDEO_DW9714=y`
+之后：47 个 subdev、`camtest --rear` 出 2104×1560 帧、HAL 枚举 2 个相机。内核 `#18` 在 `slot_cam5`。
+⬜ 应用层实测；⬜ libcamera：`camera_sensor_properties` 加 ov13b10、增益模型 helper、`ov13b10.yaml`；
+⬜ 上游 `ov13b10.c` 补 `get_selection`；⬜ 读 EEPROM@0x50（模组标定）；⬜ `rotation` FIXME；
+⚠️ 稳健性：任一传感器没绑上前后摄一起消失（v7.2 camss 不查端点可用性）。
 
 测试条目 `…-cam.conf` + `android/slot_cam/` 留在 ESP 上供继续实验（15.7 MB）。
 

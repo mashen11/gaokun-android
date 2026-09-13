@@ -82,6 +82,12 @@ KPATCHES=(
     #    关闭时停靠 XO。实测一次出流后 camnoc_axi_clk_src 指着已熄灭的 pll0_out_even。
     #    改的是 camcc-sc8280xp.c 里三个 .ops 行，与 0020/0027 的 hunk 不相交。
     0031-clk-qcom-camcc-sc8280xp-mark-camnoc-ahb-rcgs-shared.patch
+    # ★ 后摄 OV13B10（#106）：0032 叠在 0018 之后，把后摄节点按板级电源表接回（@0x36）；
+    #    0034 给上游 ov13b10 加 OF 匹配表与板级上电序列。三关（probe / 出帧 / HAL 枚举）都过了才进来。
+    #    ⚠️ 需要 .config 里 VIDEO_OV13B10=y 与 VIDEO_DW9714=y（kernel-config-android.sh 已断言）。
+    #    0033（s5k3l6xx 驱动）故意【不列】：本机后摄不是 S5K3L6，文件留作案卷。
+    0032-arm64-dts-gaokun3-camera-rear-ov13b10-with-board-rails.patch
+    0034-media-i2c-ov13b10-of-match-and-gaokun3-power-sequence.patch
 )
 
 # ⚠️ 诊断补丁【不进发版内核】：只在带 --with-diag 时打。顺序有依赖：0028/0029 依赖 0023，
