@@ -26,6 +26,20 @@
 > 我据此写了"硬挂死、安全阀都没触发"，还让用户去按电源键。实际上它**一直好好地
 > 跑着内核 `#5`**。★ 收窄搜索范围会把假阴性伪装成阳性结论。
 >
+> **⓪f 🚦 v0.6.0-alpha 已构建并传到 staging，【未发布】，等用户审核（2026-09-14 凌晨）。**
+> 构建戳 **`1789318530`**，包 `crDroidAndroid-16.0-20260913-gaokun3-v12.11.zip`（sha `3e88b8ad…`，1.35 GB），
+> `boot.img` sha `d9bc9203…`（内核 `#18` + 后摄 dtb），四条断言全过；位置 R2 `staging/<包名>/`，
+> **`ota/gaokun3.json` 一字未动，没有用户会收到**。发版说明草稿 `docs/relnotes/v0.6.0-alpha.md`（待审）。
+> ★ 镜像核对抓到一条：第一次构建**漏了 `hi846.yaml`**（平板上那份是 overlay 推的），补进 `device.mk` 后重编
+> （戳 `1789316646` 那版作废，已被同名覆盖）。第二次核对：相机 HAL / libcamera ×3 / 两个 yaml / 温控 HAL /
+> `wpa_cli` / `gaokun3-camera.rc` 无钉住 —— 全在。`tinymix` 在 `/system/bin`，不在 vendor，别再误报。
+> ⬜ **醒来后的装机步骤**（要人在场，新 ROM 第一次开机）：payload 已预推到 `/data/local/tmp/`；
+> ① `adb enable-verity && adb reboot`（overlayfs 开着 update_engine 拒装，**这一步会抹掉 overlay 里的相机 HAL**，
+> 装完新 ROM 才回来）；② `bash scripts/install-ota-local.sh --check` → `--go`；③ 写 oneshot 到新槽、重启、验收
+> （前后摄、扬声器 PA=21、温控、`stuck at` 0）；④ 审发版说明；⑤ 你点头后构建机上 `release.sh` 不带 `--stage-only`
+> （用 `--no-build`！发验过的那一版）+ GitHub release。
+> ⚠️ 用户拍板"后摄一起发"：S5K3L6 模组的机器会**前后摄一起消失**（v7.2 camss 等所有传感器），说明里已写明。
+>
 > **⓪e ★★★★ 后摄通了：它是 OV13B10（[#106](docs/stage4-findings.md)，2026-09-14 凌晨）。**
 > 板级证据来自华为 Windows 驱动包（`uup-drivers-sc8280xp` release 200.0.10.0 → `qccamrearsensor_extension8280.cab`
 > → `CAMS_RES_QRD.bin`，简单 TLV，`bsdtar` 能解 .cab）：LDO2_B 2.8V / LDO2_C 1.8V / GPIO92 门控 / 复位 GPIO7 / MCLK4；
