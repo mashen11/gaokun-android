@@ -6492,3 +6492,82 @@ DEBUG Agc agc.cpp:825 exposure-time: 66605.56us, analogue-gain: 16,
 * ✅ **M1 完成**（[#89](#89) 编译 + [#90](#90) 出帧 + 本条出图）
 * ⬜ M2：camera3 → AIDL 桥（方案已定，见 [#91](#91)）
 * ⬜ M3：meson → Android.bp
+
+---
+
+## #96 ⚠️★★★★★ 相机 HAL 编出来了但链不上：NDK 与 AOSP 的 libc++ **ABI 根本不兼容**（2026-09-13）
+
+[#91](#91) 定的方案 A（自己写 AIDL HAL）已经写完并**通过编译**（1361 行，
+`device/huawei/gaokun3/camera/`）。但链接失败，而失败的原因推翻了我的整个构建规划。
+
+### ★★★ 症状与根因
+
+```
+ld.lld: error: undefined symbol:
+  _ZN9libcamera6Camera21generateConfigurationENSt3__1 4spanIKNS_10StreamRoleE...
+                                                ^^^^^^ std::__1
+```
+
+而预编译的 `libcamera.so` 里实际导出的是：
+
+```
+_ZN9libcamera6Camera21generateConfigurationENSt6__ndk1 4spanIKNS_10StreamRoleE...
+                                              ^^^^^^^^ std::__ndk1
+```
+
+★ **NDK 的 libc++ 用内联命名空间 `std::__ndk1`，AOSP 平台 libc++ 用 `std::__1`。**
+凡是签名里带标准库类型（`std::span` / `std::shared_ptr` / `std::function` …）的
+符号，两边的 mangled name 就对不上 —— 而 libcamera 的 C++ API 到处都是这种签名。
+
+⇒ **用 NDK 编出来的 libcamera，AOSP 里的 C++ 代码链不了。这是设计如此，不是配置问题。**
+（`-static-libstdc++` 也救不了：那只影响 libc++ 自身符号的来源，
+不改变 libcamera 导出符号里那个命名空间。）
+
+### ⇒ 规划纠正：M3 不是"以后再清理的债"，是 HAL 的**前置条件**
+
+我在 [#91](#91)/[#95](#95) 里的判断是"libcamera 保持 meson/NDK 预编译，
+只用 Soong 写 HAL，这样最省"，并把 Soong 移植（M3）记成"之后可选的清理"。
+**那个判断是错的**，而且错在一个我本可以事先想到的地方 ——
+**跨工具链混链 C++ 的前提是 ABI 相同，而 NDK 与平台恰恰不同。**
+
+★ 教训：**"能不能编"和"能不能链"是两个问题，而后者跨工具链时要先查 ABI。**
+这条本该在选构建形态时就问，而不是等 1300 行写完、编译全过之后才由链接器告诉我。
+⚠️ 代价还算小（HAL 代码本身不用改，编译已经全过），但多烧了一轮构建机。
+
+### ✅ 好消息：M3 的规模比想象中小
+
+从已经跑通的 meson 构建里数出来：
+
+| 目标 | 源文件数 |
+|---|---|
+| `libcamera-base` | 20 |
+| `libcamera` | 74 |
+| `ipa_softisp` | 7 |
+| **其中【生成】的** | **只有 6 个** |
+
+那 6 个是 `control_ids.cpp` / `property_ids.cpp` / `version.cpp` /
+`ipa_pub_key.cpp` / `proxy/softisp_ipa_proxy.cpp` / `softisp_ipa_proxy_worker.cpp`
+——都由 libcamera 自带的 Python 生成器从树内 YAML/mojom 产出，
+Soong 的 `genrule` 跑得动（或者直接把生成结果入库：**它们是纯文本源码，
+不是二进制**，与 [#89](#89) 那条"产物不入库"的原则不冲突）。
+
+⇒ 大约 100 个源文件的一份 `Android.bp`，可控。
+
+### 顺带记：写完到编过，中间踩的五个坑
+
+1. `libaidlcommonsupport` **只有静态变体** ⇒ 要放 `static_libs` 不是 `shared_libs`
+   （Soong 报 "missing variant" 并列出可用变体，那行输出是真的有用）。
+2. ⚠️★ **别写死 AIDL 依赖的版本**：我声明了 `graphics.common-V5`，
+   而 camera 接口拉的是 V7 ⇒ `depends on multiple versions of the same
+   aidl_interface`。**只列自己直接实现的接口，其余让传递依赖带进来。**
+   （实测版本上限：provider/device = 3，camera.common = 1，metadata = 4。）
+3. AIDL 的 `Bn*.h` **不会把用到的类型都带进来** —— `Status`、`VendorTagSection`、
+   `CameraResourceCost`、`NotifyMsg` 等每个都要自己 `#include`。
+4. ⚠️★★ **AIDL 的 `StreamBuffer` 不可拷贝**：它含 `NativeHandle`，
+   里面是 `vector<ndk::ScopedFileDescriptor>`（move-only）。
+   而 `processCaptureRequest` 的入参是 `const&`，move 不出来。
+   ⇒ 收到请求时就 `importBuffer()`，之后只存导入后的句柄和 id。
+   ★ 编译器报的是 `vector::operator=` 没有匹配的 `assign`，
+   **完全看不出跟"句柄不可拷贝"有关**。
+5. `ICameraDeviceSession` 有三个容易漏的纯虚方法：两个 FMQ 元数据队列
+   （要 `libfmq`，即使不用也得是有效队列）和 V2 起新增的 `configureStreamsV2`。

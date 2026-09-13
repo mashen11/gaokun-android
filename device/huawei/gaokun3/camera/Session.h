@@ -10,6 +10,8 @@
 #include <thread>
 
 #include <aidl/android/hardware/camera/device/BnCameraDeviceSession.h>
+#include <cutils/native_handle.h>
+#include <fmq/AidlMessageQueue.h>
 #include <libcamera/libcamera.h>
 
 #include "Metadata.h"
@@ -28,6 +30,10 @@ public:
 	::ndk::ScopedAStatus configureStreams(
 		const aidl::android::hardware::camera::device::StreamConfiguration &in_cfg,
 		std::vector<aidl::android::hardware::camera::device::HalStream> *out) override;
+	/* V2 起新增；只是把 HalStream[] 包进一个 parcelable，委托给上面那个。 */
+	::ndk::ScopedAStatus configureStreamsV2(
+		const aidl::android::hardware::camera::device::StreamConfiguration &in_cfg,
+		aidl::android::hardware::camera::device::ConfigureStreamsRet *out) override;
 	::ndk::ScopedAStatus constructDefaultRequestSettings(
 		aidl::android::hardware::camera::device::RequestTemplate in_type,
 		aidl::android::hardware::camera::device::CameraMetadata *out) override;
@@ -47,15 +53,31 @@ public:
 			*out) override;
 	::ndk::ScopedAStatus repeatingRequestEnd(int32_t in_frameNumber,
 						 const std::vector<int32_t> &in_streamIds) override;
+	/* ── FMQ 元数据队列：我们不用它们（fmqResultSize 恒为 0），但接口是
+	 *    纯虚的，必须实现。框架会在建会话时取一次描述符。 ── */
+	::ndk::ScopedAStatus getCaptureRequestMetadataQueue(
+		::aidl::android::hardware::common::fmq::MQDescriptor<
+			int8_t, ::aidl::android::hardware::common::fmq::SynchronizedReadWrite>
+			*out) override;
+	::ndk::ScopedAStatus getCaptureResultMetadataQueue(
+		::aidl::android::hardware::common::fmq::MQDescriptor<
+			int8_t, ::aidl::android::hardware::common::fmq::SynchronizedReadWrite>
+			*out) override;
+	::ndk::ScopedAStatus signalStreamFlush(const std::vector<int32_t> &in_streamIds,
+					       int32_t in_streamConfigCounter) override;
 
 private:
 	/* libcamera 的请求完成回调（在 CameraManager 线程上）。 */
 	void onRequestCompleted(libcamera::Request *req);
 
-	/* 把一帧 RGB 交付到 Android 的 gralloc 缓冲里。 */
-	bool deliver(const libcamera::FrameBuffer *fb, const aidl::android::hardware::camera::
-			     device::StreamBuffer &dst, int32_t width, int32_t height,
-		     int32_t format);
+	/* 导入/释放 Android 的 gralloc 缓冲。 */
+	buffer_handle_t importBuffer(
+		const aidl::android::hardware::camera::device::StreamBuffer &sb);
+	void releaseBuffer(buffer_handle_t h);
+
+	/* 把一帧 RGB 交付到【已导入的】 gralloc 缓冲里。 */
+	bool deliver(const libcamera::FrameBuffer *fb, buffer_handle_t dst,
+		     int32_t width, int32_t height);
 
 	std::shared_ptr<libcamera::Camera> cam_;
 	SensorFacts facts_;
@@ -81,12 +103,27 @@ private:
 	 *    （request.h:47,73 —— 没有 setCookie()），而我们的请求对象是
 	 *    在 configureStreams 时一次建好反复复用的。所以用指针当键。
 	 */
+	/*
+	 * ⚠️★ 这里【不能】存 AIDL 的 StreamBuffer：它含 NativeHandle，
+	 *    里面是 vector<ndk::ScopedFileDescriptor> —— **move-only，不可拷贝**
+	 *    （编译器报的是 vector::operator= 没有匹配的 assign）。
+	 *    而 processCaptureRequest 的入参是 const&，move 不出来。
+	 *    ⇒ 收到请求时就把 gralloc 缓冲导入，这里只存导入后的句柄和 id，
+	 *      完成时直接往里写，然后 freeBuffer。这样也顺带省掉一次导入。
+	 */
 	struct Pending {
-		int32_t frameNumber;
-		aidl::android::hardware::camera::device::StreamBuffer buffer;
+		int32_t frameNumber = 0;
+		int32_t streamId = -1;
+		int64_t bufferId = 0;
+		buffer_handle_t imported = nullptr;
 		std::vector<uint8_t> settings;
 	};
 	std::map<libcamera::Request *, Pending> pending_;
+
+	using MetadataQueue = ::android::AidlMessageQueue<
+		int8_t, ::aidl::android::hardware::common::fmq::SynchronizedReadWrite>;
+	std::shared_ptr<MetadataQueue> requestQueue_;
+	std::shared_ptr<MetadataQueue> resultQueue_;
 };
 
 } /* namespace gaokun3 */

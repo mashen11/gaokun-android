@@ -2,6 +2,11 @@
 #include "Device.h"
 #include "Session.h"
 
+#include <aidl/android/hardware/camera/common/CameraResourceCost.h>
+#include <aidl/android/hardware/camera/common/Status.h>
+#include <aidl/android/hardware/camera/device/ICameraDeviceCallback.h>
+#include <aidl/android/hardware/camera/device/ICameraDeviceSession.h>
+#include <aidl/android/hardware/camera/device/ICameraInjectionSession.h>
 #include <log/log.h>
 
 #include <libcamera/property_ids.h>

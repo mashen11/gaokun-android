@@ -2,6 +2,11 @@
 #include "Provider.h"
 #include "Device.h"
 
+#include <aidl/android/hardware/camera/common/CameraDeviceStatus.h>
+#include <aidl/android/hardware/camera/common/Status.h>
+#include <aidl/android/hardware/camera/common/VendorTagSection.h>
+#include <aidl/android/hardware/camera/device/ICameraDevice.h>
+#include <aidl/android/hardware/camera/provider/ICameraProviderCallback.h>
 #include <log/log.h>
 
 using ::aidl::android::hardware::camera::common::Status;

@@ -12,6 +12,14 @@
 
 #include <cstring>
 
+#include <aidl/android/hardware/camera/common/Status.h>
+#include <aidl/android/hardware/camera/device/ConfigureStreamsRet.h>
+#include <aidl/android/hardware/camera/device/ErrorCode.h>
+#include <aidl/android/hardware/camera/device/ErrorMsg.h>
+#include <aidl/android/hardware/camera/device/ICameraDeviceCallback.h>
+#include <aidl/android/hardware/camera/device/ICameraOfflineSession.h>
+#include <aidl/android/hardware/camera/device/NotifyMsg.h>
+#include <aidl/android/hardware/camera/device/ShutterMsg.h>
 #include <aidlcommonsupport/NativeHandle.h>
 #include <hardware/gralloc.h>
 #include <libyuv.h>
@@ -67,6 +75,14 @@ bool Session::init()
 		return false;
 	}
 	cam_->requestCompleted.connect(this, &Session::onRequestCompleted);
+	/* 框架建会话时会取这两个描述符；我们不往里写（fmqResultSize 恒 0），
+	 * 但必须是有效的队列。大小照抄 AOSP 的 ExternalCameraDeviceSession。 */
+	requestQueue_ = std::make_shared<MetadataQueue>(1 << 20, false);
+	resultQueue_ = std::make_shared<MetadataQueue>(1 << 20, false);
+	if (!requestQueue_->isValid() || !resultQueue_->isValid()) {
+		ALOGE("建 FMQ 元数据队列失败");
+		return false;
+	}
 	return true;
 }
 
@@ -193,6 +209,13 @@ ndk::ScopedAStatus Session::configureStreams(const StreamConfiguration &cfg,
 	return ndk::ScopedAStatus::ok();
 }
 
+ndk::ScopedAStatus Session::configureStreamsV2(
+	const StreamConfiguration &cfg,
+	aidl::android::hardware::camera::device::ConfigureStreamsRet *out)
+{
+	return configureStreams(cfg, &out->halStreams);
+}
+
 ndk::ScopedAStatus Session::constructDefaultRequestSettings(RequestTemplate type,
 							    CameraMetadata *out)
 {
@@ -234,16 +257,29 @@ ndk::ScopedAStatus Session::processCaptureRequest(const std::vector<CaptureReque
 		auto lreq = std::move(freeRequests_.front());
 		freeRequests_.pop_front();
 
+		const auto &ob = r.outputBuffers[0];
+		/* ⚠️ 现在就导入：AIDL 的 StreamBuffer 不可拷贝（见 Session.h 的说明），
+		 *    而且完成回调里再导入等于多绕一圈。 */
+		buffer_handle_t imported = importBuffer(ob);
+		if (!imported) {
+			ALOGE("导入 gralloc 缓冲失败 frame=%d", r.frameNumber);
+			freeRequests_.push_back(std::move(lreq));
+			break;
+		}
+
 		lreq->reuse(libcamera::Request::ReuseBuffers);
 		libcamera::Request *key = lreq.get();
 		Pending p;
 		p.frameNumber = r.frameNumber;
-		p.buffer = r.outputBuffers[0];
+		p.streamId = ob.streamId;
+		p.bufferId = ob.bufferId;
+		p.imported = imported;
 		p.settings = r.settings.metadata;
 		pending_[key] = std::move(p);
 
 		if (cam_->queueRequest(key)) {
 			ALOGE("queueRequest 失败 frame=%d", r.frameNumber);
+			releaseBuffer(imported);
 			pending_.erase(key);
 			freeRequests_.push_back(std::move(lreq));
 			break;
@@ -270,28 +306,77 @@ ndk::ScopedAStatus Session::repeatingRequestEnd(int32_t, const std::vector<int32
 	return ndk::ScopedAStatus::ok();
 }
 
+ndk::ScopedAStatus Session::getCaptureRequestMetadataQueue(
+	::aidl::android::hardware::common::fmq::MQDescriptor<
+		int8_t, ::aidl::android::hardware::common::fmq::SynchronizedReadWrite> *out)
+{
+	*out = requestQueue_->dupeDesc();
+	return ndk::ScopedAStatus::ok();
+}
+
+ndk::ScopedAStatus Session::getCaptureResultMetadataQueue(
+	::aidl::android::hardware::common::fmq::MQDescriptor<
+		int8_t, ::aidl::android::hardware::common::fmq::SynchronizedReadWrite> *out)
+{
+	*out = resultQueue_->dupeDesc();
+	return ndk::ScopedAStatus::ok();
+}
+
+ndk::ScopedAStatus Session::signalStreamFlush(const std::vector<int32_t> &, int32_t)
+{
+	/* HAL buffer manager 关着（enableHalBufferManager=false），无事可做。 */
+	return ndk::ScopedAStatus::ok();
+}
+
 } /* namespace gaokun3 */
 
 /* ────────────────────────── 帧交付 ────────────────────────── */
 
 namespace gaokun3 {
 
-/*
- * 把 libcamera 的一帧 RGB 转成 Android 要的 YUV，写进 gralloc 缓冲。
- *
- * ★★ 字节序这件事是【核过源码】的，不是按名字猜的 —— 猜错的后果是
- *    红蓝互换，而那是个不会报错的静默缺陷：
- *      · libcamera 的 formats::RGB888 映射到 V4L2_PIX_FMT_BGR24
- *        （src/libcamera/formats.cpp:185）⇒ 内存里是 B,G,R。
- *      · libyuv 的 "RGB24" 对应 FOURCC_24BG（video_common.h:81），
- *        也就是 B,G,R；R,G,B 那个在 libyuv 里叫 "RAW"（FOURCC_RAW，
- *        同文件 136 行注释写明是 24RGB 的别名）。
- *    ⇒ 两边都是 B,G,R，所以用 RGB24ToI420()，不是 RAWToI420()。
- */
-bool Session::deliver(const libcamera::FrameBuffer *fb, const StreamBuffer &dst,
-		      int32_t width, int32_t height, int32_t format)
+buffer_handle_t Session::importBuffer(const StreamBuffer &sb)
 {
-	(void)format;
+	const native_handle_t *raw = ::android::makeFromAidl(sb.buffer);
+	if (!raw) {
+		ALOGE("makeFromAidl 失败");
+		return nullptr;
+	}
+	auto &mapper = android::GraphicBufferMapper::get();
+	buffer_handle_t imported = nullptr;
+	android::status_t st = mapper.importBuffer(raw, halWidth_, halHeight_,
+						   /*layerCount=*/1,
+						   HAL_PIXEL_FORMAT_YCBCR_420_888,
+						   GRALLOC_USAGE_SW_WRITE_OFTEN,
+						   /*stride=*/halWidth_, &imported);
+	/* makeFromAidl 造的是一份新句柄，importBuffer 之后就不需要它了。 */
+	native_handle_close(const_cast<native_handle_t *>(raw));
+	native_handle_delete(const_cast<native_handle_t *>(raw));
+	if (st != android::OK || !imported) {
+		ALOGE("importBuffer 失败: %d", st);
+		return nullptr;
+	}
+	return imported;
+}
+
+void Session::releaseBuffer(buffer_handle_t h)
+{
+	if (h)
+		android::GraphicBufferMapper::get().freeBuffer(h);
+}
+
+/*
+ * 把 libcamera 的一帧 RGB 转成 YUV 写进 gralloc 缓冲。
+ *
+ * ★★ 字节序是【核过源码】的，不是按名字猜的 —— 猜错是红蓝互换，而且不报错：
+ *      · libcamera 的 formats::RGB888 映射到 V4L2_PIX_FMT_BGR24
+ *        （src/libcamera/formats.cpp:185）⇒ 内存里 B,G,R
+ *      · libyuv 的 "RGB24" 对应 FOURCC_24BG（video_common.h:81）也是 B,G,R；
+ *        R,G,B 那个在 libyuv 里叫 "RAW"
+ *    ⇒ 用 RGB24ToI420()，不是 RAWToI420()。
+ */
+bool Session::deliver(const libcamera::FrameBuffer *fb, buffer_handle_t dst,
+		      int32_t width, int32_t height)
+{
 	const auto &planes = fb->planes();
 	if (planes.empty()) {
 		ALOGE("deliver: libcamera 帧没有 plane");
@@ -309,35 +394,16 @@ bool Session::deliver(const libcamera::FrameBuffer *fb, const StreamBuffer &dst,
 	const int rgbStride = width * 3;
 
 	auto &mapper = android::GraphicBufferMapper::get();
-	buffer_handle_t imported = nullptr;
-	/* dst.buffer 是 AIDL 的 NativeHandle；框架保证它对应一个 gralloc buffer。 */
-	const native_handle_t *raw = ::android::makeFromAidl(dst.buffer);
-	if (!raw) {
-		ALOGE("deliver: makeFromAidl 失败");
-		munmap(src, p.offset + p.length);
-		return false;
-	}
-	status_t st = mapper.importBuffer(raw, width, height,
-					  /*layerCount=*/1,
-					  HAL_PIXEL_FORMAT_YCBCR_420_888,
-					  GRALLOC_USAGE_SW_WRITE_OFTEN,
-					  /*stride=*/width, &imported);
-	if (st != android::OK || !imported) {
-		ALOGE("deliver: importBuffer 失败: %d", st);
-		munmap(src, p.offset + p.length);
-		return false;
-	}
-
 	android_ycbcr ycbcr = {};
-	st = mapper.lockYCbCr(imported, GRALLOC_USAGE_SW_WRITE_OFTEN,
-			      android::Rect(width, height), &ycbcr);
+	android::status_t st = mapper.lockYCbCr(dst, GRALLOC_USAGE_SW_WRITE_OFTEN,
+						android::Rect(width, height), &ycbcr);
 	bool ok = false;
 	if (st == android::OK && ycbcr.y) {
 		/*
-		 * ⚠️ 先转成 I420 再按目标布局搬一次。多一次拷贝，但 gralloc
-		 *    给的可能是平面(I420)也可能是半平面(NV12/NV21)，由
-		 *    chroma_step 决定 —— 直接写会在某些设备上悄悄写错。
-		 *    ⬜ 之后可以按 chroma_step 分支省掉这次拷贝。
+		 * ⚠️ 先转 I420 再按目标布局搬一次。多一次拷贝，但 gralloc 给的
+		 *    可能是平面(I420)也可能是半平面(NV12/NV21)，由 chroma_step
+		 *    决定 —— 直接写会在某些布局上悄悄写错。
+		 *    ⬜ 之后可按 chroma_step 分支省掉这次拷贝。
 		 */
 		const int cw = (width + 1) / 2, chh = (height + 1) / 2;
 		std::vector<uint8_t> i420(static_cast<size_t>(width) * height +
@@ -348,11 +414,9 @@ bool Session::deliver(const libcamera::FrameBuffer *fb, const StreamBuffer &dst,
 
 		if (libyuv::RGB24ToI420(rgb, rgbStride, dy, width, du, cw, dv, cw,
 					width, height) == 0) {
-			/* Y 平面 */
 			for (int y = 0; y < height; y++)
 				memcpy(static_cast<uint8_t *>(ycbcr.y) + y * ycbcr.ystride,
 				       dy + static_cast<size_t>(y) * width, width);
-			/* 色度：按 chroma_step 同时支持平面与半平面 */
 			for (int y = 0; y < chh; y++) {
 				uint8_t *cb = static_cast<uint8_t *>(ycbcr.cb) + y * ycbcr.cstride;
 				uint8_t *cr = static_cast<uint8_t *>(ycbcr.cr) + y * ycbcr.cstride;
@@ -367,14 +431,11 @@ bool Session::deliver(const libcamera::FrameBuffer *fb, const StreamBuffer &dst,
 		} else {
 			ALOGE("deliver: RGB24ToI420 失败");
 		}
-		mapper.unlock(imported);
+		mapper.unlock(dst);
 	} else {
 		ALOGE("deliver: lockYCbCr 失败: %d", st);
 	}
 
-	mapper.freeBuffer(imported);
-	native_handle_close(const_cast<native_handle_t *>(raw));
-	native_handle_delete(const_cast<native_handle_t *>(raw));
 	munmap(src, p.offset + p.length);
 	return ok;
 }
@@ -394,52 +455,57 @@ void Session::onRequestCompleted(libcamera::Request *req)
 		}
 		pend = std::move(it->second);
 		pending_.erase(it);
-		/* 把请求还回空闲池（所有权在 queue 时 release 过）。 */
+		/* 请求还回空闲池（queue 时 release 过所有权）。 */
 		freeRequests_.push_back(std::unique_ptr<libcamera::Request>(req));
 	}
 
 	const libcamera::FrameBuffer *fb = req->buffers().begin()->second;
 	const int64_t timestamp = fb->metadata().timestamp;
 
-	/* ── 先发 shutter，再发结果：框架要求这个顺序 ── */
+	/* ── 顺序要求：先 shutter，后结果 ── */
 	NotifyMsg msg;
 	ShutterMsg shutter;
 	shutter.frameNumber = pend.frameNumber;
 	shutter.timestamp = timestamp;
+	shutter.readoutTimestamp = timestamp;
 	msg.set<NotifyMsg::Tag::shutter>(shutter);
-	cb_->notify({ msg });
+	std::vector<NotifyMsg> msgs;
+	msgs.push_back(std::move(msg));
+	cb_->notify(msgs);
 
-	bool ok = deliver(fb, pend.buffer, halWidth_, halHeight_, halFormat_);
+	bool ok = deliver(fb, pend.imported, halWidth_, halHeight_);
 	if (!ok) {
 		NotifyMsg emsg;
 		ErrorMsg e;
 		e.frameNumber = pend.frameNumber;
-		e.errorStreamId = halStreamId_;
+		e.errorStreamId = pend.streamId;
 		e.errorCode = ErrorCode::ERROR_BUFFER;
 		emsg.set<NotifyMsg::Tag::error>(e);
-		cb_->notify({ emsg });
+		std::vector<NotifyMsg> emsgs;
+		emsgs.push_back(std::move(emsg));
+		cb_->notify(emsgs);
 	}
+	releaseBuffer(pend.imported);
 
 	CaptureResult result;
 	result.frameNumber = pend.frameNumber;
 	result.fmqResultSize = 0;
 	result.partialResult = 1;
-	/* 结果元数据：原样回传请求里的设置 + 时间戳。
-	 * ⬜ 之后应把 libcamera 的实际曝光/增益填回去。 */
+	/* ⬜ 结果元数据暂时回传请求里的设置；之后应填 libcamera 的实际曝光/增益。 */
 	result.result.metadata = pend.settings;
 
-	StreamBuffer sb = pend.buffer;
+	StreamBuffer sb;
+	sb.streamId = pend.streamId;
+	sb.bufferId = pend.bufferId;
 	sb.status = ok ? BufferStatus::OK : BufferStatus::ERROR;
-	sb.acquireFence = ::aidl::android::hardware::common::NativeHandle();
-	sb.releaseFence = ::aidl::android::hardware::common::NativeHandle();
-	/* ⚠️ buffer 字段要清掉：框架按 bufferId 认，回传整个 handle 会被当成
-	 *    一次新的导入。AOSP 自己的 HAL 也是这么做的。 */
-	sb.buffer = ::aidl::android::hardware::common::NativeHandle();
-	result.outputBuffers.push_back(sb);
-	result.inputBuffer.buffer = ::aidl::android::hardware::common::NativeHandle();
+	/* ⚠️ buffer/fence 都留空：框架按 bufferId 认，回传句柄会被当成一次新导入。 */
+	result.outputBuffers.push_back(std::move(sb));
+	result.inputBuffer.streamId = -1;
 	result.inputBuffer.bufferId = 0;
 
-	cb_->processCaptureResult({ result });
+	std::vector<CaptureResult> results;
+	results.push_back(std::move(result));
+	cb_->processCaptureResult(results);
 }
 
 } /* namespace gaokun3 */

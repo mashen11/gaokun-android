@@ -54,16 +54,24 @@ cc_binary {
         "libcutils",
         "libui",                 // GraphicBufferMapper
         "libcamera_metadata",
+        "libfmq",                // ICameraDeviceSession 的两个 FMQ 元数据队列
         "libyuv",                // RGB→YUV（软件 ISP 只出 RGB，见 README）
-        "libaidlcommonsupport",  // makeFromAidl
         "libcamera_gaokun3",
         "libcamera_base_gaokun3",
+        // ⚠️ 只列我们直接实现的三个接口。graphics.common / hardware.common /
+        //    camera.metadata 【不要写死版本】：它们由上面这些传递带进来，
+        //    自己再声明一份会撞 "depends on multiple versions of the same
+        //    aidl_interface"（实测我写 graphics.common-V5、而 camera 拉的是 V7）。
+        //    版本上限实测：provider/device = 3，camera.common = 1，metadata = 4。
         "android.hardware.camera.provider-V3-ndk",
         "android.hardware.camera.device-V3-ndk",
         "android.hardware.camera.common-V1-ndk",
-        "android.hardware.camera.metadata-V3-ndk",
-        "android.hardware.graphics.common-V5-ndk",
-        "android.hardware.common-V2-ndk",
+    ],
+
+    // ⚠️ libaidlcommonsupport 只有静态变体（Soong 报 "missing variant"，
+    //    可用变体全是 link:static）——它提供 makeFromAidl()。
+    static_libs: [
+        "libaidlcommonsupport",
     ],
 
     cflags: [
