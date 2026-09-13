@@ -20,5 +20,18 @@
 # 而 /dev/video* 默认是 root:root 0600 —— 不改属主它连设备都打不开，
 # 症状会是"服务起来了、IComponentStore/default 也注册了、但一个组件都没有"。
 # 上游 README 给的就是这一条（0600 media media）。
-# ★ 只有这两个节点：video0=qcom-venus-decoder、video1=qcom-venus-encoder。
-/dev/video*               0600   media      media
+# ⚠️★ 2026-09-13 更正：启用 camss 之后【不再只有两个节点】——camss 占了
+#   video0-31，Venus 被挤到 video32/33（共 34 个，#81 预测的副作用实测发生了）。
+#   属主组也从 media 改成 camera：相机 HAL 以 cameraserver 跑、在 camera 组里，
+#   而 Venus 的 v4l2_codec2 服务以 media 用户跑、是文件属主，0660 两边都够。
+/dev/video*               0660   media      camera
+
+# ── 相机（camss + libcamera，2026-09-13）──
+#
+# ⚠️★ 没有这几条的症状极具误导性：相机 HAL 以 cameraserver 用户跑，而主线内核
+#   建出来的 /dev/media0 默认是 `crw------- root root` —— 打不开。
+#   于是 libcamera 报的是 **"发现 0 个相机"**，看起来像 camss 没 probe 或者
+#   dtb 用错了；而 root 手跑同一个二进制能找到 1 个。
+#   ★ 判据：同一个程序 root 跑得通、服务用户跑不通 ⇒ 先查节点权限，别查驱动。
+/dev/media*               0660   media      camera
+/dev/v4l-subdev*          0660   media      camera

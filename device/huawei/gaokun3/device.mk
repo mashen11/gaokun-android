@@ -279,11 +279,12 @@ PRODUCT_PACKAGES += \
     libcamera_base_gk3 \
     libcamera_ipa_softisp_gk3
 
-# ⚠️★ 相机设备节点的权限：主线内核建出来的 /dev/media0 是 `crw------- root root`，
-#   而 HAL 以 cameraserver 用户跑 —— 打不开。症状是 libcamera 报"发现 0 个相机"，
-#   看起来像 camss 没 probe，实际 root 手跑同一个二进制能找到 1 个。
+# ⚠️★★ 相机设备节点的权限**并进 ueventd.gaokun3.rc**，不要另开一个文件往
+#   /vendor/etc/ueventd.rc 拷 —— 那个目标只能有一份，另拷一份会把原有的
+#   GPU 渲染节点 / FastRPC 传感器 / Venus 三组规则全部覆盖掉。
+#   （我 2026-09-13 就是这么干的，在设备上把它们冲了；构建期会表现为
+#    PRODUCT_COPY_FILES 目标重复。）
 PRODUCT_COPY_FILES += \
-    $(LOCAL_PATH)/camera/ueventd.gaokun3-camera.rc:$(TARGET_COPY_OUT_VENDOR)/etc/ueventd.rc \
     $(LOCAL_PATH)/camera/gaokun3-camera-features.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/gaokun3-camera-features.xml \
     $(LOCAL_PATH)/camera/ipa-data/softisp/uncalibrated.yaml:$(TARGET_COPY_OUT_VENDOR)/etc/libcamera/ipa/softisp/uncalibrated.yaml
 
