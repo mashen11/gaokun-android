@@ -521,21 +521,38 @@ bool Session::deliverJpeg(const uint8_t *rgb, buffer_handle_t dst,
 		return false;
 	}
 
-	/* 源尺寸与目标不同的话先缩放（JPEG 流常要满分辨率，预览要小图）。 */
+	/*
+	 * 源尺寸与目标不同的话先缩放。
+	 * ⚠️ libyuv **没有** RGBScale（我一开始想当然写了，编译器拦下）。
+	 *    走 RGB24 → ARGB → ARGBScale 这条：libyuv 的 "ARGB" 在内存里是
+	 *    B,G,R,A，正好对上 libjpeg 的 JCS_EXT_BGRA，不用再转回 3 通道。
+	 */
 	std::vector<uint8_t> scaled;
 	const uint8_t *src = rgb;
 	int srcStride = srcWidth_ * 3;
+	int components = 3;
+	J_COLOR_SPACE colorSpace = JCS_EXT_BGR;   /* ★ 字节序见上面的说明 */
+
 	if (dstW != srcWidth_ || dstH != srcHeight_) {
-		scaled.resize(static_cast<size_t>(dstW) * dstH * 3);
-		if (libyuv::RGBScale(rgb, srcStride, srcWidth_, srcHeight_,
-				     scaled.data(), dstW * 3, dstW, dstH,
-				     libyuv::kFilterBilinear) != 0) {
-			ALOGE("deliverJpeg: 缩放失败");
+		std::vector<uint8_t> argbSrc(static_cast<size_t>(srcWidth_) * srcHeight_ * 4);
+		if (libyuv::RGB24ToARGB(rgb, srcStride, argbSrc.data(), srcWidth_ * 4,
+					srcWidth_, srcHeight_) != 0) {
+			ALOGE("deliverJpeg: RGB24ToARGB 失败");
+			mapper.unlock(dst);
+			return false;
+		}
+		scaled.resize(static_cast<size_t>(dstW) * dstH * 4);
+		if (libyuv::ARGBScale(argbSrc.data(), srcWidth_ * 4, srcWidth_, srcHeight_,
+				      scaled.data(), dstW * 4, dstW, dstH,
+				      libyuv::kFilterBilinear) != 0) {
+			ALOGE("deliverJpeg: ARGBScale 失败");
 			mapper.unlock(dst);
 			return false;
 		}
 		src = scaled.data();
-		srcStride = dstW * 3;
+		srcStride = dstW * 4;
+		components = 4;
+		colorSpace = JCS_EXT_BGRA;
 	}
 
 	struct jpeg_compress_struct cinfo;
@@ -551,8 +568,8 @@ bool Session::deliverJpeg(const uint8_t *rgb, buffer_handle_t dst,
 
 	cinfo.image_width = dstW;
 	cinfo.image_height = dstH;
-	cinfo.input_components = 3;
-	cinfo.in_color_space = JCS_EXT_BGR;     /* ★ 见上面的字节序说明 */
+	cinfo.input_components = components;
+	cinfo.in_color_space = colorSpace;
 	jpeg_set_defaults(&cinfo);
 	jpeg_set_quality(&cinfo, quality, TRUE);
 	jpeg_start_compress(&cinfo, TRUE);

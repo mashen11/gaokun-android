@@ -6634,3 +6634,40 @@ LineageOS 的 Aperture 打开着，预览在跑。`dumpsys media.camera` 里
 3. **静态拍照（JPEG）**：characteristics 里声明了 `BLOB`，但 `Session` 还没有
    专门处理 —— 按快门多半会失败。
 4. **画质**：用的是通用 `uncalibrated.yaml`（无 CCM、灰度世界 AWB），偏绿偏暗。
+
+
+---
+
+## #98 ⚠️★★★ 纠正：相机进发布内核【不是换 DTB 就行】，camss 驱动压根没编（2026-09-13）
+
+[#97](#97) 末尾把"相机 DTB 不是默认的"列为四件待办之一，我当时查到主 DTS
+本来就 `#include "sc8280xp-huawei-gaokun3-camera.dtsi"`
+（`sc8280xp-huawei-gaokun3.dts:1734`），而现役 `gaokun3.dtb` 是 09-03 的旧产物、
+早于补丁 0018，于是判断**"只要重建 DTB，内核二进制都不用换"**。
+
+**那个判断是错的。** 做了干净的单变量验证：建一个测试条目 =
+**现役内核 `#3` + 相机 DTB**（`LoaderEntrySelected` 确认走的正是它）：
+
+```
+内核 #3  slot=_a
+camss   = unsupported
+media   = （空）
+相机数  = 0
+/sys/bus/platform/drivers/ 里 camss|camcc → 一个都没有
+```
+
+⇒ **内核 `#3` 根本没编进 camss 驱动**（`CONFIG_VIDEO_QCOM_CAMSS` 未启用）。
+DTB 里有节点也没人认领。
+
+★ 我错在**只验证了一半的链条**：确认了"DTS 包含相机节点"，就默认"内核当然
+有对应驱动"。**设备树声明硬件、内核决定有没有驱动，这是两件独立的事** ——
+而我们的相机内核（`#4`/`#5`）是另外配置另外编的，[#81](#81) 当时就说了。
+
+✅ 顺带确认了一件本来担心的事：**Venus 没有被挤坏**。
+`/dev/video0 = qcom-venus-decoder`、`/dev/video1 = qcom-venus-encoder`
+—— 因为 camss 没起来，编号没被抢。⚠️ 但这也意味着
+"camss 抢走 video0-31"（[#81](#81)）这条**在真正启用 camss 的发布内核上还没验过**，
+`crdroid-tree-fixes` 第 7 条把扫描上界从 10 提到 64 是否足够，要到那时才知道。
+
+⇒ 第四件事的真实工作量：**重编发布内核**（打开 camss + 保留补丁 0018），
+产出新的 `Image` + `gaokun3.dtb`，按本仓惯例先进测试条目验证再提升。
