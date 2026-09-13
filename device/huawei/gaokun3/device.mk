@@ -284,7 +284,15 @@ PRODUCT_PACKAGES += \
 #   看起来像 camss 没 probe，实际 root 手跑同一个二进制能找到 1 个。
 PRODUCT_COPY_FILES += \
     $(LOCAL_PATH)/camera/ueventd.gaokun3-camera.rc:$(TARGET_COPY_OUT_VENDOR)/etc/ueventd.rc \
-    $(LOCAL_PATH)/camera/gaokun3-camera-features.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/gaokun3-camera-features.xml
+    $(LOCAL_PATH)/camera/gaokun3-camera-features.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/gaokun3-camera-features.xml \
+    $(LOCAL_PATH)/camera/ipa-data/softisp/uncalibrated.yaml:$(TARGET_COPY_OUT_VENDOR)/etc/libcamera/ipa/softisp/uncalibrated.yaml
+
+# ⚠️★ 软件 ISP 的 IPA 【必须】能读到调优文件，否则 IPASoftIsp::init() 直接返回
+#   错误 → "Failed to create software ISP, disabling software debayering"
+#   → libcamera 退回原始拜耳 → 我们要的 RGB888 不可用 → configure 被调整成
+#   SGBRG10_CSI2P/RAW → STREAMON 失败。整条因果链里**没有一处提到调优文件**。
+#   路径布局是 <IPA_CONFIG_DIR>/<ipa名>/<文件名>（libcamera ipa_proxy.cpp:57），
+#   而 IPA_CONFIG_DIR 由我们自己的 config.h 定成 /vendor/etc/libcamera/ipa。
 
 # ─── Stage 4: 蓝牙（WCN6855 / hci_qca，AOSP 原装 HAL 直接可用）───
 # ⚠️ 2026-08-19 发现：#34 记了"把这个 HAL 推进 vendor 即可"，但那句话
