@@ -6671,3 +6671,93 @@ DTB 里有节点也没人认领。
 
 ⇒ 第四件事的真实工作量：**重编发布内核**（打开 camss + 保留补丁 0018），
 产出新的 `Image` + `gaokun3.dtb`，按本仓惯例先进测试条目验证再提升。
+
+---
+
+## #99 📷★★★★★ 相机日常可用：四件待办全部解决（2026-09-13）
+
+![拍的照片](img/gaokun3-camera-shot.jpg)
+
+[#97](#97) 末尾列的四件全部做完，**正常启动（走 `default`、不设 oneshot）
+就能开相机应用、预览、按快门存出正常的 JPEG**。
+
+### 1️⃣ 电源域缺陷（[#87](#87)）—— 用桥，不是根治
+
+`write /sys/devices/platform/soc@0/ac5a000.camss/power/control on` 写进
+`gaokun3-camera.rc` 的 `on boot`。正常启动后实测 `control=on`、`camss=active`。
+⚠️ **必须在第一次塌缩之前钉**（已塌缩再钉会当场锁死 `runtime_error`），
+所以放 `on boot`、早于任何人碰相机。
+⚠️ 代价是相机电源域常开、**功耗未测**；根因仍未破（六条假说已排除）。
+
+### 2️⃣ 相机进发布内核 —— 比 [#98](#98) 想的还简单
+
+[#98](#98) 纠正了"只换 DTB 就行"，结论是要重编内核。但一查：
+内核树里 camss 的配置**早就是打开的**（`CONFIG_VIDEO_QCOM_CAMSS=y`、
+`CONFIG_VIDEO_HI846=y`、`CONFIG_SC_CAMCC_8280XP=y`），而构建出来的
+`vmlinuz.efi` 的 sha 正是 **`8f39390e…` = 内核 `#5`** —— 也就是今天跑了一整天
+的那个。⇒ 第四件事其实是**提升**，不是重编。
+
+做法（留了备份，`/data/local/tmp/esp-bak/`）：
+`slot_a/Image` ← 内核 `#5`，`slot_a/gaokun3.dtb` ← 相机 DTB。
+**普通重启验收通过**：内核 `#5`、`camss=active`、`/dev/media0` 在、相机数 1。
+
+⚠️★ 同时更新了 ROM 的预编译内核与 DTB（`prebuilt-boot/`），
+**否则下次构建 ROM 会悄悄把相机 revert 掉**（boot.img 里是内核 `#3`）。
+⚠️ 换 DTB 时正中 M17 记过的地雷：`BOARD_PREBUILT_DTBIMAGE_DIR` 会把目录里
+**所有** `*.dtb` 拼接 —— 我 `cp` 进去之后目录里有两个，boot.img 会带两份。已删旧的。
+
+✅ 顺带验证 [#81](#81) 预测的副作用**确实发生了**：camss 占 `video0-31`，
+Venus 被挤到 **`video32/33`**（共 34 个节点）。`crdroid-tree-fixes` 第 7 条把
+扫描上界从 10 提到 64 起了作用 —— 这条到今天才第一次在真机上被验证。
+
+### 3️⃣ 静态拍照 —— 三个坑串在一起
+
+```
+JPEG 1280x960 质量90 → 242753 字节
+/sdcard/DCIM/Camera/2026-09-13-00-58-35-707.jpg
+```
+
+* **BLOB 约定**：JPEG 从缓冲开头写，**末尾**放 8 字节
+  `CameraBlob{blobId=JPEG(0x00FF), blobSizeBytes}`，框架靠它找真实长度。
+* ⚠️★ **`importBuffer` 的描述符校验**：gralloc4 会拿传入的宽高/格式/usage
+  跟缓冲**实际分配时**的参数比对，对不上返回 **`BAD_BUFFER(2)`** ——
+  而我们并不知道框架用的确切 usage（`producerUsage|consumerUsage` 再加框架
+  自己的位，我们只声明了一半）。改用 `importBufferNoValidate()`。
+  ★ **错误码 2 是 gralloc 的 `BAD_BUFFER`，不是 errno 的 `ENOENT`** ——
+  按 errno 查会完全跑偏。
+* ⚠️★★ **我漏实现了 AIDL 契约的一半**：`StreamBuffer.aidl` 原文
+  "If the bufferId has been sent to the HAL before, this buffer handle
+  **must be empty** and HAL must look up the actual buffer handle to use
+  from its own bufferId to buffer handle map." ——
+  同一个 `bufferId` **只在第一次**带有效句柄。我每帧都 import，第二帧起
+  当然拿到空句柄（`Failed to importBuffer. Bad handle.`）。
+  补上 `(streamId,bufferId) → handle` 缓存，并实现之前被我写成匿名参数忽略掉的
+  `cachesToRemove`。
+  ★ **方法签名里带着的参数就是契约的一部分**：忽略 `cachesToRemove` 不只是
+  少个功能（还会持续泄漏 gralloc 缓冲），它正是让 bufferId 复用能工作的前提。
+
+### 4️⃣ 画质 —— 绿色偏色查实并修好，但不是"调好了"
+
+★ 偏绿的真凶是**色彩范围不匹配**：`RGB24ToI420` 产出的是**限制范围**
+（16–235）YUV，而 Android 相机的 `YUV_420_888` 按约定是**全范围** BT.601。
+改用 `RGB24ToJ420`（libyuv 里 `I`=限制范围、`J`=全范围），**前后截图 A/B 证实**
+偏色消失、对比度恢复。
+
+⚠️ 但这只是修了一个错误，**不等于调好了**：仍在用通用 `uncalibrated.yaml`，
+**没有 CCM**（色彩矫正矩阵必须拍色卡实测标定，随便填会更错；上游自己也写着
+"should only be enabled if tuned"），AWB 是灰度世界法。
+新增的 `hi846.yaml` 只解决 `colourGains` 解析失败那一条，给的是**单位增益**、
+不含任何标定信息。⬜ 真要好颜色需要一次色卡标定。
+
+### ⚠️ 本轮我自己制造又修掉的一个隐患
+
+新建 `camera/ueventd.gaokun3-camera.rc` 并在 `device.mk` 里往
+`/vendor/etc/ueventd.rc` 拷 —— 而那个目标**已经有人在拷**（`device.mk:24`）。
+后果：设备上我 push 那份时把原有的三组规则整个冲掉了（**DRM 渲染节点**、
+**FastRPC 传感器**、**Venus**），下次构建 ROM 则会是 `PRODUCT_COPY_FILES` 目标重复。
+
+★ 这正是 M5/[#82](#82)/[#85](#85) 那条"覆盖前先比对"的规矩，而我**确实执行了检查**
+—— 只是把自己的输出读错了：一条 `ls` 给了两个路径，第二个不存在导致 `||` 分支
+触发，我就当成"文件不存在"。**文件其实在。**
+⇒ **判据教训：一条命令里查多个目标时，`||` 的语义是"任一失败"，不是"都不存在"。**
+已改成把相机规则**并进**原文件。
