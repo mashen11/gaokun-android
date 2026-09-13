@@ -43,6 +43,13 @@ cc_defaults {
         // libcamera 的私有头靠这个宏自我保护（include/libcamera/base/private.h:21）。
         // 上游 meson 在 src/libcamera/base/meson.build:53 定义它。
         "-DLIBCAMERA_BASE_PRIVATE",
+        // ★ 让 IPA 跑在【进程内】而不是独立进程。见 patches/libcamera/0003-*：
+        //   没有 gnutls/libcrypto 时 isSignatureValid() 恒为 false ⇒ 强制隔离，
+        //   那样既要多编一个 proxy worker 可执行体（否则报
+        //   "Failed to get proxy worker path"、软件 ISP 起不来），
+        //   又要为 CPU 密集的软件 ISP 每帧付一次 IPC。
+        //   ⚠️ 安全权衡见该补丁的说明：换闭源 IPA 的项目不要开这个宏。
+        "-DLIBCAMERA_IPA_TRUST_UNSIGNED",
     ],
     // ★ 这组 -I 是从【已跑通的 meson 构建】的 build.ninja 里抄出来的
     //   （grep 某个 .o 的编译行取 -I），不是一个个试出来的：

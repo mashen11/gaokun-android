@@ -9,6 +9,7 @@
 |---|---|
 | `0001-base-thread-use-sched_setaffinity-on-bionic.patch` | bionic 没有 `pthread_setaffinity_np`（[#89](../../docs/stage4-findings.md)） |
 | `0002-ipa-libipa-add-hi846-camera-sensor-helper.patch` | hi846 的增益模型，**实测标定**（[#94](../../docs/stage4-findings.md)），可发上游 |
+| `0003-ipa-manager-allow-trusting-unsigned-ipa.patch` | 让 IPA 跑进程内而不是独立进程（宏 `LIBCAMERA_IPA_TRUST_UNSIGNED`，默认行为不变） |
 | `libcamera-Android.bp` | 把 libcamera 编成 Soong 模块，放到 `external/libcamera/Android.bp` |
 | `config.h` | 替代 meson 自动生成的那份，路径改成 vendor 下的真实位置 |
 
