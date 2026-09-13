@@ -65,13 +65,16 @@ KPATCHES=(
     # ⚠️ 0023 是【诊断补丁，不要进发版内核】：每次 titan 域翻转打两行寄存器转储。
     #    它存在的意义是把"读 GDSCR"从 /dev/mem（本机会静默死内核）换成 regmap。
     0023-clk-qcom-gdsc-dump-gdscr-on-toggle-and-timeout.patch
-    # ⚠️ 0024 同样是【试验补丁，不要进发版内核】，而且**依赖 0023**
-    #    （用它的 gdsc_dump_regs / gdsc_is_watched）。顺序不能反。
-    0024-clk-qcom-gdsc-retry-collapse-on-power-up-timeout.patch
-    # ⚠️ 0025 同样是【试验补丁】，也依赖 0023。它在塌缩前复位 CAMNOC/CPAS。
-    0025-clk-qcom-reset-camnoc-cpas-before-titan-collapse.patch
-    # ⚠️ 0026 依赖 0025（它只是把 0025 的复位清单扩成全部 21 个 BCR）。试验补丁。
-    0026-clk-qcom-camcc-sc8280xp-reset-all-bcrs-before-collapse.patch
+    # ❌ 0024 / 0025 / 0026 三条试验补丁**已被内核 #10 实测否掉**（#104：上电后重试、
+    #    塌缩前复位 CAMNOC+CPAS、塌缩前复位全部 21 个 BCR，都救不回来），故意【不列】。
+    #    文件留在 patches/ 下作案卷。它们都依赖 0023，若要复现顺序不能反。
+    # ★ 0027 是候选根因修复（#105）：sc8280xp 的 camcc 一个 GDSC 都没给等待值，
+    #    gdsc_init() 就用 MSM8974 的 2/8/2 覆盖硬件复位值；同代同偏移的 sm8150/sc8180x
+    #    都写 2/2/0xf。它改的是 camcc-sc8280xp.c 的 gdsc 结构体，与 0020 的 hunk 不相交。
+    0027-clk-qcom-camcc-sc8280xp-gdsc-wait-vals.patch
+    # ⚠️ 0028 是【诊断补丁，不要进发版内核】，**依赖 0023**（用它的 gdsc_is_watched）。
+    #    debugfs gdsc-dbg/init_raw 读硬件复位值（核实 0027 的依据）、wait_override 运行时改等待值。
+    0028-clk-qcom-gdsc-debugfs-init-raw-and-wait-override.patch
 )
 
 # ★★ 指纹判据：补丁是否【已在树里】。
