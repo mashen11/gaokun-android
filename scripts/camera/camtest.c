@@ -130,6 +130,32 @@ int main(int argc, char **argv) {
     int use_pix = 0;
     int argbase = 1;
     if (argc > 1 && strcmp(argv[1], "pix") == 0) { use_pix = 1; argbase = 2; }
+
+    /* ★ --stop N：停在第 N 步就退出，用来做"哪一步毒化了电源域"的阶梯实验
+       （docs/stage4-findings.md #102）。各级边界【就是下面代码里的注释编号】：
+         1 = 读拓扑 + 接链后退出（不设格式）
+         2 = + 沿链传格式 + 打开 video 节点 + video S_FMT 后退出
+         3 = + REQBUFS/QUERYBUF/mmap/QBUF 后退出
+         4 = + STREAMON 然后【立刻】STREAMOFF（不 DQBUF，几乎没有数据流动）
+         5 = 全流程（默认）
+       ⚠️★ 按 #83 抓到的调用链，电源域是在 **STREAMON** 才上电的
+       （v4l2_pipeline_pm_get ← video_prepare_streaming ← vb2_ioctl_streamon），
+       所以 1–3 级【根本不碰电源域】——它们的作用是阴性对照，
+       真正有判别力的是 **4 与 5 的对比**：4 走完了整套时钟/CSIPHY 的开关序列
+       但几乎没有 DMA，5 才有持续的数据流。 */
+    /* ⚠️★ `--stop N` 必须【从位置参数里摘掉】：下面 W/H/NFR 是按位置取的，
+       留在原地会让 atoi("--stop") = 0，宽度变成 0 而不报错 —— 这类
+       "静默地把参数解析成 0" 正是本仓反复踩的那种坑。 */
+    int stop_at = 5;
+    for (int i = argbase; i < argc; ) {
+        if (strcmp(argv[i], "--stop") == 0 && i + 1 < argc) {
+            stop_at = atoi(argv[i + 1]);
+            for (int k = i; k + 2 < argc; k++) argv[k] = argv[k + 2];
+            argc -= 2;
+        } else i++;
+    }
+    if (stop_at < 1 || stop_at > 5) stop_at = 5;
+    printf("=== 阶梯：--stop %d ===\n", stop_at);
     const char *RDI   = use_pix ? "msm_vfe0_pix"    : "msm_vfe0_rdi0";
     const char *VNODE = use_pix ? "msm_vfe0_video3" : "msm_vfe0_video0";
     const uint32_t CSID_SRC_PAD = use_pix ? 4 : 1;
@@ -192,6 +218,8 @@ int main(int argc, char **argv) {
     printf("=== 接链 ===\n");
     link_enable(mfd, &T, PHY, 1, CSID, 0);
     link_enable(mfd, &T, CSID, CSID_SRC_PAD, RDI, 0);
+
+    if (stop_at <= 1) { printf("\n[stop 1] 只读拓扑 + 接链，未设格式、未开 video 节点。\n"); close(mfd); return 0; }
 
     /* 3) 沿链传格式 */
     printf("\n=== 传格式 ===\n");
@@ -269,6 +297,8 @@ int main(int argc, char **argv) {
                vf.fmt.pix.width, vf.fmt.pix.height, (char *)&vf.fmt.pix.pixelformat,
                vf.fmt.pix.bytesperline, vf.fmt.pix.sizeimage);
 
+    if (stop_at <= 2) { printf("\n[stop 2] 格式已沿链设好，未申请缓冲、未 STREAMON。\n"); close(vfd); close(mfd); return 0; }
+
     /* 5) 申请缓冲并抓帧 */
     struct v4l2_requestbuffers rb; memset(&rb, 0, sizeof rb);
     rb.count = 4; rb.type = btype; rb.memory = V4L2_MEMORY_MMAP;
@@ -289,9 +319,25 @@ int main(int argc, char **argv) {
         if (xioctl(vfd, VIDIOC_QBUF, &b, "QBUF") < 0) DIE("QBUF 失败");
     }
     int type = btype;
+    if (stop_at <= 3) {
+        printf("\n[stop 3] 缓冲已申请并入队，未 STREAMON（电源域应当【没有】上电）。\n");
+        for (unsigned i = 0; i < rb.count; i++) munmap(bufs[i], lens[i]);
+        close(vfd); close(mfd); return 0;
+    }
+
     printf("\n=== STREAMON ===\n");
     if (xioctl(vfd, VIDIOC_STREAMON, &type, "STREAMON") < 0) DIE("STREAMON 失败 —— 通路没打通");
     printf("  ✅ 流已开\n");
+    if (stop_at <= 4) {
+        /* ★ 这一级是整个阶梯的判别点：时钟/CSIPHY/稳压器的开关序列走了一整遍，
+           但【不 DQBUF】，立刻关流 —— 几乎没有数据被搬运。 */
+        printf("\n[stop 4] 立刻 STREAMOFF（不抓帧）。\n");
+        xioctl(vfd, VIDIOC_STREAMOFF, &type, "STREAMOFF");
+        for (unsigned i = 0; i < rb.count; i++) munmap(bufs[i], lens[i]);
+        close(vfd); close(mfd);
+        printf("\n完成。\n");
+        return 0;
+    }
 
     /* ★ 因为"开机后只有第一次 STREAMON 能成功"（camss 下电有缺陷，见案卷），
        两个条件必须放在【同一次流】里对照，否则第二组永远拿不到数据。 */
