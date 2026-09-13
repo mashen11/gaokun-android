@@ -82,6 +82,10 @@ KPATCHES=(
     0029-clk-qcom-gdsc-debugfs-raw-toggle-flags-mask-pre-off-delay.patch
     # ⚠️ 0030 是【诊断补丁，不要进发版内核】：camss 按块跳过 s_power/s_stream（module 参数 dbg_skip）。
     0030-media-camss-dbg-skip-per-block-stream-power.patch
+    # ★ 0031 候选根因修复（#105）：camnoc_axi / slow_ahb / fast_ahb 三个 RCG 标成 shared，
+    #    关闭时停靠 XO。实测一次出流后 camnoc_axi_clk_src 指着已熄灭的 pll0_out_even。
+    #    改的是 camcc-sc8280xp.c 里三个 .ops 行，与 0020/0027 的 hunk 不相交。
+    0031-clk-qcom-camcc-sc8280xp-mark-camnoc-ahb-rcgs-shared.patch
 )
 
 # ★★ 指纹判据：补丁是否【已在树里】。
