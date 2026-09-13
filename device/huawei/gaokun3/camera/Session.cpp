@@ -402,7 +402,14 @@ buffer_handle_t Session::getBuffer(const StreamBuffer &sb)
 	auto &mapper = android::GraphicBufferMapper::get();
 	buffer_handle_t imported = nullptr;
 	android::status_t st = mapper.importBufferNoValidate(raw, &imported);
-	native_handle_close(const_cast<native_handle_t *>(raw));
+	/*
+	 * ⚠️★ 只 delete、不 close：importBufferNoValidate() 成功后【接管了 fd】，
+	 *   再 native_handle_close() 会去关已经被接管/关闭的描述符，
+	 *   日志刷 "Could not close FD nn: Bad file descriptor"。
+	 *   失败时才要自己关掉，否则漏 fd。
+	 */
+	if (st != android::OK || !imported)
+		native_handle_close(const_cast<native_handle_t *>(raw));
 	native_handle_delete(const_cast<native_handle_t *>(raw));
 	if (st != android::OK || !imported) {
 		ALOGE("importBuffer 失败: %d (stream=%d buffer=%lld)", st,
