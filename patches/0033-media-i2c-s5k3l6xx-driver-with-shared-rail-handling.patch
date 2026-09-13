@@ -6,6 +6,12 @@ media: i2c: S5K3L6XX 驱动（来自 patches/camera-wip 归档）+ gaokun3 共�
    面板驱动只 `regulator_bulk_enable` 不投电压，所以这里请求 2.8V 之后整条轨升到 2.8V（Windows 同款行为）；
    `power_off()` 后放回 `1.8–2.8V` 区间，让框架选最低 = 面板的 1.8V。
 2. 两处 MODEL_ID 读失败原本静默 `goto err_power`，现在打 `dev_err` —— NAK（-6/-121）必须看得见。
+3. **v2（内核 #16）**：`power_on()` 改成 Windows 的顺序 —— 先拉住复位（XSHUTDOWN 低）→ 上轨 → 1 ms →
+   放开复位 → 10 ms → 才开 MCLK → 1 ms。归档驱动原来在 probe 时就把复位放开、上电后从不再拉，
+   内核 #15 实测 ID 读 NAK（-6）。
+4. **v2 诊断**：ID 读失败时在轨还亮着的时候扫整条 CCI 总线（0x08–0x77 零长度写），打印每个 ACK 地址
+   —— 用来区分"模组不是 S5K3L6 / 地址不对"（驱动包里后摄有 `ofilm_ov13b10` 这个备选，7 位地址 0x36）
+   与"没供电 / 接错总线"（一个都不答）。
 
 Kconfig 符号 `VIDEO_S5K3L6XX`（=y，随 `scripts/config --enable`）。
 ⚠️ diff 由 `git diff` 生成（含 48 KB 新文件），不是手写 hunk 头。
@@ -44,10 +50,10 @@ index e45359e..f3360e9 100644
  obj-$(CONFIG_VIDEO_S5KJN1) += s5kjn1.o
 diff --git a/drivers/media/i2c/s5k3l6xx.c b/drivers/media/i2c/s5k3l6xx.c
 new file mode 100644
-index 0000000..1c40099
+index 0000000..86276c5
 --- /dev/null
 +++ b/drivers/media/i2c/s5k3l6xx.c
-@@ -0,0 +1,1768 @@
+@@ -0,0 +1,1785 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Driver for Samsung S5K3L6XX 1/3" 13M CMOS Image Sensor.
@@ -705,11 +711,15 @@ index 0000000..1c40099
 +	v4l2_dbg(1, debug, &state->sd, "power_ON\n");
 +
 +	/*
-+	 * gaokun3: the analogue rail (LDO2_B) is shared with the display panel's
-+	 * VDDI, which votes 1.8V. The board's own (Windows) power table raises it
-+	 * to 2.8V for the sensor and RPMh takes the max, so do the same here and
-+	 * hand the range back on power-off so the panel's 1.8V wins again.
++	 * gaokun3: follow the board's own (Windows CAMS_RES_QRD) sequence:
++	 *   reset asserted -> rails (LDO2_B 2.8V / LDO2_C 1.8V / core) -> 1ms
++	 *   -> reset released -> 10ms -> MCLK 24MHz -> 1ms.
++	 * The analogue rail (LDO2_B) is shared with the display panel's VDDI,
++	 * which votes 1.8V; request 2.8V here (RPMh takes the max, exactly as
++	 * Windows does) and hand the range back in power_off().
 +	 */
++	gpiod_set_value_cansleep(state->rst_gpio, 1);	/* assert (XSHUTDOWN low) */
++
 +	ret = regulator_set_voltage(state->supplies[1].consumer, 2800000, 2800000);
 +	if (ret < 0) {
 +		v4l2_err(&state->sd, "vdda: cannot request 2.8V: %d\n", ret);
@@ -720,7 +730,10 @@ index 0000000..1c40099
 +	if (ret < 0)
 +		goto err;
 +
-+	usleep_range(10, 20);
++	usleep_range(1000, 1500);
++
++	gpiod_set_value_cansleep(state->rst_gpio, 0);	/* release */
++	usleep_range(10000, 11000);
 +
 +	ret = clk_set_rate(state->clock, state->mclk_frequency);
 +	if (ret < 0)
@@ -733,27 +746,14 @@ index 0000000..1c40099
 +	v4l2_dbg(1, debug, &state->sd, "ON. clock frequency: %ld\n",
 +		 clk_get_rate(state->clock));
 +
-+	gpiod_set_value_cansleep(state->rst_gpio, 0);
-+	/* 1ms = 25000 cycles at 25MHz */
 +	usleep_range(1000, 1200);
-+
-+	/*
-+	 * this additional reset-active is not documented but makes power-on
-+	 * more stable.
-+	 */
-+	usleep_range(400, 800);
-+	gpiod_set_value_cansleep(state->rst_gpio, 1);
-+	usleep_range(400, 800);
-+	gpiod_set_value_cansleep(state->rst_gpio, 0);
-+
-+	msleep(10);
 +
 +	return 0;
 +
 +err_reg_dis:
 +	regulator_bulk_disable(S5K3L6XX_NUM_SUPPLIES, state->supplies);
 +err:
-+	v4l2_err(&state->sd, "%s() failed (%d)\n", __func__, ret);
++	v4l2_err(&state->sd, "%s: failed %d\n", __func__, ret);
 +	return ret;
 +}
 +
@@ -1611,6 +1611,28 @@ index 0000000..1c40099
 +DEFINE_SIMPLE_ATTRIBUTE(debug_add_ops, NULL, debug_add, "%llx\n");
 +DEFINE_SIMPLE_ATTRIBUTE(debug_clear_ops, NULL, debug_clear, "%llu\n");
 +
++/*
++ * gaokun3 diagnostic: with the sensor rails still up, ask every 7-bit address
++ * on this CCI bus whether anybody ACKs (a zero-length write). Tells "wrong
++ * sensor / wrong address" apart from "no power / wrong bus".
++ */
++static void s5k3l6xx_dbg_scan_bus(struct i2c_client *c)
++{
++	struct i2c_msg msg = { .flags = 0, .len = 0, .buf = NULL };
++	int found = 0;
++	u16 addr;
++
++	for (addr = 0x08; addr < 0x78; addr++) {
++		msg.addr = addr;
++		if (i2c_transfer(c->adapter, &msg, 1) == 1) {
++			dev_err(&c->dev, "bus scan: ACK at 0x%02x\n", addr);
++			found++;
++		}
++	}
++	dev_err(&c->dev, "bus scan on %s: %d device(s) answered\n",
++		c->adapter->name, found);
++}
++
 +static int s5k3l6xx_probe(struct i2c_client *c)
 +{
 +	struct s5k3l6xx *state;
@@ -1675,6 +1697,7 @@ index 0000000..1c40099
 +	test = s5k3l6xx_read(state, S5K3L6XX_REG_MODEL_ID_L);
 +	if (test.retcode < 0) {
 +		dev_err(&c->dev, "model id low read failed: %d (sensor not answering on CCI?)\n", test.retcode);
++		s5k3l6xx_dbg_scan_bus(c);
 +		ret = test.retcode;
 +		goto err_power;
 +	} else if (test.value != S5K3L6XX_MODEL_ID_L) {
