@@ -121,6 +121,15 @@ static int sd_set_fmt(const char *ent, uint32_t pad, uint32_t code, uint32_t w, 
 int main(int argc, char **argv) {
     const char *SENSOR = "hi846 2-0020";
     const char *PHY = "msm_csiphy3", *CSID = "msm_csid0";
+    /* ★ --rear：后摄 OV13B10（#106）。它挂在 CSIPHY0，走同一个 CSID0/VFE0 RDI0 裸转储通路。
+       前后摄不能同时用这条通路 —— 这是冒烟测试，不是 HAL。必须是 argv[1]。 */
+    int argbase_shift = 0;
+    if (argc > 1 && strcmp(argv[1], "--rear") == 0) {
+        SENSOR = "ov13b10 1-0036"; PHY = "msm_csiphy0";
+        for (int k = 1; k + 1 < argc; k++) argv[k] = argv[k + 1];
+        argc--; argbase_shift = 1;
+    }
+    (void)argbase_shift;
     /* ★ 两条通路二选一（第一个参数写 pix 就走 ISP 那条）：
      *   RDI = 裸转储，出传感器原始拜耳（SGBRG10P）——已验证可用
      *   PIX = 走 VFE 的 ISP，理论上能出 YUV —— 待验证。
