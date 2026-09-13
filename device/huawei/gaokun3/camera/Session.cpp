@@ -482,10 +482,22 @@ void Session::onRequestCompleted(libcamera::Request *req)
 		}
 		pend = std::move(it->second);
 		pending_.erase(it);
-		/* 请求还回空闲池（queue 时 release 过所有权）。 */
-		freeRequests_.push_back(std::unique_ptr<libcamera::Request>(req));
 	}
 
+	/*
+	 * ⚠️★★ 请求【不能】在这里就还回空闲池 —— 下面还要读 req->buffers()。
+	 *   还回去之后 processCaptureRequest 可能立刻取走并 reuse()，
+	 *   于是我们读到的是一个已经被复用的对象。实测就是这样崩的
+	 *   （tid name=CameraManager，栈顶 onRequestCompleted+1428）。
+	 *   ★ 归还所有权和"用完它"是两件事，顺序不能图省事。
+	 *   现在改成在函数最后才归还。
+	 */
+	if (req->buffers().empty()) {
+		ALOGE("完成的请求里没有 buffer");
+		std::lock_guard<std::mutex> lk(mutex_);
+		freeRequests_.push_back(std::unique_ptr<libcamera::Request>(req));
+		return;
+	}
 	const libcamera::FrameBuffer *fb = req->buffers().begin()->second;
 	const int64_t timestamp = fb->metadata().timestamp;
 
@@ -539,8 +551,8 @@ void Session::onRequestCompleted(libcamera::Request *req)
 	result.frameNumber = pend.frameNumber;
 	result.fmqResultSize = 0;
 	result.partialResult = 1;
-	/* ⬜ 结果元数据暂时回传请求里的设置；之后应填 libcamera 的实际曝光/增益。 */
-	result.result.metadata = pend.settings;
+	/* ⬜ 之后应把 libcamera 的实际曝光/增益也填回去。 */
+	result.result.metadata = buildResult(pend.settings, timestamp, /*pipelineDepth=*/4);
 
 	for (size_t i = 0; i < pend.buffers.size(); i++) {
 		StreamBuffer sb;
@@ -557,6 +569,12 @@ void Session::onRequestCompleted(libcamera::Request *req)
 	std::vector<CaptureResult> results;
 	results.push_back(std::move(result));
 	cb_->processCaptureResult(results);
+
+	/* 到这里才用完 req，可以还回空闲池了（见上面的说明）。 */
+	{
+		std::lock_guard<std::mutex> lk(mutex_);
+		freeRequests_.push_back(std::unique_ptr<libcamera::Request>(req));
+	}
 }
 
 } /* namespace gaokun3 */

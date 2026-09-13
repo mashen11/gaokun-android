@@ -250,6 +250,48 @@ std::vector<uint8_t> buildCharacteristics(const SensorFacts &f)
 	return out;
 }
 
+std::vector<uint8_t> buildResult(const std::vector<uint8_t> &requestSettings,
+				 int64_t timestampNs, uint8_t pipelineDepth)
+{
+	/*
+	 * 以请求设置为底（框架要求结果里能回显请求的键），再补上结果专有的。
+	 * ⚠️ allocate 时要留出扩容余量：add_camera_metadata_entry 在空间不够时
+	 *    是【静默失败】的，不会报错，症状会变成"某个键莫名其妙不见了"。
+	 */
+	const camera_metadata_t *req =
+		reinterpret_cast<const camera_metadata_t *>(requestSettings.data());
+	size_t entries = 16, data = 1024;
+	if (!requestSettings.empty()) {
+		entries += get_camera_metadata_entry_count(req);
+		data += get_camera_metadata_data_count(req);
+	}
+	camera_metadata_t *m = allocate_camera_metadata(entries, data);
+	if (!m)
+		return {};
+	if (!requestSettings.empty())
+		append_camera_metadata(m, req);
+
+	add_camera_metadata_entry(m, ANDROID_SENSOR_TIMESTAMP, &timestampNs, 1);
+	add_camera_metadata_entry(m, ANDROID_REQUEST_PIPELINE_DEPTH, &pipelineDepth, 1);
+
+	/* 3A 状态：我们没有 AF，AE/AWB 由软件 ISP 的 IPA 在跑，
+	 * 这里如实报"已收敛"，不谎报正在搜索。 */
+	const uint8_t aeState = ANDROID_CONTROL_AE_STATE_CONVERGED;
+	add_camera_metadata_entry(m, ANDROID_CONTROL_AE_STATE, &aeState, 1);
+	const uint8_t awbState = ANDROID_CONTROL_AWB_STATE_CONVERGED;
+	add_camera_metadata_entry(m, ANDROID_CONTROL_AWB_STATE, &awbState, 1);
+	const uint8_t afState = ANDROID_CONTROL_AF_STATE_INACTIVE;
+	add_camera_metadata_entry(m, ANDROID_CONTROL_AF_STATE, &afState, 1);
+	const uint8_t flashState = ANDROID_FLASH_STATE_UNAVAILABLE;
+	add_camera_metadata_entry(m, ANDROID_FLASH_STATE, &flashState, 1);
+	const uint8_t lensState = ANDROID_LENS_STATE_STATIONARY;   /* 定焦 */
+	add_camera_metadata_entry(m, ANDROID_LENS_STATE, &lensState, 1);
+
+	std::vector<uint8_t> out = pack(m);
+	free_camera_metadata(m);
+	return out;
+}
+
 std::vector<uint8_t> buildDefaultRequest(int templateId, const SensorFacts &f)
 {
 	(void)templateId;

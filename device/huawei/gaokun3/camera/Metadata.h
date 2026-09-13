@@ -35,6 +35,14 @@ struct SensorFacts {
  */
 std::vector<uint8_t> buildCharacteristics(const SensorFacts &f);
 
+/*
+ * 构造一帧的【结果】元数据。
+ * ⚠️ 不能只把请求设置原样回传：框架要求结果里带上 SENSOR_TIMESTAMP 与几个
+ *    3A 状态，缺了会让 CameraCaptureSession 判定这帧无效。
+ */
+std::vector<uint8_t> buildResult(const std::vector<uint8_t> &requestSettings,
+				 int64_t timestampNs, uint8_t pipelineDepth);
+
 /* RequestTemplate → 默认请求设置。 */
 std::vector<uint8_t> buildDefaultRequest(int templateId, const SensorFacts &f);
 
