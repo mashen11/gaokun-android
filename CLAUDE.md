@@ -26,6 +26,14 @@
 > 我据此写了"硬挂死、安全阀都没触发"，还让用户去按电源键。实际上它**一直好好地
 > 跑着内核 `#5`**。★ 收窄搜索范围会把假阴性伪装成阳性结论。
 >
+> **⓪h ⚠️★★ 2026-09-14 中午：v0.6.0 一发就有用户反馈更新失败。** 原因几乎可以肯定是我昨夜把清单里的
+> `download` 改成了 GitHub Release 附件 —— 它 302 到 `release-assets.githubusercontent.com`，**国内不可达/极慢**
+> （Updater 的下载客户端确实跟随重定向，`HttpURLConnectionClient.java:275`，所以不是重定向的锅）。
+> 已把线上清单换回 R2 `builds/`（zip 一直在），仓库 `ota/gaokun3.json` 同步。
+> ★ 连带作废 v0.6.1 候选里的"Updater 清单切 raw.githubusercontent"—— raw 同样被墙，已改回；
+> **释放 R2 桶之前必须先有国内可达的镜像**（同一 Cloudflare 域名下用 Worker 反代 GitHub 附件是最省事的路），
+> 这是用户的决定点，不是我能单方面做的。★ 教训：托管地址的变更要按【用户所在网络】验证，本机能通不算。
+>
 > **⓪g 🚦 收尾计划上午段（2026-09-14）：两样东西编好等中午重启验收（[#108](docs/stage4-findings.md)）。**
 > 内核 `#19` 在 `slot_cam5`（`cam5` 正常 / `cam6` 带 `ov13b10.fail_probe=1`）：0035 camss 容忍未绑传感器、
 > 0034 v3 get_selection、0036 PMIC 闪光四路试接线；验收脚本 `k19test.sh normal|fallback|flash`。

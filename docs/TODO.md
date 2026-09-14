@@ -487,6 +487,12 @@ prebuilt-boot 同步。
 
 ## B. 工程债与正确性
 
+### B12. ⬜ 释放 R2 桶的前提：国内可达的下载镜像
+2026-09-14 v0.6.0 把清单 `download` 指到 GitHub Release 附件，用户当天反馈更新失败：附件 302 到
+`release-assets.githubusercontent.com`，国内不可达；`raw.githubusercontent.com` 同样。已全部换回 R2。
+出路：同一 Cloudflare 域名（`ota.072172.xyz`）下建 Worker 反代 GitHub Release 附件与仓库里的清单，
+桶只留存储为零的转发层；或干脆保留桶（成本很低：出站免费）。**要用户定**，且改完要在国内网络实测下载。
+
 ### B0. ⚠️★★★ 让构建机的设备树【就是本仓的 checkout】—— 这个坑已经咬了四次
 
 **现状**：`~/crdroid/device/huawei/gaokun3` 是一个**普通目录**，不是 git
