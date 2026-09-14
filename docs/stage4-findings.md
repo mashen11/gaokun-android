@@ -7827,7 +7827,33 @@ AGC 会把能救的场景拉到中灰；拉不动的才是真暗。是启发式�
   原始转储入库 `docs/hw/ov13b10-module-eeprom-0x50.bin`，布局说明在同目录 README。没有厂商规格不解码，
   只当将来调 `ov13b10.yaml`（AWB 金机值 / LSC）的原料。
 
-### 6. 三次踩同一个坑
+### 6. v0.6.1 装机验收（戳 `1789362233`，slot `_a`，2026-09-14 13:26）
+
+| 项 | 实测 |
+|---|---|
+| 内核 / 槽 / 构建 | `#19` / `_a` / `1789362233`，`bootctl` slot0 已 marked successful，ESP `slot_a` = `89a1d14f…` + dtb `fedd3fb6…` |
+| IPA 模块（#109） | `/vendor/lib64/libcamera/ipa/libcamera_ipa_softisp_gk3.so` 在；旧路径副本与两个孤儿库都不在 |
+| 调优文件 | `hi846.yaml` `ov13b10.yaml` `uncalibrated.yaml` |
+| features | `camera` `camera.any` `camera.flash` `camera.front` |
+| provider 域 | **`u:r:hal_camera_default:s0`**（此前 init 域）；开机到验收 **0 条** denial |
+| 相机 | 2 个；后摄 `flash.info.available TRUE`、`lens.facing BACK`；47 个 subdev，camss `suspended`（runtime PM 正常） |
+| LED 节点 | `brightness` / `flash_strobe` = `0664 root camera` |
+| SystemUI | `FlashlightControllerImpl: mCameraId=0 mTorchAvailable=true` |
+| **手电筒砖** | 点一下 `brightness=255` / `mFlashlightEnabled=true`，再点 `0` / `false` —— **`setTorchMode` 整条链通** |
+| crash buffer | 0 行 |
+| 拍照闪光（应用内） | ⬜ **未验**：要解锁开相机应用，用户不在；`led.log` 逻辑已就位，回来时拍一张即可 |
+
+⚠️★ 两条验收时学到的：
+
+* **`sysui_qs_tiles` 不能在 SystemUI 运行时用 `settings put` 改**——它监听这个键，任何外部改动**毫秒级**被它用
+  自己的内存列表覆盖回去（加 `hotspot,saver` 到末尾同样被抹掉，证明与 flashlight 无关）。我一度据此得出
+  "SystemUI 判定手电筒砖不可用"的结论，**错的**。能用的办法：`kill $(pidof com.android.systemui)` 后 0.4 秒内
+  `settings put`，新进程启动时读到的就是改过的列表。普通用户走 QS 编辑器（铅笔）加砖，那是正常路径。
+* **相机 ID 不稳定**：手动起 provider 那次后摄是 `internal/1`，装机重启后是 `internal/0`——libcamera 的枚举顺序
+  随 media 设备出现先后而变。Android 约定 ID 0 = 后摄，很多应用直接 `open("0")`，框架也按 ID 记每相机设置。
+  `Provider.cpp` 现在按 `Location` 排（Back 在前，再按 libcamera id），进 v0.6.1 的下一次构建（`release-061d`）。
+
+### 7. 三次踩同一个坑
 
 `pkill -f <pattern>` 放在 adb/ssh 一行命令里，命令行本身就含那个 pattern ⇒ 把自己的 shell 杀了，后面什么都没跑：
 本会话 `dmesg -w`、`camprov`、`com.android.systemui` 各一次。第三次时正式相机服务已 `stop` 而新的没起来。
