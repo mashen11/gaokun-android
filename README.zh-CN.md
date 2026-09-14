@@ -27,7 +27,7 @@ recovery 分区，也没有串口。这不是一次常规移植 —— 它是 **
 | 引导（UEFI + systemd-boot，内置盘） | ✅ | 不需要 U 盘 |
 | 屏幕 1600×2560 @ 120 Hz | ✅ | 框架默认值把渲染钉在 60，已覆盖；实测 vsync 周期 8.33 ms |
 | GPU —— Adreno 690 硬件 Vulkan | ✅ | Mesa 26.0.3 `turnip`；22 分钟浸泡零 SMMU fault |
-| 触摸屏 | ✅ | Himax HX83121A；需要 `patches/` 里的 gpio174 补丁 |
+| 触摸屏 | ⚠️ | 可用 —— Himax HX83121A，需要 `patches/` 里的 gpio174 补丁（[#26](docs/stage4-findings.md)）。⚠️ **手感还没调**：驱动给坐标轴写死的 `fuzz = 8` 是为 Linux 侧 libinput 选的，在 Android 上会把**0.4 mm 以内的慢速移动整个丢掉**；另外驱动默认不报触点面积，框架因此没有手掌误触抑制可用。[#113](docs/stage4-findings.md) |
 | 磁吸键盘 + 触控板 | ✅ | USB HID `12d1:10b8` |
 | Wi-Fi | ✅ | ath11k / WCN6855 |
 | 蓝牙 | ⚠️ | 可用 —— `hci_qca`，adapter `ON`，开机后零崩溃。**但长期运行后可能与音频一起死锁**，见 [#38](docs/stage4-findings.md) |
@@ -39,8 +39,8 @@ recovery 分区，也没有串口。这不是一次常规移植 —— 它是 **
 | **待机 / 挂起** | ✅ | **2026-08-22 修复 —— 而且真凶是我们自己，不是内核。** 真实挂起/唤醒，零复位。⚠️ 代价一条：息屏时 USB adb 会断。[#52](docs/stage4-findings.md)、[#57](docs/stage4-findings.md) |
 | 传感器（加速度计+陀螺仪）| ✅ | **自动旋转可用，用户实机确认方向正确。** 为本机写的 sensors HAL 已把真实读数喂给 SensorService，框架据此自动融合出 Game Rotation Vector / Gravity / Linear Acceleration。出厂安装矩阵全零（校准数据随 Windows 一起没了），但实测传感器坐标系与面板方向本来就一致，**不需要纠正**。本机**没有磁力计**（所以没有指南针）；光感一使能就会污染整个 DSP 会话，见 [#37](docs/stage4-findings.md) |
 | 硬件视频解码 | ✅ | Venus，走 `c2.v4l2.avc.decoder` —— 实机实测解出 30 帧，据我们所知是 SC8280XP 上的头一次。为此修了 `external/v4l2_codec2` 的两个可移植性 bug：它给压缩输入队列的 `S_FMT` 传 `ui::Size()`，而那个默认值是 **−1×−1**（不是 0×0），转成无符号后被 Venus clamp 到上限 8192×8192，于是判过载；以及它把「`SOURCE_CHANGE` 事件之前 `G_FMT` 失败」当成致命错误，而那恰恰是 V4L2 stateful 规范要求驱动做的事。编码未验证。[#41](docs/stage4-findings.md) |
-| 摄像头 | ❌ | 没开始 |
-| USB-C 外接显示 / UCSI | ❌ | UCSI PPM 初始化超时，本机主线的已知缺陷 |
+| 摄像头 | ✅ | **前后摄都能用，已随 v0.6.1 发布。** 前摄 Hynix hi846，后摄 **OmniVision OV13B10** —— 设备树按"三星 S5K3L6"写了一年，真相是从华为 Windows 驱动包里解出板级上电序列、把电轨抬起来扫总线才问出来的（[#106](docs/stage4-findings.md)）。链路：主线 `camss` → libcamera simple 流水线 + 软件 ISP → libyuv → 为本机写的 AIDL HAL。闪光灯可用（PM8350C 闪光模块的 1+4 路，靠逐路点亮、有人看机背定出来的）；某颗传感器绑不上时不再连累另一颗。**"每隔一次就拍不了"的电源域缺陷已根治**：camcc 三个 RCG 没标 shared，相机用完后 CAMNOC AXI 的时钟源指着一个已熄灭的 PLL，GDSC 握手永远等不到 —— [`patches/0031`](patches/)、[#105](docs/stage4-findings.md)。⚠️ 没做完的是**画质**：没有色彩矫正矩阵、软件 ISP 自己没有降噪、闪光片会过曝。 |
+| USB-C 外接显示 / UCSI | ⚠️ | **UCSI 现在起得来了** —— `/sys/class/typec/` 两个连接器都在、partner 也注册了，EC 的 UCSI 驱动绑上（本表原先写的 `PPM init failed` 超时已经没有了；哪一版内核修的还没查）。⚠️ 但它报的数据角色是**反的**（插着 PC 时说 `[host]`），所以 USB 角色仍由 init 硬写；DP alt-mode 未测。[#112](docs/stage4-findings.md) |
 | 指纹、TPM | ❌ | 没有驱动 |
 | SELinux | ⚠️ | `permissive` |
 
@@ -166,7 +166,6 @@ Android 相关的配置断言在
 | 使能环境光传感器不但不返回读数，还会污染整个 DSP 会话，所以没有自动亮度（#37）。加速度计与陀螺仪本身已经跑通并接进框架 | [`docs/stage4-findings.md`](docs/stage4-findings.md) |
 | 拔插 USB 后 adb 不重枚举（#27）；现在**息屏时 USB adb 也会断** —— 那正是待机修复在把控制器切到 host。默认开着的 5555 端口 adb over TCP 不受影响 | [`docs/stage4-findings.md`](docs/stage4-findings.md) |
 | GPU SMMU 拉的是 SPI 675/680，而 DT 声明 678/679 | [`docs/stage5-freedreno.md`](docs/stage5-freedreno.md) D6 |
-| 热管理 HAL 是 AOSP mock，它的 SHUTDOWN 阈值只有 36 °C | [`docs/stage6-crdroid.md`](docs/stage6-crdroid.md) §M4 |
 
 ---
 
@@ -182,9 +181,12 @@ Android 相关的配置断言在
 2. **GPU SMMU 中断修复。** SMMU 拉的是 SPI 675/680，设备树声明的是 678/679，
    所以 context fault 永远到不了 CPU。改 DTB 应该就能彻底丢掉
    `smmu-nostall.sh` 那个轮询 workaround。
-3. **写一个真的热管理 HAL**，读 `/sys/class/thermal`。⚠️ **必须同时把 SHUTDOWN
-   阈值改掉** —— AOSP mock 报的是 36 °C，`ThermalManagerService` 看到就会
-   直接关机。
+3. **触摸手感。** 面板与 IC 都是好的 —— 驱动给 MT 坐标轴写死了 `fuzz = 8`，
+   内核据此把**0.4 mm 以内的移动整个丢掉、1.6 mm 以内衰减**。那个值是为 Linux
+   侧的 libinput 选的；Android 自己有 touch slop，驱动自己还带 IIR 平滑，
+   于是三层重复过滤。`patches/0037` 把它做成可运行时改的模块参数，好对着真手指调。
+   驱动默认也不报 `ABS_MT_TOUCH_MAJOR`/`ABS_MT_PRESSURE`，于是框架**没有触点面积
+   可用来做手掌误触抑制** —— 而硬件是有这个数据的。
 4. **SELinux 转 enforcing。** 有两个服务需要写策略。
 5. **传感器 —— 剩 sepolicy 与一个内核开关。** 传感器本体已经做完：
    加速度计与陀螺仪经 SLPI DSP 进到为本机写的 HAL，**自动旋转可用**。

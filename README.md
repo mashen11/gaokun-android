@@ -31,7 +31,7 @@ Everything below was measured on hardware, not inferred. The evidence is in
 | Boot (UEFI + systemd-boot, internal disk) | ✅ | No USB media required |
 | Display 1600×2560 @ 120 Hz | ✅ | The framework default pinned rendering to 60; overridden, measured 8.33 ms vsync |
 | GPU — Adreno 690, hardware Vulkan | ✅ | Mesa 26.0.3 `turnip`; zero SMMU faults over a 22-minute soak |
-| Touchscreen | ✅ | Himax HX83121A; needs the gpio174 patch in `patches/` |
+| Touchscreen | ⚠️ | Works — Himax HX83121A, needs the gpio174 patch in `patches/` ([#26](docs/stage4-findings.md)). ⚠️ **Not yet tuned for feel**: the driver hard-codes an input `fuzz` of 8 on the MT position axes, which on Android discards slow movement under ~0.4 mm — that value was picked for libinput on the Linux side. The driver also does not report contact size by default, so the framework has nothing to do palm rejection with. [#113](docs/stage4-findings.md) |
 | Detachable keyboard + touchpad | ✅ | USB HID `12d1:10b8` |
 | Wi-Fi | ✅ | ath11k / WCN6855. Measured 61.7 MB/s pulling 200 MB over the LAN. ⚠️ Downloads *from the internet* run at only 1–2 MB/s on this machine while a PC on the same network gets 36.9 MB/s from the same URL — cause not established, and **not** the Wi-Fi: ping to the gateway is 0% loss at 1400 bytes. It does make an in-system OTA slow. [#44](docs/stage4-findings.md) **WPA3-SAE verified (2026-09-14):** connects to a WPA2/WPA3 mixed-mode home AP with SAE group 19, H2E and PMF, zero disconnects in a 3-minute soak with traffic — the earlier "WPA3 fails" report on this machine was a mis-remembered passphrase, and [issue #2](https://github.com/vahiru/gaokun-android/issues/2) (kicked after association on a ZTE router) does not reproduce here. [#107](docs/stage4-findings.md) |
 | Bluetooth | ⚠️ | Works — `hci_qca`, adapter `ON`, zero crashes at boot. **But it can deadlock after long uptime**, together with audio; see [#38](docs/stage4-findings.md) |
@@ -44,8 +44,8 @@ Everything below was measured on hardware, not inferred. The evidence is in
 | **Suspend / standby** | ✅ | **Fixed 2026-08-22 — and the cause was ours, not the kernel's.** Real suspend and resume, no resets. ⚠️ One trade-off: USB adb drops while the screen is off. [#52](docs/stage4-findings.md), [#57](docs/stage4-findings.md) |
 | Sensors (accel + gyro) | ✅ | **Auto-rotate works, confirmed on device.** A sensors HAL written for this port feeds real accelerometer and gyroscope data to SensorService, and the framework derives Game Rotation Vector / Gravity / Linear Acceleration from them. The factory mount matrix is all zeros (that calibration data died with Windows), but the sensor frame turns out to match the panel, so no correction was needed. This machine has **no magnetometer** (so no compass), and enabling the ALS poisons the DSP session. The ALS failure is now narrowed to one difference: a field-by-field comparison against the working accelerometer rules out the PMIC rail (both use the same one) and chip-pin interrupts (both use one), leaving the SLPI-side I²C instance — 1 for the accelerometer, 5 for the light sensor. See [#37](docs/stage4-findings.md), [#43](docs/stage4-findings.md) |
 | Hardware video decode | ✅ | Venus, through `c2.v4l2.avc.decoder` — measured 30 frames decoded on device. As far as we know a first for SC8280XP. Two portability bugs in `external/v4l2_codec2` had to be fixed: it passed `ui::Size()` (which defaults to **-1 x -1**, not 0 x 0) as the coded size for the compressed input queue, so Venus clamped it to its 8192x8192 maximum and refused the load; and it treated a pre-`SOURCE_CHANGE` `G_FMT` failure as fatal, which is the behaviour the V4L2 stateful spec actually requires of the driver. Encode is not verified. [#41](docs/stage4-findings.md) |
-| Camera | ⚠️ | **Front camera works end to end in development** (hi846 → camss → libcamera software ISP → an AIDL HAL written for this port → the camera app; [#88](docs/stage4-findings.md)–[#99](docs/stage4-findings.md)), but the HAL is not in a shipped ROM yet and there is no colour calibration. **The camera power-domain defect that made every second capture fail is root-caused and fixed**: three camcc RCGs (`camnoc_axi`, `slow_ahb`, `fast_ahb`) were not marked shared, so after use the CAMNOC AXI clock source pointed at a powered-down PLL and the GDSC handshake never completed — [`patches/0031`](patches/), [#105](docs/stage4-findings.md). **Rear camera identified and streaming (2026-09-14):** it is an **OV13B10**, not the S5K3L6 the old device tree assumed — a bus scan with the rails up (power sequence recovered from Huawei's Windows driver package) answered at 0x36. With the mainline `ov13b10` driver plus an OF match table and the board power sequence, both sensors bind, raw 2104×1560 frames come out, and the camera HAL enumerates two devices. Opens in the camera app; shipped in v0.6.0 (v0.6.0's IPA install-path bug made the app crash on the release image — fixed in v0.6.1, [#109](docs/stage4-findings.md)). **Flash (2026-09-14):** the LED hangs off the PM8350C flash module, channels 1+4, found by lighting each channel with someone watching the back; `patches/0036`, exposed as `/sys/class/leds/white:flash`, not yet driven by the HAL. **A missing sensor no longer takes the other camera down**: `patches/0035` makes camss give up on never-bound sensors after 20 s ([#110](docs/stage4-findings.md)). Colour is white-balanced but not calibrated (no CCM). [#106](docs/stage4-findings.md) |
-| USB-C DisplayPort / UCSI | ❌ | UCSI PPM init times out — a known mainline defect on this machine |
+| Camera | ✅ | **Both cameras ship and work** (v0.6.1). Front is a Hynix hi846, rear an **OmniVision OV13B10** — identified by recovering the power sequence from Huawei’s Windows driver package and scanning the bus with the rails up, after the device tree had assumed a Samsung S5K3L6 for a year ([#106](docs/stage4-findings.md)). The path is mainline `camss` → libcamera’s *simple* pipeline with the software ISP → libyuv → an AIDL HAL written for this port. Flash works (PM8350C flash module, channels 1+4, found by lighting each channel with someone watching the back of the tablet); a rear module that never probes no longer takes the front camera down with it. **The power-domain defect that made every second capture fail is root-caused and fixed**: three camcc RCGs (`camnoc_axi`, `slow_ahb`, `fast_ahb`) were not marked shared, so after use the CAMNOC AXI clock pointed at a powered-down PLL and the GDSC handshake never completed — [`patches/0031`](patches/), [#105](docs/stage4-findings.md). ⚠️ Image quality is the open half: no colour matrix, no denoise in the software ISP, and flash-lit shots clip. |
+| USB-C DisplayPort / UCSI | ⚠️ | **UCSI now comes up** — `/sys/class/typec/` has both connectors and registers a partner, and the EC’s UCSI driver binds (the `PPM init failed` timeout this table used to report is gone; which kernel fixed it we have not pinned down). ⚠️ But the data role it reports is inverted — with a PC attached it says `[host]` — so the USB role is still forced from init, and DisplayPort alt-mode is untested. [#112](docs/stage4-findings.md) |
 | Fingerprint, TPM | ❌ | No driver exists |
 | SELinux | ⚠️ | `permissive` |
 
@@ -184,7 +184,6 @@ conclusions were later overturned. Several of them were.
 | Enabling the ambient light sensor returns no readings *and* poisons the whole DSP session, so there is no auto-brightness (#37) | [`docs/stage4-findings.md`](docs/stage4-findings.md) |
 | USB adb drops after an unplug (#27), and now also whenever the screen turns off — that is the suspend fix switching the controller to host mode. adb over TCP on 5555 is on by default and is unaffected | [`docs/stage4-findings.md`](docs/stage4-findings.md) |
 | GPU SMMU raises SPI 675/680 while the DT declares 678/679 | [`docs/stage5-freedreno.md`](docs/stage5-freedreno.md) D6 |
-| The thermal HAL is the AOSP mock, and its SHUTDOWN threshold is 36 °C | [`docs/stage6-crdroid.md`](docs/stage6-crdroid.md) §M4 |
 
 ---
 
@@ -205,9 +204,15 @@ Concrete, well-scoped work, roughly easiest first:
 2. **GPU SMMU interrupt fix.** The SMMU asserts SPI 675/680; the device tree
    declares 678/679, so context faults never reach the CPU. A DTB change should
    remove the need for the `smmu-nostall.sh` polling workaround entirely.
-3. **A real thermal HAL** reading `/sys/class/thermal`. ⚠️ Raise the SHUTDOWN
-   thresholds at the same time — the AOSP mock reports 36 °C, and
-   `ThermalManagerService` will power the machine off when it sees that.
+3. **Touch feel.** The panel and IC are fine — the driver hard-codes an input
+   `fuzz` of 8 on the MT position axes, which the kernel turns into "discard any
+   movement under 0.4 mm and damp everything under 1.6 mm". That value was
+   chosen for libinput on the Linux side; Android already applies its own touch
+   slop, and the driver runs an IIR filter of its own, so it is triple
+   filtering. `patches/0037` turns it into a runtime-writable module parameter
+   so it can be tuned against a real finger. The driver also does not report
+   `ABS_MT_TOUCH_MAJOR`/`ABS_MT_PRESSURE` by default, so the framework has no
+   contact size to do palm rejection with — the hardware does provide it.
 4. **SELinux enforcing.** Two services need policy written.
 5. **Sensors — SELinux policy and a kernel flag.** The sensor stack itself is
    done: accelerometer and gyroscope run through the SLPI DSP into a
@@ -227,7 +232,12 @@ Concrete, well-scoped work, roughly easiest first:
    cannot catch this class of failure on this device). [#39](docs/stage4-findings.md)
    spells out what was already ruled out. Fixing this also gets `fastbootd` for
    free and makes *Erase all data* work.
-7. **Camera.** Front camera works in development (see the status table); what is left is packaging the HAL into the ROM, colour calibration for hi846, and the rear camera: it turned out to be an OV13B10 (the device tree guessed S5K3L6), it now streams raw frames and is enumerated by the HAL, but it needs libcamera sensor properties, a gain model and a tuning file before pictures from it look right. Its analogue rail is shared with the panel's VDDI (1.8 V vs 2.8 V votes, the PMIC takes the max exactly as Windows does).
+7. **Camera image quality.** Both cameras ship and work (v0.6.1). What is left
+   is quality, not plumbing: there is no colour-correction matrix (that needs a
+   colour chart), the software ISP has no denoise of its own, and flash-lit
+   shots blow out the highlights because auto-exposure targets a mean and the
+   LED is a torch-level fill light. Concrete next steps are in
+   [`docs/TODO.md`](docs/TODO.md) T3.
 
 If you have a MateBook E Go and want to test, open an issue — reports of what
 breaks are as useful as patches. Please include your BIOS version and SKU.
