@@ -107,6 +107,10 @@ KPATCHES=(
     #    并删掉不亮的 GPIO93 gpio-led。只动 camera.dtsi，叠在 0032 之后。
     #    ⚠️ 需要 LEDS_CLASS_FLASH=y LEDS_QCOM_FLASH=y（kernel-config-android.sh 已断言）。
     0036-arm64-dts-gaokun3-pmic-flash-led-channels-1-4.patch
+    # ★ 0037（#113）：himax 触摸的坐标 fuzz 做成 0644 模块参数，可运行时改。
+    #    默认仍是 8 ⇒ 单独打上【不改变行为】，要的是"调参不用重启"这个能力。
+    #    调定之后把值写进 DT 的 touchscreen-fuzz-x/y（标准属性，touchscreen.c:89 会覆盖驱动默认）。
+    0037-Input-himax-spi-runtime-tunable-coordinate-fuzz.patch
 )
 
 # ⚠️ 诊断补丁【不进发版内核】：只在带 --with-diag 时打。顺序有依赖：0028/0029 依赖 0023，

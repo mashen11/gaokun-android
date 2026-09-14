@@ -112,6 +112,38 @@ decides a network has no internet it marks it permanently disabled, and only a
 *user-initiated* connection with a password clears that flag. Nothing shipped
 in an image can do that for you.
 
+### "This device isn't Play Protect certified"
+
+Google keeps a list of device build identities it has certified, and a ROM
+built outside that programme is not on it. The Play Store will say so, and
+some apps will refuse to install until you fix it. The fix is free, takes a
+minute, and you only do it once.
+
+1. Sign in to your Google account on the tablet.
+2. Read the device's Android ID:
+
+   ```
+   bash scripts/google/gsf-android-id.sh
+   ```
+
+   (It needs adb root. The ID lives in Google Play services' private storage —
+   the widely-quoted `sqlite3 .../gsf/databases/gservices.db` recipe no longer
+   works on current Play services, which is why this script exists.)
+3. Open <https://www.google.com/android/uncertified/> **signed in as the same
+   Google account**, paste the ID, and register it.
+4. Give it a few minutes, then clear the Play Store's data:
+   `adb shell pm clear com.android.vending`.
+
+Re-register after a factory reset or after clearing Play services data — the
+ID changes.
+
+> **What this does not fix.** Play Integrity — the stronger attestation that
+> banking and some payment apps use — will still fail, and no amount of
+> configuration on our side changes that: it wants a locked bootloader running
+> a Google-signed build. This machine boots an unlocked UEFI chain by design,
+> because that is what makes installing another OS possible at all. If an app
+> hard-requires Play Integrity, it will not work here.
+
 ## 5. Updating
 
 Android 16 A/B (Virtual A/B) is wired up, so updates install into the inactive

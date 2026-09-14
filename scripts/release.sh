@@ -61,6 +61,14 @@ if [ "$NO_BUILD" = 1 ]; then
     echo "═══ 1. --no-build：用 out/ 里现成的产物（发的就是验过的那一版）═══"
 else
     echo "═══ 1. 一次构建（bacon 与 superimage 必须同一次调用）═══"
+    # ★ BUILD_NUMBER 决定【指纹里的 incremental】。不设的话 AOSP 回落成
+    #   `eng.$(BUILD_USERNAME 前 6 个字符)`，而 Lineage 把 BUILD_USERNAME 匿名成
+    #   `android-build` ⇒ 指纹里是 `eng.androi`（2026-09-14 在 v0.6.1 上实测），
+    #   与 `ro.build.version.incremental`（构建戳）**对不上** —— 一个构建里两个
+    #   互相矛盾的 incremental，崩溃归并、缺陷报告、任何解析指纹的东西都会拿到没用的值。
+    #   见 docs/stage4-findings.md #113。
+    export BUILD_NUMBER=${BUILD_NUMBER:-$(date -u +%Y%m%d%H%M%S)}
+    echo "  BUILD_NUMBER=$BUILD_NUMBER（进指纹的 incremental）"
     m -j"$(nproc)" bacon superimage
 fi
 
