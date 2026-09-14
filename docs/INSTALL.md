@@ -135,6 +135,14 @@ source of truth; the ESP copies are derived. Since the hook only ever writes
 into the slot it just flashed, an update cannot touch the kernel you are
 currently running — which is what makes rollback safe.
 
+> **Partitioned by hand (dual boot)?** The hook and the boot-control HAL look
+> for the ESP through `/dev/block/by-name/esp`, which only exists when the GPT
+> partition *name* (PARTLABEL, not the vfat volume label) is exactly `esp`. A
+> v0.6.0 user hit this: every OTA failed with `/dev/block/by-name/esp 不存在`.
+> Fix once from any Linux: `sgdisk -c <N>:esp /dev/nvme0n1` (N = your ESP's
+> partition number). From v0.6.1 on both components also fall back to finding
+> the ESP by content (the vfat partition holding `loader/entries/*-android-*.conf`).
+
 If the hook fails (the usual reason is a full ESP), the whole update fails
 loudly rather than leaving you with a new system and an old kernel.
 

@@ -17,6 +17,10 @@
 #include <vector>
 
 #include <android-base/file.h>
+#include <dirent.h>
+#include <fnmatch.h>
+#include <unistd.h>
+
 #include <android-base/logging.h>
 #include <android-base/strings.h>
 
@@ -38,6 +42,49 @@ std::string DefaultLineForSlot(int slot) {
     return std::string("default *-android-") + (slot == 0 ? "a" : "b") + ".conf";
 }
 
+// 2026-09-14: a user with a hand-partitioned dual-boot disk had no PARTLABEL on
+// the ESP (only a vfat volume label), so /dev/block/by-name/esp did not exist
+// and every OTA failed in postinstall — and would have failed here next. Fall
+// back to finding the ESP by *content*: the only vfat partition that carries
+// loader/entries/*-android-*.conf is ours (a Windows ESP has no such entries).
+constexpr char kProbeMountPoint[] = "/mnt/gaokun3_esp_probe";
+
+bool LooksLikeOurEsp(const std::string& dev) {
+    if (mkdir(kProbeMountPoint, 0700) != 0 && errno != EEXIST) return false;
+    if (mount(dev.c_str(), kProbeMountPoint, "vfat", MS_RDONLY | MS_NOATIME, nullptr) != 0)
+        return false;
+    bool found = false;
+    std::string entries = std::string(kProbeMountPoint) + "/loader/entries";
+    if (DIR* d = opendir(entries.c_str())) {
+        while (struct dirent* e = readdir(d)) {
+            if (fnmatch("*-android-*.conf", e->d_name, 0) == 0) { found = true; break; }
+        }
+        closedir(d);
+    }
+    umount(kProbeMountPoint);
+    return found;
+}
+
+std::string FindEspDevice() {
+    if (access(kEspDevice, F_OK) == 0) return kEspDevice;
+    LOG(WARNING) << kEspDevice << " missing (ESP has no PARTLABEL 'esp'); probing vfat partitions by content";
+    DIR* d = opendir("/dev/block");
+    if (!d) return "";
+    std::string result;
+    while (struct dirent* e = readdir(d)) {
+        std::string name = e->d_name;
+        if (fnmatch("nvme*n*p*", e->d_name, 0) != 0 && fnmatch("sd*[0-9]", e->d_name, 0) != 0 &&
+            fnmatch("mmcblk*p*", e->d_name, 0) != 0)
+            continue;
+        std::string dev = "/dev/block/" + name;
+        if (LooksLikeOurEsp(dev)) { result = dev; break; }
+    }
+    closedir(d);
+    if (result.empty()) LOG(ERROR) << "no vfat partition with loader/entries/*-android-*.conf found";
+    else LOG(INFO) << "ESP found by content: " << result;
+    return result;
+}
+
 class MountedEsp {
   public:
     MountedEsp() {
@@ -45,8 +92,10 @@ class MountedEsp {
             PLOG(ERROR) << "mkdir " << kMountPoint;
             return;
         }
-        if (mount(kEspDevice, kMountPoint, "vfat", MS_NOATIME, nullptr) != 0) {
-            PLOG(ERROR) << "mount " << kEspDevice << " -> " << kMountPoint;
+        std::string dev = FindEspDevice();
+        if (dev.empty()) return;
+        if (mount(dev.c_str(), kMountPoint, "vfat", MS_NOATIME, nullptr) != 0) {
+            PLOG(ERROR) << "mount " << dev << " -> " << kMountPoint;
             return;
         }
         mounted_ = true;

@@ -49,7 +49,27 @@ log "目标槽位 = _$SUFFIX"
 
 [ -x "$EXTRACT" ] || fail "$EXTRACT 不存在或不可执行"
 [ -e "$BOOT_DEV" ] || fail "$BOOT_DEV 不存在（boot_a/boot_b 分区建了吗？）"
-[ -e "$ESP_DEV" ]  || fail "$ESP_DEV 不存在（ESP 的 PARTLABEL 必须正好是 esp）"
+# ★ 2026-09-14（用户反馈 #1：v0.6.0 四次 OTA 全部死在这里）：by-name/esp 这个链接只在 GPT 分区名
+#   （PARTLABEL）正好是 esp 时才有。手工分区 / 双系统的人往往只打了 vfat 卷标（比如 GAOKUN3ESP），
+#   链接不存在，OTA 就在最后一步失败。所以不再依赖名字：找不到链接时【按内容】探测 ——
+#   扫所有 vfat 分区，只读挂上，看谁有 loader/entries/*-android-*.conf。多个 ESP（比如 Windows 的）
+#   也能分开：只有我们的那个有 android 条目。
+find_esp() {
+    if [ -e /dev/block/by-name/esp ]; then echo /dev/block/by-name/esp; return 0; fi
+    log "by-name/esp 不存在（PARTLABEL 不是 esp —— 手工分区常见），改为按内容探测 vfat 分区"
+    PROBE=/mnt/gaokun3_esp_probe; mkdir -p "$PROBE" || return 1
+    for d in /dev/block/nvme*n*p* /dev/block/sd*[0-9] /dev/block/mmcblk*p*; do
+        [ -b "$d" ] || continue
+        toybox blkid "$d" 2>/dev/null | grep -q 'TYPE="vfat"' || continue
+        mount -o ro -t vfat "$d" "$PROBE" 2>/dev/null || continue
+        if ls "$PROBE"/loader/entries/*-android-*.conf >/dev/null 2>&1; then
+            umount "$PROBE"; log "按内容找到 ESP = $d"; echo "$d"; return 0
+        fi
+        umount "$PROBE"
+    done
+    return 1
+}
+ESP_DEV=$(find_esp) || fail "找不到 ESP：没有 /dev/block/by-name/esp（PARTLABEL=esp），扫描 vfat 分区也没有含 loader/entries/*-android-*.conf 的那个"
 
 mkdir -p "$MNT" || fail "mkdir $MNT"
 mount -t vfat "$ESP_DEV" "$MNT" || fail "挂载 ESP"
