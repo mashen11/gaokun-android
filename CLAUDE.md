@@ -26,6 +26,14 @@
 > 我据此写了"硬挂死、安全阀都没触发"，还让用户去按电源键。实际上它**一直好好地
 > 跑着内核 `#5`**。★ 收窄搜索范围会把假阴性伪装成阳性结论。
 >
+> **⓪m 2026-09-14 下午两问（[#112](docs/stage4-findings.md)）：噪点 & 息屏 USB adb。**
+> ★ **UCSI 活了**（typec port0 有 partner），但数据角色**反的**（PC 插着报 `[host]`），靠 `init.gaokun3.usb.rc` 硬写 device 盖住。
+> ★ dwc3 源码：device 模式挂起无条件 `dwc3_core_exit()`（PHY 下电，= #56 的复位点）且 gadget 总 soft disconnect
+> ⇒ **上游没有"adb 穿越睡眠"**。折中已写：`gaokun3-usbrole.sh` v2 插着主机息屏不切 host、不睡；拔线再切。
+> ⚠️ 本机 `persist.gaokun3.allow_suspend=0`（不知何时关的），现在根本不进 s2idle。
+> ★ 相机：软件 ISP **其实每帧报 AnalogueGain/ExposureTime**（libipa `fillMetadata`），HAL 此前没读。已加增益自适应降噪
+> （BLOB RGB ε 滤波 / 预览色度模糊）、预闪按亮度收敛（修白墙过曝→偏绿）。已编译、手动起 provider 待样片对比；**未进镜像**。
+>
 > **⓪l ✅ 2026-09-14 13:26：v0.6.1（戳 `1789362233`）已装机验收通过（[#111](docs/stage4-findings.md) §6），【未发布】。**
 > `#19` / `_a` / IPA 目录对 / provider 在 `hal_camera_default` 域 0 denial / 后摄 flash TRUE / **快捷设置手电筒砖实测开关 LED**。
 > ⬜ 应用内拍照闪光要解锁，等用户。⬜ 发布（R2 + GitHub）要用户点头。ESP 实验槽位全清（50 MB 可用）。

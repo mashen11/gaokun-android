@@ -241,6 +241,10 @@ Windows DriverData 注册表里，**已随抹除 Windows 丢失**。
 **真正的修法**：见 B3（EFI 加载器）或让 recovery 能启动（已搁置）。
 
 ### A6. USB-C 外接显示（UCSI）★ 现在还欠着待机那笔账
+⚠️ 2026-09-14 更新（[#112](stage4-findings.md)）：**UCSI 在当前内核上是活的**（typec port0/port1、partner、
+EC 的 ucsi 驱动绑上），但它给的数据角色**是反的**（PC 插着时 `data_role=[host]`），靠 `init.gaokun3.usb.rc`
+硬写 `device` 盖回来。下一步：查 EC 的 partner type 语义 → 修 `ucsi_huawei_gaokun.c` → DT
+`role-switch-default-mode = "host"` → 删 rc 里的硬写。下面这段是旧状态：
 `PPM init failed -ETIMEDOUT`，本机主线已知缺陷，`/sys/class/typec/` 是空的。
 代价还包括 USB 只有 high-speed（SuperSpeed 需要 UCSI 切 orientation）。
 
@@ -455,6 +459,8 @@ dtb v2 上机：`/sys/class/leds/white:flash` 一个、47 个 subdev。故意不
 features xml 补 `android.hardware.camera` + `android.hardware.camera.flash`（SystemUI 手电筒砖的前提）。
 ✅ 装机验收（v0.6.1 戳 1789362233）：快捷设置手电筒砖点开 `brightness=255`、再点归 0（#111 §6）。
 ⬜ Aperture 后摄闪光 ON 拍一张，看 LED 亮/灭各一次（要解锁，等用户在）。
+⬜ **噪点 / 闪光过曝 / 偏绿**（用户 2026-09-14 反馈，[#112](stage4-findings.md) §3-4）：HAL 已加增益自适应降噪、
+预闪按亮度收敛、回填曝光/增益；已编译、手动起 provider，**待用户拍样片对比**（地砖平坦区标准差 ≈ 10 → ?）。
 ⬜ 手电筒亮度档位：HAL 声明 `FLASH_INFO_STRENGTH_MAXIMUM_LEVEL`/`DEFAULT_LEVEL` 并实现 `turnOnTorchWithStrengthLevel`
 （brightness 0..255 线性映射即可），SystemUI 的 `flashlight_strength` 已开、砖会给滑杆。
 ✅ 相机 ID 稳定化（后摄 = 0）：`release-061d`（戳 1789364282）装机实测 `internal/0` = BACK。
@@ -499,6 +505,12 @@ features xml 补 `android.hardware.camera` + `android.hardware.camera.flash`（S
 `release-assets.githubusercontent.com`，国内不可达；`raw.githubusercontent.com` 同样。已全部换回 R2。
 出路：同一 Cloudflare 域名（`ota.072172.xyz`）下建 Worker 反代 GitHub Release 附件与仓库里的清单，
 桶只留存储为零的转发层；或干脆保留桶（成本很低：出站免费）。**要用户定**，且改完要在国内网络实测下载。
+
+### B14. ⬜ 息屏 USB adb：脚本折中已做，原生化两步 + 复位根因（[#112](stage4-findings.md)）
+`bin/gaokun3-usbrole.sh` v2：插着主机（UDC configured）息屏不切 host、不放行挂起，拔线再切。随下次构建进镜像；
+装后把本机 `persist.gaokun3.allow_suspend` 设回 1（现在是 0，根本不睡）。
+源码定性：device 模式系统挂起无条件 `dwc3_core_exit()`（PHY 下电）且 gadget 总 soft disconnect ⇒
+上游 dwc3 没有"adb 穿越睡眠"。⬜ 复位根因（combo PHY exit → TZ 复位？）开放。⬜ UCSI 角色修好后可去掉脚本的 host 切换。
 
 ### B13. ⬜ `install-ota-local.sh` 装前先算 ESP 空间；实验条目用完就删
 [#110](stage4-findings.md)：postinstall 要求"可用 + 将被覆盖的旧文件 > 56 MB"，本机被三周的实验槽位吃到

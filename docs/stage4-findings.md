@@ -7867,3 +7867,77 @@ AGC 会把能救的场景拉到中灰；拉不动的才是真暗。是启发式�
 `pkill -f <pattern>` 放在 adb/ssh 一行命令里，命令行本身就含那个 pattern ⇒ 把自己的 shell 杀了，后面什么都没跑：
 本会话 `dmesg -w`、`camprov`、`com.android.systemui` 各一次。第三次时正式相机服务已 `stop` 而新的没起来。
 规矩：一行命令里只用 `pkill -x` / `kill $(pidof …)` / pid 文件。已写进记忆。
+
+## #112 息屏时 USB adb 断开 —— 读完 dwc3/UCSI 源码后的定性，以及"插着主机就不睡"的折中；相机噪点/闪光过曝的第一轮改法（2026-09-14 下午）
+
+用户两问：① 出图噪点太大；② 息屏期间 USB adb 会断（M16 的"息屏切 host"取舍），现在 WiFi adb 能用了，
+能不能有个更好的、最好是原生的方案。
+
+### 1. USB：三个新事实
+
+**① 这台机器上 UCSI 现在是活的。** `/sys/class/typec/` 有 `port0`、`port0-partner`、`port1`，
+`ucsi_huawei_gaokun.ucsi` 辅助驱动绑上，`ucsi-source-psy-*.01 online=1`，`a600000.usb` 目录里有
+`consumer:typec:port0` —— 连接器（上游 gaokun3.dts 的 `connector@0`，`ucsi0_hs_in` → `usb_0_dwc3_hs`）拿到了
+dwc3 的 role switch。TODO A6 那句 "`/sys/class/typec/` 是空的" 已经过时（哪一版内核起好的没查）。
+`dmesg` 里只剩两条 `set orientation out of range: con0/con1` 警告。
+
+**② 但 UCSI 给的数据角色是反的。** PC 插着、adb 正常（我们是 UFP/device），`port0/data_role` 却是 `[host] device`，
+说明 EC 报的 `PARTNER_TYPE` 让 `ucsi_partner_change()`（`ucsi.c:1191-1239`）走了 UFP 分支 →
+`typec_set_data_role(HOST)` + `usb_role_switch_set_role(HOST)`。role switch 实际是 `device`，是因为
+`init.gaokun3.usb.rc:32/38` 在 post-fs-data 与 boot 两次硬写 `device` 把它盖回来了 —— 那两行的注释当年就写着
+"UCSI 会把 otg 口切成 host"。⇒ **在这台 EC 上不能拿 UCSI 的角色当真**，除非查清它的 partner type 语义
+（可能是"我方角色"而不是"对方角色"，那就是驱动里一个 quirk 的事）。⬜ 用户拔插一次线看 role/typec 怎么变，
+watcher 在 `/data/local/tmp/usbwatch.log`。
+
+**③ 挂起复位的机制，源码层面对上了（`drivers/usb/dwc3/core.c` v7.2-rc2 `dwc3_suspend_common`）**：
+
+| role | 系统挂起时 |
+|---|---|
+| `DEVICE` | `dwc3_gadget_suspend()`（**soft disconnect**，gadget 断开）→ `synchronize_irq` → **`dwc3_core_exit()`**（PHY 下电、事件缓冲释放），**不看 wakeup** |
+| `HOST` | `device_may_wakeup()` 为真时**不** core_exit，只 `phy_pm_runtime_put_sync`，控制器保持供电等唤醒 |
+
+`a6f8800.usb` 的 DT 有 `wakeup-source`，`power/wakeup=enabled` ⇒ host 路径走的是"保持供电"。device 路径无条件把
+PHY（其中 usb3-phy 是与 DP 共用的 QMP combo PHY，`&usb_0_qmpphy QMP_USB43DP_USB3_PHY`）exit 掉 —— 与 #56
+"推测的机制"一致，复位点就在这一步（TZ 级、无日志，仍未直接证明）。
+★ 更重要的推论：**即使把复位修好，上游 dwc3 在 device 模式系统挂起时也总是 soft disconnect gadget**
+（`gadget.c dwc3_gadget_suspend`），PC 那头一定看到断开、醒来再枚举。"adb 穿越睡眠"不是上游 dwc3 的行为，
+手机的下游内核是自己实现的 L2 保持。所以**不存在"原生地让 USB adb 在睡眠中活着"这条路**。
+
+另：`drd.c:450-475`，UCSI 拔线时报 `USB_ROLE_NONE` → dwc3 落到 `role_switch_default_mode`，默认 PERIPHERAL；
+DT 加 `role-switch-default-mode = "host"` 可让"没插东西"时落到 host（对挂起安全）。在 UCSI 角色可信之前先不动。
+
+### 2. USB：方案
+
+选的是"**插着主机就不睡，拔了才睡**"（`bin/gaokun3-usbrole.sh` v2）：息屏时若 `UDC state` 是
+`configured/addressed/default`（总线另一端有主机），保持 device、`gaokun3_usbrole` wakelock 不放；起一个
+`watch` 子进程每 2 秒看 UDC，拔线 → 切 host、放行挂起（原路径）。亮屏 → 杀掉 watch、切回 device。
+代价：插着 PC 时息屏不进 s2idle（反正在充电）。收益：USB adb 与 TCP adb 一样不再断。
+⚠️ 本机 `persist.gaokun3.allow_suspend` 目前是 **0**（不知何时被关的，镜像默认 1），所以现在根本不睡 ——
+装了新脚本后要把它设回 1 才有意义。
+⬜ 原生化的两步（先后依赖）：a) 查清 EC 的 UCSI partner type 语义并修 `ucsi_huawei_gaokun.c`；
+b) 然后 `role-switch-default-mode = "host"` + 去掉 rc 里硬写 device 的两行，角色全交给 UCSI。
+⬜ 复位本身的根因（device 模式 `dwc3_core_exit` → combo PHY exit 为什么会 TZ 复位）仍是开放问题，
+只是它现在**不阻塞任何用户需求**。
+
+### 3. 相机：两张样片说明了什么
+
+用户拍的两张（`2026-09-14-14-22/23`，后摄、闪光）：3116×3120，白墙完全过曝、整体偏绿，地砖平坦区
+每通道标准差 ≈ 10（干净应 < 3）。三件事各有其因：
+* **过曝**：#111 的预闪固定 4 帧就报 CONVERGED，软件 ISP 的 AGC 要十几帧才在灯光下收敛，应用按快门时
+  曝光还是灯亮前的值。
+* **偏绿**：AWB（灰度世界）拿一帧几乎全饱和的数据算增益，算不出东西，留下拜耳传感器天生的绿色主导。
+  过曝修了它大概率跟着好。
+* **噪点**：`src/ipa/softisp/` 里没有任何降噪算法；1.12 µm 像素在室内靠增益硬撑。
+
+★ 一个此前的错误认识：我以为软件 ISP 不报曝光/增益 —— 错。`libipa/agc.cpp:865 fillMetadata()` 每帧写
+`AnalogueGain` / `ExposureTime` / `FrameDuration`，simple 流水线 `merge` 进请求元数据。HAL 一直没读。
+
+### 4. 相机：改法（已编译、手动起 provider 待实测）
+
+* 读 `req->metadata()` 的增益/曝光：回填 `SENSOR_SENSITIVITY`（100 × 增益）与 `SENSOR_EXPOSURE_TIME`；
+  AUTO 闪光的"暗"加一条增益 ≥ 4x。
+* 降噪随增益走（< 2x 不动）：静态照片 RGB 域 3×3 ε 滤波（只平均与中心差 ≤ T 的邻居，T = 3×增益 夹 6..36，
+  4 线程；13 MP 约 0.3 s），预览只对 U/V 平面盒式模糊（半径 1，≥ 5x 时 2）。
+* 预闪：至少 8 帧且亮度连续 2 帧变化 < 8 才报 CONVERGED，最多 15 帧。
+⬜ 判据：同一室内场景，地砖平坦区标准差从 ≈ 10 降到多少；闪光片不再一片白。等用户拍。
+⬜ 更根本的：libcamera 软件 ISP 加真正的降噪（上游没有），或在 HAL 里做时域滤波（预览）。
