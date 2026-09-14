@@ -726,6 +726,10 @@ range in the curve:`（后面是空的，连哪条曲线都没说）。
 present fence 的名字就能把整机 panic 掉。稿子照那个补丁的 commit message
 改一改就能发。我不代发对外邮件。
 
+### D8. ✅ v0.6.1-alpha 已发布（2026-09-14）—— 下一版（v0.6.2）待装的东西
+降噪 + 预闪收敛 + 曝光/增益回填（#112 §4-5，bind mount 实测有效）、usbrole v2（插着主机不睡）、
+闪光 EV 负补偿与 AWB 剔饱和（未写）。发前照旧：构建 → 装机验收（含 HAL 真实出流）→ `--no-build` 发。
+
 ### D7. v0.2.0-alpha 的 R2 产物要不要删（2.1 GiB，等你定）
 `install/v0.2.0-alpha/` + `builds/…20260820….zip`。**它们正被 v0.2.0-alpha 的
 GitHub 发布页链接着**，删了那个页面的下载链接会 404。桶现在 6.6 GiB，

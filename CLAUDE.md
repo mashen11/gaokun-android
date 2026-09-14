@@ -5,7 +5,7 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M33 — 相机收尾周（2026-09-14）：★ 电源域根因已修（[#105](docs/stage4-findings.md)，0031 RCG shared）；★ 后摄 = OV13B10 出帧、进应用（#106）；★ 闪光灯 = PM8350C 闪光模块 1+4 路（#110）并接进 HAL（#111：手电筒 + "预闪点灯到拍完"式闪光）；★ camss 容忍未绑传感器（0035，#110 两路验收）；v0.6.0 已发（相机打不开是 IPA 装错目录，#109，v0.6.1 修）；v0.6.1 带闪光灯重编中，装机验收待做。旧的 M32 全文见 [#105](docs/stage4-findings.md)。（每次开工时更新这一行）**
+**当前阶段：Stage 6 M33 — 相机收尾周（2026-09-14）：★ 电源域根因已修（[#105](docs/stage4-findings.md)，0031 RCG shared）；★ 后摄 = OV13B10 出帧、进应用（#106）；★ 闪光灯 = PM8350C 闪光模块 1+4 路（#110）并接进 HAL（#111：手电筒 + "预闪点灯到拍完"式闪光）；★ camss 容忍未绑传感器（0035，#110 两路验收）；v0.6.0 已发（相机打不开是 IPA 装错目录，#109）；**v0.6.1 已发**（戳 1789364282：IPA 修复、闪光灯 HAL、camss 回落、后摄 = 相机 0）；降噪/预闪收敛/usbrole v2 已写待 v0.6.2（#112）。旧的 M32 全文见 [#105](docs/stage4-findings.md)。（每次开工时更新这一行）**
 
 > ## ★★★ 开工前先读：设备正常，相机可用（2026-09-13 晚）
 >
@@ -25,6 +25,11 @@
 > **在搜索范围外 10 分钟没找到，而那看起来和"内核挂死了"一模一样** ——
 > 我据此写了"硬挂死、安全阀都没触发"，还让用户去按电源键。实际上它**一直好好地
 > 跑着内核 `#5`**。★ 收窄搜索范围会把假阴性伪装成阳性结论。
+>
+> **⓪n ✅ v0.6.1-alpha 已发布（2026-09-14 17:5x，用户拍板）**：戳 `1789364282`，R2 `builds/` + `install/<ver>/` + 线上清单
+> 已切（设备侧 curl 200、download 指 R2）；GitHub Release `v0.6.1-alpha` 打在构建源 `10acff3` 上，附件 boot.img /
+> install-artifacts.sha256 / gaokun3.json 已挂，zip 与 super.img.zst 从本机上传中。仓库 `ota/gaokun3.json` 与线上逐字节同步。
+> ⚠️ 下午的降噪 / 预闪 / usbrole v2 改动**不在**这一版里（只验过 bind mount，未进镜像），留给 v0.6.2。构建机已 deallocate。
 >
 > **⓪m 2026-09-14 下午两问（[#112](docs/stage4-findings.md)）：噪点 & 息屏 USB adb。**
 > ★ **UCSI 活了**（typec port0 有 partner），但数据角色**反的**（PC 插着报 `[host]`），靠 `init.gaokun3.usb.rc` 硬写 device 盖住。
