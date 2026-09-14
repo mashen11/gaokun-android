@@ -450,7 +450,11 @@ hi846 的完整控件表在 [#81](stage4-findings.md) 第六节。
 主线 `leds-qcom-flash`）；GPIO93 实测不亮。内核 `#19` 四路逐个 torch、用户看背面 ⇒ LED 在 **1 + 4 路**，
 `patches/0036` 收成单节点 `led-sources = <1>, <4>`（torch 200 mA / flash 600 mA / 400 ms，保守假设）。
 dtb v2 上机：`/sys/class/leds/white:flash` 一个、47 个 subdev。故意不在 ov13b10 节点写 `flash-leds`（v4l2-async 会多等一个 subdev）。
-⬜ 相机 HAL 接 `/sys/class/leds/white:flash`（`flash_strobe` / `flash_brightness` 节点都在）—— 拍照闪光与手电筒。
+✅ 相机 HAL 接 `/sys/class/leds/white:flash`（[#111](stage4-findings.md)）：手电筒（`setTorchMode`）+ 拍照闪光
+（预闪触发点灯 → 报 PRECAPTURE 几帧 → 静态照片完成才灭；AUTO 用交付帧采样亮度判"太暗"）。
+features xml 补 `android.hardware.camera` + `android.hardware.camera.flash`（SystemUI 手电筒砖的前提）。
+⬜ 装机后验：快捷设置手电筒砖出现并能开关；Aperture 后摄闪光 ON 拍一张，`led.log` 里看到亮/灭各一次。
+⬜ `kDarkLuma=50` 是启发式；真要准得让 softisp IPA 把曝光/增益写进结果元数据（上游没写，可提 patch）。
 ⬜ ESP 上还剩 `slot_cam5`（#19）与 `cam5`/`cam6`/`cam7` 三个测试条目，v0.6.1 装机验收通过后删。
 
 ---

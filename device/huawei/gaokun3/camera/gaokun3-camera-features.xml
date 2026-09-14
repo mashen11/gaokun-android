@@ -13,4 +13,11 @@
 <permissions>
     <feature name="android.hardware.camera.any" />
     <feature name="android.hardware.camera.front" />
+    <!-- 后摄（android.hardware.camera 这个名字就是"后置相机"，#106）与它的闪光灯（#111）。
+         ⚠️ 闪光灯这条不是装饰：SystemUI 的 FlashlightControllerImpl 先查
+         PackageManager.FEATURE_CAMERA_FLASH，没有它快捷设置里根本不会出现手电筒砖 ——
+         HAL 报了 FLASH_INFO_AVAILABLE=TRUE 也没用（2026-09-14 实机：mCameraId=null）。
+         ⚠️ 不声明 autofocus：本 HAL 的 AF 模式只有 OFF（定焦/未接马达）。 -->
+    <feature name="android.hardware.camera" />
+    <feature name="android.hardware.camera.flash" />
 </permissions>

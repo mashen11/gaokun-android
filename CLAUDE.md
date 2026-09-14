@@ -5,7 +5,7 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M32 — ★★★★★ camss 电源域缺陷【根因找到并修好】：`camcc-sc8280xp` 的 `camnoc_axi` / `slow_ahb` / `fast_ahb` 三个 RCG 用了普通 `clk_rcg2_ops`，关闭时不停靠 XO；camss 用完相机后 CAMNOC AXI 的时钟源指着一个已熄灭的 PLL（clk debugfs 实测 `parent=camcc_pll0_out_even`、PLL `en=0`），GDSC 掉电/上电与 CAMNOC 的握手因此永远等不到。修法 `patches/0031`（三行，照 x1e80100 口径标 shared）。内核 `#13` 上预先声明的判据全部达成（noqbuf + 完整 ×5，每次 `after-OFF` 回到 `0x00088000`）；真实形态（解钉、自然塌缩、60 秒空闲）6/6；发版形态 `#14`（0020/0022/0027/0031，无诊断）4/4。路上否掉第八条假说 `0027`（等待值——硬件复位值确实是 2/2/0xf，写对了但不是根因，保留）；4 个诊断补丁挪进 `DIAG_PATCHES`（`--with-diag` 才打）。⚠️★★ 两个自己造的坑：`kernel-apply-patches.sh` 的指纹判据把 0031 当"已应用"静默跳过（第一版 `#13` 其实是 `#12`）——**指纹只回答"在不在"，回答不了"是谁放的"**，已改成正向 `--check` 优先；`dbg_skip=14` 同时跳 CSID+VFE 触发 `vfe_flush_buffers` 空指针 panic——旋钮组合必须保住硬件依赖顺序。★ pstore 顺带揭示 #83 的"unbind 拖死整机"其实是 rebind 时 `gdsc_register()` kobject 重复初始化 panic = `patches/0022` 修的缺陷。见 [#105](docs/stage4-findings.md)。⬜ 下一步：`#14` 进默认槽并撤掉 `gaokun3-camera.rc:13` 的开机钉住；上游投稿 0031+0027。★★★★ **后摄同一夜也通了**（[#106](docs/stage4-findings.md)）：Windows 驱动包里的 `CAMS_RES_QRD.bin` 给出板级电源序列（LDO2_B 2.8V / LDO2_C 1.8V / GPIO92 门控 / 复位 GPIO7 / MCLK4），DSDT 证明 L2B 与面板 VDDI 共用、RPMh 取最大（Windows 下后摄开着时面板 VDDI 就是 2.8V）；轨亮着时扫总线发现 **它是 OV13B10（0x36）不是 S5K3L6**；上游 ov13b10 驱动加 OF 匹配 + 板级上电（`0034`）、DT 节点（`0032`）、`VIDEO_DW9714=m`→`=y`（第 15 个 =m 坑）之后：47 个 subdev、`camtest --rear` 出 2104×1560 帧、HAL 枚举 2 个相机。用户手电筒实测后摄有景物 ⇒ **`#18` + 后摄 dtb 已设为默认槽**，`#14` 留 `slot_cam4` 回落。⬜ libcamera 的 ov13b10 属性/增益模型/调优文件、EEPROM@0x50、闪光灯（PMIC 闪光模块，GPIO93 直驱不亮）。（每次开工时更新这一行）**
+**当前阶段：Stage 6 M33 — 相机收尾周（2026-09-14）：★ 电源域根因已修（[#105](docs/stage4-findings.md)，0031 RCG shared）；★ 后摄 = OV13B10 出帧、进应用（#106）；★ 闪光灯 = PM8350C 闪光模块 1+4 路（#110）并接进 HAL（#111：手电筒 + "预闪点灯到拍完"式闪光）；★ camss 容忍未绑传感器（0035，#110 两路验收）；v0.6.0 已发（相机打不开是 IPA 装错目录，#109，v0.6.1 修）；v0.6.1 带闪光灯重编中，装机验收待做。旧的 M32 全文见 [#105](docs/stage4-findings.md)。（每次开工时更新这一行）**
 
 > ## ★★★ 开工前先读：设备正常，相机可用（2026-09-13 晚）
 >
@@ -25,6 +25,15 @@
 > **在搜索范围外 10 分钟没找到，而那看起来和"内核挂死了"一模一样** ——
 > 我据此写了"硬挂死、安全阀都没触发"，还让用户去按电源键。实际上它**一直好好地
 > 跑着内核 `#5`**。★ 收窄搜索范围会把假阴性伪装成阳性结论。
+>
+> **⓪k 🔦 2026-09-14 下午：闪光灯接进相机 HAL（[#111](docs/stage4-findings.md)），v0.6.1 带它重编中。**
+> 没有同步 strobe ⇒ "闪光" = 预闪触发点灯、报几帧 PRECAPTURE 让 AGC 适应、到静态照片完成才灭（`firedPending_` 计数，
+> 别在下一个请求入队时灭——框架把预览请求紧跟着拍照请求发来）。手电筒 = `setTorchMode` 写 brightness。
+> ★★ 顺手抓到 HAL **从来没读 FMQ 里的请求设置**（框架优先走 FMQ，`AidlCamera3Device.cpp:1268`）—— 已修。
+> ★ provider 此前跑在 `u:r:init:s0`（没 file_contexts 条目），现 `hal_camera_default`；`/dev/media*`/`v4l-subdev*`
+> AOSP 没标，补成 `video_device`。★ 手电筒砖要 `FEATURE_CAMERA_FLASH`（features xml 里连后摄 `android.hardware.camera`
+> 都没声明），要装镜像才能验。模组 EEPROM（0x50，16 KiB）读出来入库 `docs/hw/`。
+> ⚠️ 本会话 `pkill -f` 自杀三次（`dmesg -w` / `camprov` / `com.android.systemui`）——一行命令里只用 `pkill -x` 或 `kill $(pidof)`。
 >
 > **⓪j ✅ 2026-09-14 中午：内核 `#19` 两路验收全过、闪光灯定案、v0.6.1 重新构建中（[#110](docs/stage4-findings.md)）。**
 > 正常 47 个 subdev / 前后摄各 12 帧；`ov13b10.fail_probe=1` 时 camss 20 s 后丢掉未绑端点、前摄照常（0035 生效）。

@@ -7747,3 +7747,74 @@ xattr 写成 `._<name>`，构建树里落了 **33 个**（`overlay/…/res/value
   `installed-files-vendor.txt` 里 2 次、全树 `Android.bp` 都不定义 ⇒ 是**被删掉的模块留在 `out/` 里的孤儿**
   （AOSP 增量构建不会回收已安装的产物）。已从 `out/.../vendor/lib64/` 删掉，v0.6.1 起不再进镜像。
   ★ 改模块名/删模块之后要顺手删 `out/` 里的旧产物，否则它们会一直"随版发行"。
+
+## #111 后摄闪光灯接进 HAL（手电筒 + 拍照闪光）；顺手抓到 HAL 一直没读 FMQ 里的请求设置；模组 EEPROM 读出来了（2026-09-14 下午）
+
+**背景**：#110 把 LED 交给内核（`/sys/class/leds/white:flash`，PM8350C 闪光模块 1+4 路），应用层还一无所知：
+HAL 报 `FLASH_INFO_AVAILABLE=FALSE`，`setTorchMode` 直接 `OPERATION_NOT_SUPPORTED`。用户在 #106 时就问过"话说闪光灯呢"。
+
+### 1. 设计：没有同步 strobe，就让灯"从预闪亮到拍完"
+
+内核给的是 torch 档（`brightness`），`flash_strobe` 有 400 ms 超时但**与传感器曝光没有任何同步**——
+libcamera 排队深度 4、软件 ISP 每帧 60–130 ms，strobe 打下去时哪一帧在曝光完全不可控。
+所以本 HAL 的"闪光"定义为：**收到 `AE_PRECAPTURE_TRIGGER_START` 时点灯，报几帧 `AE_STATE_PRECAPTURE`
+让 AGC 适应灯光，然后一路亮到那张静态照片（BLOB 流 / `CAPTURE_INTENT_STILL_CAPTURE` / `FLASH_MODE_SINGLE`）
+完成才灭**。照片在灯下曝光、AE 已收敛，不会出现"灯亮了但那帧已曝完"的错位。
+
+⚠️★ 一个差点写错的地方：灯**不能**在"下一个不要灯的请求入队时"就灭。框架把预览请求排在拍照请求
+后面**立刻**发过来（几毫秒内），那时拍照那一帧还在 libcamera 队列里没曝光。所以用 `firedPending_`
+计数在途的点灯请求，全部完成才灭（`Session.cpp` 的 `onRequestCompleted` 末尾）。
+
+`ON_AUTO_FLASH` 的"太暗"判据：软件 ISP 的 IPA **不往结果元数据里写曝光/增益**（`softisp.cpp:246-249` 只有
+Gamma/Contrast/Saturation/黑电平），所以用交付帧的采样平均亮度（每 16 行 × 16 列，`kDarkLuma = 50`）。
+AGC 会把能救的场景拉到中灰；拉不动的才是真暗。是启发式，写在代码里，改阈值一行。
+
+手电筒：`ICameraDevice::setTorchMode` 写 `brightness = max_brightness`；相机被会话占用时报 `CAMERA_IN_USE`；
+`open()` 时灯灭并经 provider 回调报 `NOT_AVAILABLE`，会话关闭报 `AVAILABLE_OFF`（Session 关闭时回调 Device，
+在 Session 的锁外调，免得两把锁交叉）。
+
+### 2. ★★ 顺手抓到的：HAL 从来没读过 FMQ 里的请求设置
+
+要解析 `AE_MODE` / `FLASH_MODE` 时发现 `processCaptureRequest` 只读 `r.settings.metadata`，而框架
+**优先把设置写进 FMQ**（`AidlCamera3Device.cpp:1268`：写成功就 `fmqSettingsSize = size`、`settings` 留空）。
+我们的 `requestQueue_` 是 1 MB 的有效队列 ⇒ 绝大多数请求在 HAL 眼里"没有设置"；结果里回显不了请求键；
+队列写满后框架才退回内联。相机能用纯属框架容错。现在两条路都收（`fmqSettingsSize > 0` 就从队列读）。
+
+### 3. 权限与域
+
+* HAL 以 `cameraserver` 跑，LED 节点 `root 0644` ⇒ `ueventd.gaokun3.rc` 给 `white:flash` 的
+  `brightness / flash_*` 0664 root camera（ueventd 按 `/sys/class/<subsystem>/<basename>` 匹配，
+  不必写 PMIC 那串真实路径）。
+* ★ `ps -AZ` 看到 provider 跑在 **`u:r:init:s0`**——它从来没有 file_contexts 条目（三个 HAL 打标签那次漏了它）。
+  现在 `hal_camera_default_exec`；AOSP 的 `hal_camera` 域放行 `video_device` / `camera_device` / dmabuf heap，
+  但 **`/dev/media*` 与 `/dev/v4l-subdev*` AOSP 根本没标**（`private/file_contexts:225` 只有 `/dev/video*`），
+  补成 `video_device`；libcamera 枚举走 sysfs，`r_dir_file(hal_camera_default, sysfs)`；LED 真实路径
+  genfscon `sysfs_leds`；日志目录 `gaokun3_camera_vendor_data_file`。`selinux_policy` 编译过、neverallow 过。
+  ⚠️ 仍 permissive；这一步的价值是让 denial 日志里剩下的才是真缺口（B1）。
+* ★ **SystemUI 的手电筒砖要 `FEATURE_CAMERA_FLASH`**：HAL 报了 `FLASH_INFO_AVAILABLE=TRUE`、重启 SystemUI，
+  `FlashlightControllerImpl` 仍 `mCameraId=null`、快捷设置里没有砖。`gaokun3-camera-features.xml` 之前只声明
+  `camera.any` + `camera.front`（连后摄 `android.hardware.camera` 都没有）。补上 `android.hardware.camera` 与
+  `android.hardware.camera.flash`；这是 `/vendor/etc/permissions` 里的文件，**要装镜像重启才生效**，
+  所以手电筒砖只能在 v0.6.1 装机验收时验。
+
+### 4. 实机（手动起新 provider，正式服务停掉）
+
+`dumpsys media.camera`：后摄 `android.flash.info.available [TRUE]`、`aeAvailableModes [1 2 3]`、
+`lens.facing [1]`（BACK）；前摄仍 FALSE / [1]。拍照闪光的观察见下面的补记。
+
+### 5. 模组 EEPROM（CCI 总线 0 的 0x50）
+
+* CCI 适配器不支持 `I2C_RDWR` 组合消息（`i2ctransfer` 报 `ioctl 707: Operation not supported`），
+  `i2cdump` 的字节模式又是 8 位地址——读出来的是"每 256 字节页各一个字节"的假象（前 64 值变、后 64 重复、
+  再往后全 0x0f）。正解是 SMBus 两步：`i2cset … <hi> <lo> b` 写指针，`i2cget`（receive byte）逐字节读。
+* **不用给传感器上电**：EEPROM 挂在与面板 VDDI 共用的 1.8 V 轨（#106），屏亮着就应答。
+* 16 KiB、前后两半不重复。头部 ASCII 模组标识 `123060401622BF02AXD702Y67000000`，随后是形状像 AWB 均值对的
+  几个 16 位数，`0x0afc-0x0e1e` 是一张平滑二维表（值域 0x56-0x65，**镜头阴影表的形状**）。
+  原始转储入库 `docs/hw/ov13b10-module-eeprom-0x50.bin`，布局说明在同目录 README。没有厂商规格不解码，
+  只当将来调 `ov13b10.yaml`（AWB 金机值 / LSC）的原料。
+
+### 6. 三次踩同一个坑
+
+`pkill -f <pattern>` 放在 adb/ssh 一行命令里，命令行本身就含那个 pattern ⇒ 把自己的 shell 杀了，后面什么都没跑：
+本会话 `dmesg -w`、`camprov`、`com.android.systemui` 各一次。第三次时正式相机服务已 `stop` 而新的没起来。
+规矩：一行命令里只用 `pkill -x` / `kill $(pidof …)` / pid 文件。已写进记忆。
