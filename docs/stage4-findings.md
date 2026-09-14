@@ -7968,3 +7968,83 @@ b) 然后 `role-switch-default-mode = "host"` + 去掉 rc 里硬写 device 的�
   然后 `start vendor.camera-provider-gaokun3` —— 不动 overlayfs、不影响下次 OTA、重启自动消失，进程身份/cgroup
   与正式服务完全一致。之前 #109、#111 用 root 手动起 provider 只验过枚举与手电筒，没验过出流，所以没撞上。
 * 新 HAL 此刻就以这个 bind mount 跑在平板上（重启即回镜像里的旧版）。
+
+## #113 触摸的 fuzz 是为 libinput 选的、Google 认证要的是登记而不是配置、以及一次文档对账（2026-09-14 晚）
+
+用户三问：整理文档、统计还剩什么、触摸驱动要优化；外加"谷歌未经认证这件事也要做"。
+
+### 1. 触摸：IC 是健康的，慢速拖动的"顿挫"来自内核 fuzz
+
+先排除硬件：`himax-spi` 绑在 `spi0.0`（`himax,hx83121a-ts`），**空闲 IRQ 122 Hz ≈ 面板 120 Hz**
+—— 这正是本仓记过的状态指纹（≈扫描率=正常、0=IC 停摆、乱=模式错乱），所以 gpio174 那一仗
+（#26 / `patches/0002`）的成果还在，IC 没退化。
+
+真问题在 `input_set_abs_params(..., fuzz = 8)`，而**驱动自己的注释写明了理由**：
+"preventing libinput from treating 10px drifts as swipes" —— 那是**桌面 Linux** 的理由。
+内核 `drivers/input/input.c` 的 `input_defuzz_abs_event()`：
+
+| 位移 |Δ| | 结果 |
+|---|---|
+| `< fuzz/2` = 4 | **返回旧值 —— 这一帧的移动整个丢掉** |
+| `< fuzz` = 8 | `(old*3 + new)/4`，只取 1/4 |
+| `< 2*fuzz` = 16 | `(old + new)/2`，只取 1/2 |
+| ≥ 16 | 原样通过 |
+
+本机 1600×2560、像素间距约 0.1 mm ⇒ **0.4 mm 以内的慢速位移完全消失、1.6 mm 以内被衰减**。
+而 Android 侧本来就有两层同样作用的东西（InputReader 的过滤 + `ViewConfiguration` 的 touch slop，
+本机约 24 px），驱动自己还带 IIR 平滑（`hx-algo.c`，`iir_enabled=1` 默认开）。**三层重复过滤。**
+
+★ 这条的方法论价值：**这个 8 不是随便填的，它有明确理由，只是那个理由属于另一个操作系统。**
+从别的平台移植驱动时，"为什么是这个值"比"值是多少"重要。
+
+**修法选型**：`touchscreen-fuzz-x/y` 是标准 DT 属性，改 DTB 就生效
+（`drivers/input/touchscreen.c:89` 实测会覆盖驱动默认值，且我们的 DT 有 `touchscreen-size-x`
+所以 `data_present` 为真、这条路是通的）—— **但每试一个值就要重启一次**，而本项目里
+**重启是最贵的资源**（失败要有人按电源键）。所以 `patches/0037` 把它做成 **0644 模块参数**：
+一次重启换来无限次实时 A/B。⚠️ **默认值仍是 8 ⇒ 补丁单独打上不改变任何行为** ——
+要的是那个旋钮，不是替用户决定手感。
+
+**第二个发现**：驱动默认 `disable_pressure=true`，于是 **`ABS_MT_TOUCH_MAJOR` / `ABS_MT_PRESSURE`
+两个轴根本没注册**。后果是 Android 拿不到触点面积 ⇒ **框架的手掌误触抑制没有输入可用**，
+压力恒为 1.0。而硬件是有数据的：`hx-algo.c` 里 `area` = 参与该触点的像素数、
+`signal_sum` = 该区域的积分信号 —— 物理意义正是 TOUCH_MAJOR 与 PRESSURE 想要的。
+⚠️ 但**别盲目打开**：`algo/pressure_enabled=0` 时驱动报的是**常数**（TOUCH_MAJOR=1、PRESSURE=4095），
+那可能比现在更糟（每个触点都成"针尖"）。要开就连 `pressure_enabled` 一起开，在设备上对比。
+
+### 2. Google 认证：要的是"登记"，不是"配置"
+
+* **"设备未经 Play 保护机制认证"的唯一正解是把本机的 Android ID 登记到
+  <https://www.google.com/android/uncertified/>** —— 免费、一次性、用户动作。我们这边能做的是
+  **把 ID 取出来**并写进用户文档。
+* ⚠️★ **网上流传的那条命令在本机查不到东西**：
+  `sqlite3 /data/data/com.google.android.gsf/databases/gservices.db "select * from main where name='android_id'"`
+  —— 本机 `com.google.android.gsf` 的 `databases/` **目录根本不存在**（只有 cache/code_cache），
+  `content query --uri content://com.google.android.gsf.gservices` 也返回 `No result found`。
+  新版 GMS（本机 `ro.com.google.gmsversion = 16_202505`）把它挪到了
+  **`/data/data/com.google.android.gms/shared_prefs/Checkin.xml`** 的 `<string name="android_id">`。
+  工具：`scripts/google/gsf-android-id.sh`（**只打印不落盘** —— 这是设备标识，本仓是公开仓）。
+* ⚠️ **边界必须说清楚，不能让用户以为"认证了就万事大吉"**：这只解决那条提示。
+  **Play Integrity 仍然过不了**，它要 bootloader 上锁 + Google 签名的系统 ——
+  而本机 UEFI 解锁正是"能装别的系统"的前提。**这是取舍，不是缺陷**，已写进 INSTALL.md。
+* ★ 顺带查出一处真实的构建缺陷：v0.6.1 的指纹是
+  `Huawei/lineage_gaokun3/gaokun3:16/BP4A.251205.006/**eng.androi**:userdebug/release-keys`，
+  而 `ro.build.version.incremental = 1789364282`。**一个构建里两个互相矛盾的 incremental。**
+  来源：AOSP 在 `BUILD_NUMBER` 未设时回落成 `eng.$(BUILD_USERNAME 前 6 字符)`，
+  而 Lineage 为了可复现把 `BUILD_USERNAME` 匿名成 `android-build` ⇒ 正好截出 `eng.androi`。
+  （一开始我怀疑是属性长度截断，实测 83 字符 < `PROP_VALUE_MAX` 92，**不是截断**。）
+  `release.sh` 现在设 `BUILD_NUMBER`，下次构建生效。
+  ⚠️ 指纹里的 `:userdebug` 与 `ro.build.type=user`（build.prop 里就是 user）也对不上 ——
+  那是 crDroid 的 spoof 只改了一半。**没动它**：改成 user 变体会连带关掉 adb root 和整套开发流程。
+
+### 3. 文档对账：又抓到一条"发版说明写了，TODO 没改"
+
+`docs/TODO.md` 的 **B2 一直写着"真温控 HAL：现在是 AOSP mock"**，而真 HAL
+（`device/huawei/gaokun3/thermal/`，读 `/sys/class/thermal`）**早在 v0.6.0 就进镜像并装机验收过**
+（"skin 44 °C 不关机"）。★ 这是 M16 那条教训的第二次复发（那次是 README 首屏写着
+"The machine cannot suspend"，而那正是当版的头号卖点）。**收尾清单里必须有一条
+"grep 一遍旧结论的关键词"**，否则每一份副本都会各自变质。
+
+顺带做的结构性整理：**`CLAUDE.md` 从 1629 行压到 282 行**，历史（前言框 + 全部 Stage 里程碑，
+1408 行）**一字未删地**搬进 `docs/project-log.md`，并新增一张「文档地图」说明哪份文件回答哪类问题、
+以及冲突时的优先级（实机 > 案卷 > CLAUDE.md > 日志）。理由很简单：CLAUDE.md 每个会话都被整篇读一遍，
+而其中约 86% 是当天用不上的历史 —— 这个成本每次都要付。

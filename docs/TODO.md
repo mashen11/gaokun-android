@@ -1,12 +1,59 @@
 # 待办清单
 
-最后更新：2026-09-12（音量用户确认可用；从构建机抢救回 08-24 整轮未入库的工作，A0 有答案了）
+最后更新：**2026-09-14 晚**（v0.6.1 已发布；触摸 fuzz 与 Google 认证立项；清掉两条过期条目）
 
 这份清单的排序原则是**用户能不能感觉到**，而不是有趣程度。每条都尽量写出
 **具体的第一步** —— 没有第一步的条目只是愿望，不是待办。
 
 状态表与公开招募项在 [`../README.md`](../README.md)；每条的证据在
-[`stage4-findings.md`](stage4-findings.md) 等案卷里。
+[`stage4-findings.md`](stage4-findings.md) 等案卷里；历史在
+[`project-log.md`](project-log.md)。
+
+---
+
+## 总表：现在还剩什么
+
+**统计（2026-09-14）**：用户能感觉到的缺口 **6** 条未完 · 工程债 **9** 条未完 ·
+等用户点头的对外动作 **3** 条 · 明确搁置 **4** 条。下面按"下一步是什么"分组，
+详情见各自的条目。
+
+### 🔴 第一梯队：用户明确点名 / 用户能直接感觉到
+
+| # | 事情 | 现在卡在哪 | 下一步（具体） |
+|---|---|---|---|
+| **T1** | **触摸手感** | fuzz=8 把 0.4 mm 以内的位移整个吃掉，那个 8 是为桌面 libinput 选的（[#113](stage4-findings.md)） | `patches/0037` 已写好（fuzz 变成可运行时改的模块参数，默认不变）。**编一次内核 + 一次重启**，之后用手指实时 A/B 调参、不再重启 |
+| **T2** | **Google 未认证** | Play 商店报"设备未经 Play 保护机制认证" | 工具与文档已就位（`scripts/google/gsf-android-id.sh` + INSTALL.md）。**剩下的是用户动作**：拿 Android ID 去 google.com/android/uncertified 登记 |
+| **T3** | **相机画质** | 暗光噪点（增益顶到 15.5x）、闪光白墙过曝 34%、偏绿（[#112](stage4-findings.md) §5） | 降噪已实测有效（高频残差 −44%），**未进镜像**。闪光还要两条：给闪光帧下发 `ExposureValue` 负补偿；libcamera AWB 统计剔除饱和像素（值得投上游） |
+| **T4** | **息屏 USB adb 断** | dwc3 在 device 模式挂起时无条件 `core_exit()`，且 gadget 总 soft disconnect ⇒ 上游没有"adb 穿越睡眠"（[#112](stage4-findings.md) §1） | `usbrole.sh` v2 已写（插着主机就不睡），**未进镜像**。原生化要先修 UCSI 的数据角色（它现在是反的） |
+| **A1** | 音频/蓝牙长期运行后死锁 | 用户报过，我们从未复现 | 取证看门狗已随镜像发布；**下次死锁把 `/data/vendor/gaokun3/hangdump-*` 整个要过来** |
+| **A5** | 恢复出厂设置不起作用 | 走 misc+recovery，而本机 recovery 起不来 | 依赖 B3（自研 EFI 加载器）或让 recovery 能启动 |
+
+### 🟡 第二梯队：工程债（不修不会坏，但会反复咬人）
+
+| # | 事情 | 为什么值得做 |
+|---|---|---|
+| **B0** | 让构建机的树**就是**本仓 checkout | **已经咬了五次**。`kernel-apply-patches.sh --verify` 是新造的精确探测器，但设备树那半边仍靠 rsync + md5 |
+| **B12** | 释放 R2 桶前要有国内可达的镜像 | GitHub 附件国内不可达（v0.6.0 当天就有用户反馈）。要用户定方案 |
+| **B14** | 息屏 USB adb 的原生化 + 复位根因 | 见 T4，这是它的长期解 |
+| **B1** | SELinux 转 enforcing | 四步已走完，剩两个**结构性**阻塞（hangdump 读 debugfs 的 neverallow 无 userdebug 豁免；smmustall 要 `/dev/mem`）。后者做掉 B6 就消失 |
+| **B5b** | UBWC：仓库写着关、设备上开了 13 天没事 | **一次测量都没有**。下版构建前删掉 `device.mk:174` 那行并带一次实测 |
+| **B6** | GPU SMMU 中断根治 | 做掉它 `smmu-nostall.sh` 整个消失，B1 的一半阻塞跟着消失 |
+| **B3** | 自研 EFI 加载器 | A5 与"默认启动项永远留救援"都依赖它 |
+| **B7** | 用轻量系统替掉救援 Ubuntu（= B4） | 24.6 GiB 换成 55 MiB squashfs，⏸ 用户暂缓 |
+| **B9** | SLPI 每 200 ms 的 handover 噪声 | 已定位到 sensors HAL 的采样节拍（HAL 一停就归零）。它**损害取证能力**（把 panic 栈挤出 pstore） |
+
+### 🟢 等用户点头的对外动作
+
+| # | 事情 |
+|---|---|
+| **D5** | [PR #3](https://github.com/vahiru/gaokun-android/pulls) 的回复（已审完，等措辞） |
+| **D6** | 把 `drm_crtc` 那个 `BUG_ON` 报到 dri-devel（**上游 master 现存缺陷，普通应用能 panic 整机**） |
+| **D7** | v0.2.0-alpha 的 R2 产物删不删（2.1 GiB，删了老发布页的链接会 404） |
+| — | `docs/upstream/` 里 **5 份补丁稿**（camcc RCG shared / GDSC 等待值 / ov13b10 OF 匹配 / ov13b10 get_selection / camss 回落 RFC）一份都没发 |
+
+### ⏸ 明确搁置（记录理由，不是忘了）
+A2 硬件视频**编码**（查明后故意关闭）· A3 自动亮度（芯片在总线上不应答，四个维度扫空）·
+A6b WPA3 issue #2（本地不复现，要报告者配合）· B4 LiveCD 图形安装器（用户暂缓）。
 
 ---
 
@@ -73,6 +120,48 @@ AOSP 默认 `config_showNavigationBar=false`
 那样要绕到 `crdroid-tree-fixes.py` 去改。
 
 ⬜ **只剩上机验证**：随下一版 ROM 一起生效，装好后让用户试一次边缘侧滑。
+
+### T1. ⬜ 触摸手感：坐标 fuzz=8 是为桌面 libinput 选的，Android 上太大（[#113](stage4-findings.md)）
+驱动给 `ABS_MT_POSITION_X/Y` 写死 `fuzz = 8`，注释原文是
+"preventing libinput from treating 10px drifts as swipes" —— **桌面 Linux 的理由**。
+内核 `input_defuzz_abs_event()` 对 fuzz=8 的处理：`|Δ| < 4` **整个丢掉**、`< 8` 只取 1/4、
+`< 16` 只取 1/2。本机 1600×2560、像素间距约 0.1 mm ⇒ **慢速拖动时 0.4 mm 以内的位移消失**。
+而 Android 侧 InputReader + `ViewConfiguration` 的 touch slop（本机约 24 px）本来就在做同一件事，
+驱动自己还带 IIR 平滑（`hx-algo.c`，默认开）——三层重复过滤。
+
+**第一步**：`patches/0037` 已写好（把 fuzz 做成 0644 模块参数，**默认仍是 8，单独打上不改行为**）。
+编一次内核 + 一次重启之后，就能用手指实时 A/B：
+`echo 0 > /sys/module/himax_hx83121a_spi/parameters/fuzz`。调定了再把值写进 DT 的
+`touchscreen-fuzz-x/y`（标准属性，`drivers/input/touchscreen.c:89` 会覆盖驱动默认值）。
+
+⬜ 第二件（同一次重启里一起验）：**驱动默认不报 `ABS_MT_TOUCH_MAJOR` / `ABS_MT_PRESSURE`**
+（`disable_pressure=true`），于是 Android 拿不到触点面积 ⇒ **框架的手掌误触抑制没有输入可用**，
+压力恒为 1.0。硬件是有数据的（`hx-algo.c` 的 `area` = 参与该触点的像素数、`signal_sum` = 积分信号）。
+用 `himax_hx83121a_spi.disable_pressure=0` 上 cmdline 试；轴注册之后 `algo/pressure_enabled`
+是**运行时可写**的，可以现场对比真值与常数。
+⚠️ 别盲目打开就发版：`pressure_enabled=0` 时驱动报的是**常数**（TOUCH_MAJOR=1、PRESSURE=4095），
+那可能比现在更糟（每个触点都成了"针尖"）。要么一起开，要么都别动。
+
+⬜ 第三件：本机**没有触摸的 IDC 文件**（`dumpsys input` 里 `ConfigurationFile: <none>`）。
+有了面积/压力轴之后才值得写，那时可以调 `touch.size.calibration` / `touch.pressure.calibration`。
+
+### T2. ⬜ Google 未认证（"设备未经 Play 保护机制认证"）
+自编 ROM 的 GMS 不在 Google 的认证设备库里。**修法是把本机的 Android ID 登记一次**，免费、一分钟。
+* 工具已就位：`bash scripts/google/gsf-android-id.sh`（⚠️ 新版 GMS **不再往
+  `com.google.android.gsf` 的 `gservices.db` 写**，网上那条 `sqlite3` 老办法在这里查不到东西；
+  真实位置是 GMS 的 `shared_prefs/Checkin.xml`）。
+* 用户文档已就位：`docs/INSTALL.md` 的 "This device isn't Play Protect certified" 一节。
+* ⬜ **剩下的是用户动作**：去 <https://www.google.com/android/uncertified/> 登记，然后
+  `pm clear com.android.vending`。⚠️ 恢复出厂后 ID 会变，要重登记。
+* ⚠️ **边界要说清楚**：这只解决"未认证"那条提示。**Play Integrity（银行类应用）仍然过不了** ——
+  它要 bootloader 上锁 + Google 签名的系统，而本机 UEFI 解锁正是"能装别的系统"的前提。
+  这是取舍，不是缺陷。
+* ⬜ 顺带修掉的一处不一致：v0.6.1 的指纹里 incremental 是 **`eng.androi`**
+  （AOSP 在 `BUILD_NUMBER` 未设时回落成 `eng.$(用户名前6字符)`，而 Lineage 把用户名匿名成
+  `android-build`），与 `ro.build.version.incremental`（构建戳）**对不上** —— 一个构建里两个
+  互相矛盾的 incremental。`release.sh` 已设 `BUILD_NUMBER`，**下次构建生效**。
+  ⚠️ 指纹里的 `:userdebug` 与 `ro.build.type=user` 也对不上，那是 crDroid 自己的 spoof 只改了一半；
+  **没动它**——改成 user 变体会连带关掉 adb root 和整套开发流程。
 
 ### A6b. ⬜ WPA3(SAE) 连上即断 —— [issue #2](https://github.com/vahiru/gaokun-android/issues/2)
 
@@ -512,7 +601,7 @@ features xml 补 `android.hardware.camera` + `android.hardware.camera.flash`（S
 源码定性：device 模式系统挂起无条件 `dwc3_core_exit()`（PHY 下电）且 gadget 总 soft disconnect ⇒
 上游 dwc3 没有"adb 穿越睡眠"。⬜ 复位根因（combo PHY exit → TZ 复位？）开放。⬜ UCSI 角色修好后可去掉脚本的 host 切换。
 
-### B13. ⬜ `install-ota-local.sh` 装前先算 ESP 空间；实验条目用完就删
+### B13. ✅ `install-ota-local.sh` 装前先算 ESP 空间（2026-09-14 已加，并已用它拦过一次）
 [#110](stage4-findings.md)：postinstall 要求"可用 + 将被覆盖的旧文件 > 56 MB"，本机被三周的实验槽位吃到
 4.5 MB 可用（47 MB 合计）⇒ v0.6.1 装到自己机器上会在 postinstall 失败，而那会被误读成"新版本有问题"。
 脚本里加一步 `df` + 列出 `<ESP>/<mid>/android/` 下非 `slot_a`/`slot_b` 的目录并提示删除。
@@ -579,13 +668,14 @@ checkout），让 `git status` 直接说话。⚠️ 换之前先做一次清单
 时连带盖住了它下面的 `wakeup23`（本该是 `sysfs_wakeup`）。`wakeupN` 编号动态，
 逐条 genfscon 不现实。**⚠️ 症状是 denial 的类型变了而不是消失 —— 别误读成进展。**
 
-### B2. 真温控 HAL
-现在是 AOSP mock（温度恒定 30.1/30.2），框架完全没有真实温控感知。
-⚠️★ **换成读 `/sys/class/thermal` 的真 HAL 时必须同时改阈值** ——
-mock 报的 skin/battery SHUTDOWN 阈值只有 **36 °C**，而
-`ThermalManagerService.shutdownIfNeeded()` 到 SHUTDOWN 会直接
-`powerManager.shutdown()`。现在因为 mock 值恒定打不到，**换真 HAL 会开机
-几分钟就自动关机**。
+### B2. ✅ 真温控 HAL —— 已随 v0.6.0 进镜像（2026-09-12 装机验收）
+`device/huawei/gaokun3/thermal/`（自研，读 `/sys/class/thermal`），`device.mk:97` 装它，
+装机验收实测"skin 44 °C 不关机"。
+⚠️★ 拆掉的那颗地雷值得留着：AOSP mock 报的 skin/battery **SHUTDOWN 阈值只有 36 °C**，
+而 `ThermalManagerService.shutdownIfNeeded()` 到 SHUTDOWN 会直接 `powerManager.shutdown()`；
+mock 值恒定才没打到。**只换 HAL 不改阈值 = 开机几分钟自动关机。**
+⚠️ 本条 2026-09-14 之前一直写着"现在是 AOSP mock"——**发版说明写了不等于 TODO 更新了**，
+这是本仓第二次栽在同一处（M16 那次是 README 首屏）。收尾清单里要有一条"grep 旧结论的关键词"。
 
 ### B3. 自研 EFI 加载器（规范化的最后一段）
 读 `misc` 的 `bootloader_control` 选槽 + 解析 Android boot 镜像 +
