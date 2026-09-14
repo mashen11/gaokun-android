@@ -26,6 +26,15 @@
 > 我据此写了"硬挂死、安全阀都没触发"，还让用户去按电源键。实际上它**一直好好地
 > 跑着内核 `#5`**。★ 收窄搜索范围会把假阴性伪装成阳性结论。
 >
+> **⓪j ✅ 2026-09-14 中午：内核 `#19` 两路验收全过、闪光灯定案、v0.6.1 重新构建中（[#110](docs/stage4-findings.md)）。**
+> 正常 47 个 subdev / 前后摄各 12 帧；`ov13b10.fail_probe=1` 时 camss 20 s 后丢掉未绑端点、前摄照常（0035 生效）。
+> **闪光灯 = PM8350C 闪光模块 1+4 路**（四路逐个 torch、用户看背面、成对对照定案），`patches/0036` 收成单节点，
+> GPIO93 那个不亮的 gpio-led 删掉；dtb v2 上机只剩一个 `white:flash`。`prebuilt-boot/` = `#19` + dtb v2。
+> ⚠️★ **早上那版 v0.6.1 候选（戳 `1789344148`）不能发**：构建机 `external/libcamera/Android.bp` 没有 #109 的修法
+> （B0 第五次），会把"相机打不开"原样再发。已覆盖、逐文件 md5 对齐后重编（`~/release-061b.log`，`--stage-only`）。
+> ⚠️ 本机 ESP 曾只剩 4.5 MB（实验槽位吃的），postinstall 要 56 MB ⇒ 装机会失败；`slot_cam`/`slot_cam4` 已删（B13）。
+> ★ 用户 12:3x 指令：**不推仓库、不发版，其余直接做**（含 TODO 里的项）。
+>
 > **⓪i ⚠️★★★ v0.6.0 正式镜像上相机打不开（[#109](docs/stage4-findings.md)）**：IPA 模块被装在 `/vendor/lib64/`，
 > libcamera 却在 `/vendor/lib64/libcamera/ipa/` 找 ⇒ 软件 ISP 建不起来 ⇒ HAL 把裸拜耳当 RGB24 喂 libyuv ⇒ SIGSEGV 循环。
 > 开发期那份是手动 push 到 overlay 的，`enable-verity` 一拆就露馅。用户机器已热修（remount + 符号链接，
@@ -44,7 +53,7 @@
 >
 > **⓪g 🚦 收尾计划上午段（2026-09-14）：两样东西编好等中午重启验收（[#108](docs/stage4-findings.md)）。**
 > 内核 `#19` 在 `slot_cam5`（`cam5` 正常 / `cam6` 带 `ov13b10.fail_probe=1`）：0035 camss 容忍未绑传感器、
-> 0034 v3 get_selection、0036 PMIC 闪光四路试接线；验收脚本 `k19test.sh normal|fallback|flash`。
+> 0034 v3 get_selection、0036 PMIC 闪光四路试接线（⇒ ⓪j 定案 1+4 路）；验收脚本 `k19test.sh normal|fallback|flash`。
 > ROM v0.6.1 候选（戳 `1789344148`）在 staging、payload 已预推：ov13b10 增益模型/属性/yaml、**Updater 清单切 GitHub**。
 > ⚠️ v0.6.1 内核仍是 #18；#19 验过再定。A8（WAN 1/20）结案：平板与 PC 一样 8 MB/s。hangdump 改读 binderfs。
 > 上游稿在 `docs/upstream/`（未发）。

@@ -7600,7 +7600,7 @@ supplicant 里 `DISCONNECTED/deauth/disassoc/beacon loss` **0 条**，BSSID 全�
 
 * **内核 `#19`**（sha `89a1d14f…`，dtb `35575770…`，`slot_cam5`，条目 `cam5`=正常 / `cam6`=`ov13b10.fail_probe=1`）：
   `patches/0035` camss 传感器等不到 20 s 就只带已绑上的传感器完成 notifier（解决"另一款后摄模组的机器前后摄一起消失"）；
-  `0034 v3` ov13b10 加 `get_selection` 与诊断开关 `fail_probe`；`0036` PMIC 闪光模块节点，四路各一个 LED、
+  `0034 v3` ov13b10 加 `get_selection` 与诊断开关 `fail_probe`；`0036`（v1）PMIC 闪光模块节点，四路各一个 LED（⇒ #110 定案为 1+4 路单节点）、
   torch 100 mA 逐路试接线（GPIO93 直驱实测不亮，Windows 的 FLSH 走 PMIC）；`LEDS_CLASS_FLASH`/`LEDS_QCOM_FLASH`=y；
   camtest 重编（退出清零 Test Pattern）。验收脚本 `/data/local/tmp/k19test.sh {normal|fallback|flash}`。
 * **ROM v0.6.1 候选**（戳 `1789344148`，包 sha `0e226cc1…`，staging 未发布，payload 已预推到平板）：
@@ -7660,3 +7660,90 @@ provider:  SIGSEGV in libyuv RGB24ToUVJRow_NEON  ← Session::onRequestCompleted
 
 ★ 教训：**overlay 里手工铺过的每一个文件，都是一条没进构建系统的依赖**；#86 那次是 `hi846.yaml`（发前抓到），
 这次是 IPA 目录（发后才抓到）。在 `adb remount` 的世界里，"能用"与"镜像里有"是两个事实。
+
+## #110 ✅ 内核 #19 两路验收全过；闪光灯接线实测定案（PMIC 1+4 路）；顺手拆掉三颗会让 v0.6.1 翻车的地雷（2026-09-14 中午）
+
+**结果先说**：内核 `#19`（0031 + 0032 + 0034 v3 + 0035 + 0036）正常启动与"后摄不在"两条路都过；
+闪光灯 LED 接在 **PM8350C 闪光模块的 1 路与 4 路**，`patches/0036` 收成单节点；dtb v2 上机通过。
+同时发现：① 构建机上的 libcamera `Android.bp` **根本没有 #109 的修法**，早上编的 v0.6.1 候选（戳 `1789344148`）
+会把同一个崩溃再发一次；② 本机 ESP 只剩 4.5 MB，v0.6.1 的 OTA 会在 postinstall **当场失败**；
+③ 我用 macOS `tar` 同步设备树，往构建树里撒了 33 个 `._*` 文件。三件都在构建前拆掉了。
+
+### 1. 内核 #19 验收（`/data/local/tmp/k19test.sh`）
+
+| 路径 | 条目 | 判据 | 实测 |
+|---|---|---|---|
+| 正常 | `cam5` | 47 个 subdev、三颗 I2C 都绑上、前后摄各 12 帧、`get_selection` 告警 0、`stuck at` 0 | **全中**；另多出 4 个 `white:flash-N`（0036 v1 的四路探针） |
+| 回落 | `cam6`（`ov13b10.fail_probe=1`） | 20 s 后 camss 丢掉未绑端点、45 个 subdev、前摄出帧、HAL 枚举 1 个 | **全中** |
+
+回落路径的 dmesg 原文（0035 的三行）：
+
+```
+qcom-camss ac5a000.camss: not all sensors bound after 20000 ms; continuing with 1 bound sensor(s)
+qcom-camss ac5a000.camss:   never bound: /soc@0/cci@ac4b000/i2c-bus@0/camera@36/port/endpoint
+qcom-camss ac5a000.camss: skipping endpoint /soc@0/camss@ac5a000/ports/port@0/endpoint@0: its sensor never bound
+```
+
+⇒ v0.6.0 发版说明里"后摄模组不对会连前摄一起消失"这条**从 v0.6.1 起不成立**：只丢后摄，等 20 秒。
+
+### 2. 闪光灯：四路逐个点，用户看背面
+
+0036 v1 给 PM8350C 闪光模块四路各建一个 LED（torch 100 mA），我逐路 `brightness=255` 1 秒，用户看机背。
+★ **观察本身是这次最费时间的环节**：前几轮的回答是"没看到 / 亮了两次不知道第几次 / 没看清"——
+平板背面朝下、一秒的闪光、还要数是第几次，这三件叠在一起对人眼是苛刻的。改成**成对对照**才收敛：
+
+| 轮次 | 点亮 | 用户 |
+|---|---|---|
+| 单路 1、2 | 各 1 s | "一次，我觉得应该是第一路" |
+| 单路 3、4 | 各 1 s | "第二次（第 4 路）" |
+| **1+4 合并，然后 2+3 合并** | 各 1 s，间隔 8 s | **"第一次亮，第二次不亮"** |
+
+⇒ LED 接在 **1 路 + 4 路**（两路并联，2/3 路空着）。这与单路结果自洽。
+`leds-qcom-flash.c:727-735` 按 `led-sources` 的个数分配通道（≤ 4 即可），两路并联是它的正常用法，
+于是 v2 收成一个 `led-0 { led-sources = <1>, <4>; }`。
+
+**电流上限是保守假设**（torch 合计 200 mA、flash 600 mA / 400 ms），不是模组手册值——手册没有；
+Windows 驱动包里那条 `IrLedCurrentMilliampere=700` 是 IR LED 的，没拿来当白光的依据。
+⚠️ 故意**不在 ov13b10 节点上写 `flash-leds`**：那会让 v4l2-async 再多等一个 subdev，正是 #81/#106 那类坑。
+相机 HAL 要用闪光灯，走 `/sys/class/leds/white:flash` 就够了（`flash_strobe` / `flash_brightness` 节点都在）。
+
+**顺带删掉 GPIO93 那个 gpio-led**（连它的 pinctrl 状态）：它实测不亮（#106），留着会在 `/sys/class/leds/`
+下出现一个与真闪光灯**同名**的 `white:flash`——按名字找 LED 的 HAL 会找错。
+
+**dtb v2 上机**（`cam7` 条目 = `#19` 内核 + v2 dtb）：`/sys/class/leds/` 只剩 PMIC 的 `white:flash`
+（`max_brightness=255`、`flash_brightness 600000/600000`、`flash_timeout 400000/400000`），
+`led-sources` 回读 `<1 4>`，47 个 subdev，camss 没触发回落，torch 两次点亮。
+★ 构建机树核对：`git show HEAD:camera.dtsi` + 0018 + 0032 + 0036 **逐字节等于**工作区文件（md5 `48e878b97276`）。
+⚠️ `kernel-apply-patches.sh --check` 在这棵已打满的树上把 **0018 报成失败**：0032 改写了 0018 删掉的那个位置，
+反向 check 自然对不上。这是检查方式在"叠加补丁"上的局限，不是树不对——上面那条链式核对才是判据。
+
+### 3. 三颗地雷（全在 v0.6.1 的发版路径上）
+
+**① 构建机的 libcamera `Android.bp` 没有 #109 的修法。** `grep relative_install_path ~/crdroid/external/libcamera/Android.bp`
+= 0。我在 #109 里改的是**本仓** `patches/libcamera/libcamera-Android.bp`，而构建机 `external/libcamera/` 是当年
+手工铺的副本，没人把改动搬过去。早上那版 v0.6.1 候选（戳 `1789344148`，staging 里）**会把相机打不开原样再发一次**。
+这是 TODO B0（"构建机的设备树就是本仓的 checkout"）咬的第五次，而且这次咬的不是设备树，是 `external/` 下的第三方树
+——B0 的范围要扩到"本仓 `patches/` 里凡是给构建机某棵树用的文件"。已用本仓副本覆盖（diff 只差那 5 行）。
+
+**② 本机 ESP 只剩 4.5 MB。** `gaokun3-ota-postinstall.sh` 要求"可用 + 将被覆盖的旧文件 > 56 MB"，本机是
+4.5 + 42.8 = 47 MB ⇒ v0.6.1 装到我自己机器上会在 postinstall **失败**（与 #86 那个"长得像成功"相反，这次是真失败，
+但会被误读成新版本有问题）。元凶是三周实验留下的 `slot_cam`（#14 无后摄 dtb）与 `slot_cam4`（#14 回落副本），
+各 15.4 MB。已删（连 `cam` / `cam4` / `camdtb` 三个条目），ESP 回到 34 MB 可用。★ 实验残留和发版路径共用同一个
+300 MiB 的分区——**每次实验条目用完就删**，别攒；`install-ota-local.sh` 装前应先算这笔账（TODO B13）。
+
+**③ macOS `tar` 的 AppleDouble 文件。** 我这回用 `tar -czf … -T <git ls-files>` 同步设备树，bsdtar 把每个文件的
+xattr 写成 `._<name>`，构建树里落了 **33 个**（`overlay/…/res/values/._strings.xml`、`camera/._Android.bp`……），
+`gk3-repo` 里又 48 个。`res/values/` 下的 `._strings.xml` 会被 aapt2 当资源文件编译——多半直接让构建失败，
+即便没失败也是把垃圾编进镜像。全部删掉、逐文件 md5 与本仓 HEAD 对齐后才开的构建。
+★ 同一会话早上我用的是 `rsync -a --exclude '._*'`，那才是对的；**换工具就把上一个工具学到的排除项丢了。**
+正解写死：同步一律 `rsync --exclude '._*' --exclude '.DS_Store'`，非用 tar 不可就 `COPYFILE_DISABLE=1`。
+
+### 4. 收尾
+
+* 本仓：`patches/0036` v2（旧的四路探针版删除）、0035/0036 进 `KPATCHES`、`LEDS_CLASS_FLASH`/`LEDS_QCOM_FLASH` 进配方断言。
+* `prebuilt-boot/` = `#19`（`89a1d14f…`，15 593 984 字节）+ dtb v2（`fedd3fb6…`，173 155 字节），本地与构建机一致。
+* v0.6.1 重新构建中（`~/release-061b.log`，`--stage-only`）。装机验收清单在 #109 末尾，**必须含一次经 HAL 的真实出流**。
+* #109 里"来源待查"的那对旧库 `libcamera_gaokun3.so` / `libcamera_base_gaokun3.so`：`module-info.json` 里 **0** 次、
+  `installed-files-vendor.txt` 里 2 次、全树 `Android.bp` 都不定义 ⇒ 是**被删掉的模块留在 `out/` 里的孤儿**
+  （AOSP 增量构建不会回收已安装的产物）。已从 `out/.../vendor/lib64/` 删掉，v0.6.1 起不再进镜像。
+  ★ 改模块名/删模块之后要顺手删 `out/` 里的旧产物，否则它们会一直"随版发行"。

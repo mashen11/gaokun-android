@@ -440,19 +440,18 @@ hi846 的完整控件表在 [#81](stage4-findings.md) 第六节。
 **后摄** ★★★★ **2026-09-14 通了，而且不是 S5K3L6 —— 是 OV13B10**（[#106](stage4-findings.md)）。
 板级电源序列来自华为 Windows 驱动包的 `CAMS_RES_QRD.bin`；L2B 与面板 VDDI 共用、RPMh 取最大（Windows 同款行为）；
 轨亮着时扫总线 0x36/0x50 应答。`patches/0032`（DT）+ `0034`（ov13b10 OF 匹配 + 板级上电）+ `VIDEO_DW9714=y`
-之后：47 个 subdev、`camtest --rear` 出 2104×1560 帧、HAL 枚举 2 个相机。内核 `#18` 在 `slot_cam5`。
+之后：47 个 subdev、`camtest --rear` 出 2104×1560 帧、HAL 枚举 2 个相机。内核 `#19`（+0035 回落 +0036 闪光）在 `slot_cam5`，两路验收全过（[#110](stage4-findings.md)）。
 ⬜ 应用层实测；⬜ libcamera：`camera_sensor_properties` 加 ov13b10、增益模型 helper、`ov13b10.yaml`；
 ⬜ 上游 `ov13b10.c` 补 `get_selection`；⬜ 读 EEPROM@0x50（模组标定）；⬜ `rotation` FIXME；
-⚠️ 稳健性：任一传感器没绑上前后摄一起消失（v7.2 camss 不查端点可用性）。
-✅ 2026-09-14 收尾：用户手电筒照镜头看到景物/亮度变化 ⇒ **`#18` + 后摄 dtb 已设为默认槽**，`#14` 留 `slot_cam4` 回落，
-prebuilt-boot 同步。
-⬜ **闪光灯**：Windows 的 `\_SB.FLSH` 资源块为空（无 GPIO/I2C），驱动包只有 `IrLedCurrentMilliampere=700`
-⇒ 走 **PMIC 闪光模块**（`pmc8280c` = PM8350C，主线 `leds-qcom-flash` 支持 `qcom,pm8350c-flash-led`）。
-实测 GPIO93（现役 DT 里的 `white:flash` GPIO LED）打脉冲**不亮**（用户确认）。要做：`LEDS_CLASS_FLASH` +
-`LEDS_QCOM_FLASH` =y、`pmc8280c` 下加 `led-controller@ee00` 节点、**`led-sources` 通道未知**（PM8350C 有 4 路，
-得低电流逐路试）、再把 `flash-leds` 接到 ov13b10 节点。
-
-测试条目 `…-cam.conf` + `android/slot_cam/` 留在 ESP 上供继续实验（15.7 MB）。
+✅ 稳健性：`patches/0035` —— 某颗传感器 20 s 没绑上就只带绑上的完成 notifier；`ov13b10.fail_probe=1` 实测前摄照常（45 个 subdev，[#110](stage4-findings.md)）。
+✅ 2026-09-14 收尾：用户手电筒照镜头看到景物/亮度变化 ⇒ **`#18` + 后摄 dtb 已设为默认槽**；prebuilt-boot 已是 `#19` + dtb v2。
+`slot_cam` / `slot_cam4`（#14 时代）已从 ESP 删除（它们把 ESP 吃到只剩 4.5 MB，会让 postinstall 失败，#110）。
+✅ **闪光灯**（[#110](stage4-findings.md)）：Windows 的 `\_SB.FLSH` 资源块为空 ⇒ PMIC 闪光模块（`pmc8280c` = PM8350C，
+主线 `leds-qcom-flash`）；GPIO93 实测不亮。内核 `#19` 四路逐个 torch、用户看背面 ⇒ LED 在 **1 + 4 路**，
+`patches/0036` 收成单节点 `led-sources = <1>, <4>`（torch 200 mA / flash 600 mA / 400 ms，保守假设）。
+dtb v2 上机：`/sys/class/leds/white:flash` 一个、47 个 subdev。故意不在 ov13b10 节点写 `flash-leds`（v4l2-async 会多等一个 subdev）。
+⬜ 相机 HAL 接 `/sys/class/leds/white:flash`（`flash_strobe` / `flash_brightness` 节点都在）—— 拍照闪光与手电筒。
+⬜ ESP 上还剩 `slot_cam5`（#19）与 `cam5`/`cam6`/`cam7` 三个测试条目，v0.6.1 装机验收通过后删。
 
 ---
 
@@ -493,7 +492,12 @@ prebuilt-boot 同步。
 出路：同一 Cloudflare 域名（`ota.072172.xyz`）下建 Worker 反代 GitHub Release 附件与仓库里的清单，
 桶只留存储为零的转发层；或干脆保留桶（成本很低：出站免费）。**要用户定**，且改完要在国内网络实测下载。
 
-### B0. ⚠️★★★ 让构建机的设备树【就是本仓的 checkout】—— 这个坑已经咬了四次
+### B13. ⬜ `install-ota-local.sh` 装前先算 ESP 空间；实验条目用完就删
+[#110](stage4-findings.md)：postinstall 要求"可用 + 将被覆盖的旧文件 > 56 MB"，本机被三周的实验槽位吃到
+4.5 MB 可用（47 MB 合计）⇒ v0.6.1 装到自己机器上会在 postinstall 失败，而那会被误读成"新版本有问题"。
+脚本里加一步 `df` + 列出 `<ESP>/<mid>/android/` 下非 `slot_a`/`slot_b` 的目录并提示删除。
+
+### B0. ⚠️★★★ 让构建机的设备树【就是本仓的 checkout】—— 这个坑已经咬了五次
 
 **现状**：`~/crdroid/device/huawei/gaokun3` 是一个**普通目录**，不是 git
 checkout，与本仓之间靠人手拷来拷去。于是它必然漂，而且是**双向**漂。
@@ -506,6 +510,12 @@ checkout，与本仓之间靠人手拷来拷去。于是它必然漂，而且是
 4. [#82](stage4-findings.md)：**08-24 一整轮工作**（温控 HAL / 触摸模式 /
    HEVC CSD / 导航栏 / Vulkan 1.3）只活在构建机 ——
    而且**差点被我自己覆盖掉**，靠 M5 那条"先比清单"才拦住
+5. [#110](stage4-findings.md)：#109 的修法（libcamera `Android.bp` 加 `relative_install_path`）
+   改在本仓 `patches/libcamera/`，**构建机的 `external/libcamera/Android.bp` 没跟着变**，
+   早上那版 v0.6.1 候选会把"相机打不开"原样再发一次。⇒ B0 的范围不止设备树：
+   **本仓 `patches/` 里凡是给构建机某棵树用的文件**（libcamera 的 bp、mesa、内核）都算。
+   ⚠️ 同一天还差点用 macOS `tar` 把 33 个 `._*` 文件同步进构建树（bsdtar 的 AppleDouble），
+   同步一律 `rsync --exclude '._*' --exclude '.DS_Store'`。
 
 ⇒ 缓解措施已有（`kernel-apply-patches.sh`、`crdroid-tree-fixes.py` 12 条、
 `/proc/config.gz` 对账、全树 `git status` 普查），但**它们都是事后补救**。
