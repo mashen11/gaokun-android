@@ -8011,6 +8011,15 @@ b) 然后 `role-switch-default-mode = "host"` + 去掉 rc 里硬写 device 的�
 ⚠️ 但**别盲目打开**：`algo/pressure_enabled=0` 时驱动报的是**常数**（TOUCH_MAJOR=1、PRESSURE=4095），
 那可能比现在更糟（每个触点都成"针尖"）。要开就连 `pressure_enabled` 一起开，在设备上对比。
 
+**构建状态（2026-09-14 晚）**：`patches/0037` 在构建机上干净打进 `~/gk3-kernel`，
+单文件编译零告警，全内核编出 **`#20`**（`vmlinuz.efi` sha `cf203b62…`，15 589 888 字节）。
+★ 顺带一条交叉验证：**编出来的 DTB 与已发布的 v0.6.1 那份逐字节相同**（`fedd3fb6…`）——
+0037 只动驱动不动设备树，本来就该如此；对不上反而说明我改错了地方。
+`kernel-apply-patches.sh --verify` 在打完之后跑过：**30 个文件全部与配方一致**（比上次多的那个就是 himax 驱动）。
+⬜ **只差一次重启**：把 `#20` 放进一个测试槽 + 写 oneshot 条目，起来之后就能对着手指实时调
+`/sys/module/himax_hx83121a_spi/parameters/fuzz`。⚠️ 重启要用户在场（本仓纪律）。
+⚠️ 设备 2026-09-14 傍晚起 USB 与 TCP 两条路都掉线了（全网段扫 5555 无结果），所以连部署都还没做。
+
 ### 2. Google 认证：要的是"登记"，不是"配置"
 
 * **"设备未经 Play 保护机制认证"的唯一正解是把本机的 Android ID 登记到

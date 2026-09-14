@@ -21,7 +21,7 @@
 
 | # | 事情 | 现在卡在哪 | 下一步（具体） |
 |---|---|---|---|
-| **T1** | **触摸手感** | fuzz=8 把 0.4 mm 以内的位移整个吃掉，那个 8 是为桌面 libinput 选的（[#113](stage4-findings.md)） | `patches/0037` 已写好（fuzz 变成可运行时改的模块参数，默认不变）。**编一次内核 + 一次重启**，之后用手指实时 A/B 调参、不再重启 |
+| **T1** | **触摸手感** | fuzz=8 把 0.4 mm 以内的位移整个吃掉，那个 8 是为桌面 libinput 选的（[#113](stage4-findings.md)） | ✅ `patches/0037` 已写、已编（内核 **`#20`**，sha `cf203b62…`，零告警）。**只差一次重启** —— 起来后对着手指实时调 `/sys/module/himax_hx83121a_spi/parameters/fuzz`，不再需要重启 |
 | **T2** | **Google 未认证** | Play 商店报"设备未经 Play 保护机制认证" | 工具与文档已就位（`scripts/google/gsf-android-id.sh` + INSTALL.md）。**剩下的是用户动作**：拿 Android ID 去 google.com/android/uncertified 登记 |
 | **T3** | **相机画质** | 暗光噪点（增益顶到 15.5x）、闪光白墙过曝 34%、偏绿（[#112](stage4-findings.md) §5） | 降噪已实测有效（高频残差 −44%），**未进镜像**。闪光还要两条：给闪光帧下发 `ExposureValue` 负补偿；libcamera AWB 统计剔除饱和像素（值得投上游） |
 | **T4** | **息屏 USB adb 断** | dwc3 在 device 模式挂起时无条件 `core_exit()`，且 gadget 总 soft disconnect ⇒ 上游没有"adb 穿越睡眠"（[#112](stage4-findings.md) §1） | `usbrole.sh` v2 已写（插着主机就不睡），**未进镜像**。原生化要先修 UCSI 的数据角色（它现在是反的） |
@@ -129,8 +129,10 @@ AOSP 默认 `config_showNavigationBar=false`
 而 Android 侧 InputReader + `ViewConfiguration` 的 touch slop（本机约 24 px）本来就在做同一件事，
 驱动自己还带 IIR 平滑（`hx-algo.c`，默认开）——三层重复过滤。
 
-**第一步**：`patches/0037` 已写好（把 fuzz 做成 0644 模块参数，**默认仍是 8，单独打上不改行为**）。
-编一次内核 + 一次重启之后，就能用手指实时 A/B：
+**第一步**：✅ `patches/0037` 已写好（把 fuzz 做成 0644 模块参数，**默认仍是 8，单独打上不改行为**），
+并已在构建机上编出内核 **`#20`**（`cf203b62…`，单文件零告警，`--verify` 30/30 一致，
+DTB 与 v0.6.1 逐字节相同 = 只动了驱动）。产物在本机 scratchpad 的 `k20/vmlinuz.efi`。
+**只差一次重启**（要用户在场）。起来之后就能用手指实时 A/B：
 `echo 0 > /sys/module/himax_hx83121a_spi/parameters/fuzz`。调定了再把值写进 DT 的
 `touchscreen-fuzz-x/y`（标准属性，`drivers/input/touchscreen.c:89` 会覆盖驱动默认值）。
 
