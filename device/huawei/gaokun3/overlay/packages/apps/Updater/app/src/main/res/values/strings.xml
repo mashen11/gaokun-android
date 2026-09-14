@@ -41,7 +41,10 @@
       the manifest committed in this repository. Keeping the placeholder rather
       than hardcoding the filename means a second device would work unchanged.
     -->
-    <string name="updater_server_url" translatable="false">https://ota.072172.xyz/ota/{device}.json</string>
+    <!-- 2026-09-14 起清单托管在 GitHub 仓库（raw.githubusercontent 直接 200，无重定向，
+         Updater 抓清单的客户端 followRedirects(false) 能过）；下载地址在清单里指向 GitHub Release 附件
+         （下载客户端跟随重定向）。R2 桶（ota.072172.xyz）此后可释放。-->
+    <string name="updater_server_url" translatable="false">https://raw.githubusercontent.com/vahiru/gaokun-android/main/ota/{device}.json</string>
 
     <!--
       The stock strings point at crdroid.net and SourceForge, which have never

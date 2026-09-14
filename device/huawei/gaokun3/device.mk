@@ -287,6 +287,7 @@ PRODUCT_PACKAGES += \
 PRODUCT_COPY_FILES += \
     $(LOCAL_PATH)/camera/gaokun3-camera-features.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/gaokun3-camera-features.xml \
     $(LOCAL_PATH)/camera/ipa-data/softisp/hi846.yaml:$(TARGET_COPY_OUT_VENDOR)/etc/libcamera/ipa/softisp/hi846.yaml \
+    $(LOCAL_PATH)/camera/ipa-data/softisp/ov13b10.yaml:$(TARGET_COPY_OUT_VENDOR)/etc/libcamera/ipa/softisp/ov13b10.yaml \
     $(LOCAL_PATH)/camera/ipa-data/softisp/uncalibrated.yaml:$(TARGET_COPY_OUT_VENDOR)/etc/libcamera/ipa/softisp/uncalibrated.yaml
 
 # ⚠️★ 软件 ISP 的 IPA 【必须】能读到调优文件，否则 IPASoftIsp::init() 直接返回
