@@ -2,6 +2,8 @@
 #include "Provider.h"
 #include "Device.h"
 
+#include <algorithm>
+
 #include <aidl/android/hardware/camera/common/CameraDeviceStatus.h>
 #include <aidl/android/hardware/camera/common/Status.h>
 #include <aidl/android/hardware/camera/common/TorchModeStatus.h>
@@ -9,6 +11,8 @@
 #include <aidl/android/hardware/camera/device/ICameraDevice.h>
 #include <aidl/android/hardware/camera/provider/ICameraProviderCallback.h>
 #include <log/log.h>
+
+#include <libcamera/property_ids.h>
 
 using ::aidl::android::hardware::camera::common::Status;
 using ::aidl::android::hardware::camera::common::TorchModeStatus;
@@ -46,6 +50,24 @@ bool Provider::init()
 
 	auto cams = cm_->cameras();
 	ALOGI("libcamera 发现 %zu 个相机", cams.size());
+	/*
+	 * ★ 编号要【确定】：libcamera 的枚举顺序随 media 设备出现的先后而变，2026-09-14 同一台机器
+	 *   两次开机后摄一次是 internal/1、一次是 internal/0。Android 的约定是 ID 0 = 后摄
+	 *   （很多应用直接 open("0") 当后摄），而且框架按 ID 记每个相机的设置。
+	 *   这里按 Location 排：Back 在前，其余按 libcamera id 字符串排，与开机顺序无关。
+	 */
+	std::sort(cams.begin(), cams.end(),
+		  [](const std::shared_ptr<libcamera::Camera> &a,
+		     const std::shared_ptr<libcamera::Camera> &b) {
+			  auto loc = [](const std::shared_ptr<libcamera::Camera> &c) {
+				  auto l = c->properties().get(libcamera::properties::Location);
+				  return l && *l == libcamera::properties::CameraLocationBack ? 0 : 1;
+			  };
+			  const int la = loc(a), lb = loc(b);
+			  if (la != lb)
+				  return la < lb;
+			  return a->id() < b->id();
+		  });
 	int idx = 0;
 	for (const auto &c : cams) {
 		std::string name = std::string("device@") + kDeviceVersion +
