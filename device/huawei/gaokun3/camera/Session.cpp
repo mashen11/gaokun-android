@@ -225,6 +225,20 @@ ndk::ScopedAStatus Session::configureStreams(const StreamConfiguration &cfg,
 		out->push_back(hs);
 	}
 
+	/*
+	 * ★ 2026-09-14（#109）：libcamera 若没能建起软件 ISP（IPA 模块找不到、调优文件缺失……），
+	 *   simple 流水线会"disabling software debayering"，然后把【裸拜耳】当成配置结果交回来；
+	 *   下面的 deliver() 把它当 RGB24 喂 libyuv，越界读 ⇒ provider SIGSEGV 循环重启，
+	 *   应用只看到"无法连接相机"。v0.6.0 正式镜像就是这样死的（IPA 装错目录）。
+	 *   这里把它变成一条能读懂的错误。
+	 */
+	if (sc.pixelFormat != libcamera::formats::RGB888) {
+		ALOGE("libcamera 配置出来的不是 RGB888 而是 %s —— 软件 ISP 没建起来？"
+		      "看 libcamera.log 里有没有 'No IPA found' / 'Creating IPA for software ISP failed'",
+		      sc.pixelFormat.toString().c_str());
+		return err(Status::INTERNAL_ERROR);
+	}
+
 	ALOGI("流已配置：%zu 路，libcamera 源 %dx%d 输出 %s",
 	      halStreams_.size(), srcWidth_, srcHeight_,
 	      sc.pixelFormat.toString().c_str());
@@ -675,6 +689,12 @@ void Session::onRequestCompleted(libcamera::Request *req)
 			rgb = static_cast<const uint8_t *>(srcMap) + planes[0].offset;
 		else
 			ALOGE("mmap libcamera 帧失败: %s", strerror(errno));
+		/* 第二道保险（#109）：帧不够 RGB24 的尺寸就整帧报 ERROR_BUFFER，绝不越界读。 */
+		if (rgb && planes[0].length < static_cast<size_t>(srcWidth_) * srcHeight_ * 3) {
+			ALOGE("libcamera 帧只有 %zu 字节，不够 %dx%d 的 RGB24 —— 丢弃这一帧",
+			      static_cast<size_t>(planes[0].length), srcWidth_, srcHeight_);
+			rgb = nullptr;
+		}
 	}
 
 	/* ── 顺序要求：先 shutter，后结果 ── */
