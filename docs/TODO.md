@@ -457,7 +457,7 @@ features xml 补 `android.hardware.camera` + `android.hardware.camera.flash`（S
 ⬜ Aperture 后摄闪光 ON 拍一张，看 LED 亮/灭各一次（要解锁，等用户在）。
 ⬜ 手电筒亮度档位：HAL 声明 `FLASH_INFO_STRENGTH_MAXIMUM_LEVEL`/`DEFAULT_LEVEL` 并实现 `turnOnTorchWithStrengthLevel`
 （brightness 0..255 线性映射即可），SystemUI 的 `flashlight_strength` 已开、砖会给滑杆。
-✅ 相机 ID 稳定化（后摄 = 0）在 `Provider.cpp`，随下一次构建进镜像。
+✅ 相机 ID 稳定化（后摄 = 0）：`release-061d`（戳 1789364282）装机实测 `internal/0` = BACK。
 ⬜ `kDarkLuma=50` 是启发式；真要准得让 softisp IPA 把曝光/增益写进结果元数据（上游没写，可提 patch）。
 ⬜ ESP 上还剩 `slot_cam5`（#19）与 `cam5`/`cam6`/`cam7` 三个测试条目，v0.6.1 装机验收通过后删。
 

@@ -29,7 +29,9 @@
 > **⓪l ✅ 2026-09-14 13:26：v0.6.1（戳 `1789362233`）已装机验收通过（[#111](docs/stage4-findings.md) §6），【未发布】。**
 > `#19` / `_a` / IPA 目录对 / provider 在 `hal_camera_default` 域 0 denial / 后摄 flash TRUE / **快捷设置手电筒砖实测开关 LED**。
 > ⬜ 应用内拍照闪光要解锁，等用户。⬜ 发布（R2 + GitHub）要用户点头。ESP 实验槽位全清（50 MB 可用）。
-> ★ 又编一版 `release-061d`（只多"相机 ID 按 Location 排、后摄=0"），验过就用它发。
+> ★ 第二版 `release-061d`（戳 **`1789364282`**，只多"相机 ID 按 Location 排、后摄=0"）已装到 `_b` 验收通过（14:07），
+> **这一版是待发布候选**：staging 在 R2 `staging/crDroidAndroid-16.0-20260914-gaokun3-v12.11/`，发版说明 `docs/relnotes/v0.6.1-alpha.md`。
+> 发布 = 构建机开机后 `release.sh --no-build`（清单）+ `gh release create v0.6.1-alpha`（附件）—— **等用户点头**。构建机已 deallocate。
 > ⚠️ `sysui_qs_tiles` 运行时改不动（SystemUI 毫秒级覆盖回去），要在它重启的窗口里写。
 >
 > **⓪k 🔦 2026-09-14 下午：闪光灯接进相机 HAL（[#111](docs/stage4-findings.md)），v0.6.1 带它重编中。**

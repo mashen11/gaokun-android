@@ -7853,6 +7853,15 @@ AGC 会把能救的场景拉到中灰；拉不动的才是真暗。是启发式�
   随 media 设备出现先后而变。Android 约定 ID 0 = 后摄，很多应用直接 `open("0")`，框架也按 ID 记每相机设置。
   `Provider.cpp` 现在按 `Location` 排（Back 在前，再按 libcamera id），进 v0.6.1 的下一次构建（`release-061d`）。
 
+**补记（14:07）—— 第二版 `release-061d`（戳 `1789364282`，只多"相机按 Location 排"）装到 `_b` 验收通过**：
+`internal/0` = **BACK**、`internal/1` = FRONT，flash TRUE 落在 0 号；手电筒砖再测 255 / 0；provider 域、IPA 目录、
+0 denial、0 crash 同上；slot1 marked successful。**这一版是待发布的候选**（两个槽现在都是 v0.6.1，`_a` 是 `1789362233`）。
+
+⚠️★ 装这一版时我自己制造了一个事故：`install-ota-local.sh` 用 `/mnt/esp` 当挂载点，我在另一个 adb shell 里
+看进度时顺手 `mount`/`umount` 了同一个路径 ⇒ 脚本第 4 步看到空目录、报"ESP 上没有 -android-a.conf"而停手
+（停手是对的），**但那时 boot_control 已把 `default` 改成了新槽**，安全网没做上——手工掰回 `android-a` 再 oneshot。
+脚本的挂载点已改成私有名字 `/mnt/gaokun3_ota_install`。★ 共享的可变状态要么私有、要么加锁；"顺手看一眼"也算写。
+
 ### 7. 三次踩同一个坑
 
 `pkill -f <pattern>` 放在 adb/ssh 一行命令里，命令行本身就含那个 pattern ⇒ 把自己的 shell 杀了，后面什么都没跑：
