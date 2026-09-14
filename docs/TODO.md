@@ -147,7 +147,29 @@ Z8 孤立尖峰过滤实际从没生效（只毙掉八邻域和 <25 的尖峰）
 已做成可调旋钮 `iso_nbr_ratio_q8` / `edge_min_area`。⚠️ 目前**没有证据**说用户的幽灵走这两条路 ——
 留作幽灵真在边缘复现时的工具。
 
-#### T1c. ⬜ fuzz 与触点面积（原 T1，要一次重启）
+#### T1c. 🟡 fuzz 与触点面积 —— **全部备好了，只差一次重启**（要用户在场）
+已在 ESP 上就位（**default 没动、原内核原封不动**）：
+
+* `slot_b/Image-k21`（sha `6b87401d…`）与条目 `…-android-b-k21.conf`，
+  复用 slot_b 的 ramdisk/dtb，只多占 15.6 MB。
+* 那个条目的 cmdline 里加了 `himax_hx83121a_spi.disable_pressure=0`，
+  好让**同一次重启**把 fuzz 与触点面积一起验掉。
+
+要启动它：`bash scripts/boot-oneshot.sh <MID>-android-b-k21.conf` 然后重启（⚠️ 征得同意）。
+起来之后（都不再需要重启）：
+
+```sh
+echo 0 > /sys/module/himax_hx83121a_spi/parameters/fuzz    # 对着手指实时 A/B
+echo 1 > /sys/bus/spi/devices/spi0.0/algo/pressure_enabled  # ★ 先开这个再看手感
+```
+
+⚠️ `pressure_enabled=0` 时驱动报的是**常数**（TOUCH_MAJOR=1、PRESSURE=4095），
+每个触点都成了"针尖"，可能比现在更糟 —— 开了 `disable_pressure=0` 就**必须**一起把
+`pressure_enabled` 打开。
+⚠️ **验完把 `Image-k21` 与那个条目删掉**：ESP 现在只剩 **35 MB**，而 OTA 的 postinstall
+要 56 MB（B13）。`install-ota-local.sh` 的预检会拦住，但别等它拦。
+
+原 T1 正文如下。
 驱动给 `ABS_MT_POSITION_X/Y` 写死 `fuzz = 8`，注释原文是
 "preventing libinput from treating 10px drifts as swipes" —— **桌面 Linux 的理由**。
 内核 `input_defuzz_abs_event()` 对 fuzz=8 的处理：`|Δ| < 4` **整个丢掉**、`< 8` 只取 1/4、
