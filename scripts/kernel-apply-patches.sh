@@ -9,8 +9,16 @@
 # 用法：
 #   bash scripts/kernel-apply-patches.sh /path/to/linux
 #   bash scripts/kernel-apply-patches.sh /path/to/linux --check   # 只检查，不改动
+#   bash scripts/kernel-apply-patches.sh /path/to/linux --verify  # ★ 精确核对：从 HEAD 起临时 worktree
+#                                                                 #   按本表打满，逐文件与真实树比 md5
 #
 # 幂等：已经打上的补丁会被跳过（用反向 --check 判定），所以可以反复跑。
+#
+# ⚠️★ --check 在【已经打满】的树上有一个已知盲区（#110）：叠加补丁里靠前的那个
+#    （如 0018 删掉后摄节点、0032 又在同一位置写回）反向 --check 对不上，会被报成"打不上"，
+#    而树其实是对的。--verify 没有这个问题：它不逐个判定，而是把整条链在干净 worktree 上重放，
+#    然后问"每个被补丁碰过的文件，真实树里的与重放出来的是否逐字节相同"。
+#    这也是 TODO B0（构建机的树 ≠ 本仓配方）唯一可靠的探测器。
 set -uo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -42,7 +50,10 @@ KPATCHES=(
     0002-arm64-dts-gaokun3-drive-ts-mode-gpio174-low.patch
     0007-bpf-inode-label-bpffs-lazily-for-android-genfscon.patch
     0009-arm64-dts-sc8280xp-add-cpu-cooling-maps.patch
-    0011-arm64-dts-gaokun3-enable-venus.patch
+    # ❌ 0011（gaokun3.dts 里 &venus { firmware-name; status = "okay"; }）故意【不列】：
+    #    upstream-venus/0020 加的是【逐字相同】的块、同一位置，而且两者的上下文在打了对方之后
+    #    仍然匹配 ⇒ 依次打会得到【两份】&venus 块（dtc 会合并、DTB 不变，所以谁都没发现）。
+    #    2026-09-14 --verify 第一次跑就抓到：构建机树只有一份、重放出来两份。文件留作案卷。
     0012-arm64-dts-gaokun3-usb0-otg-for-usb-adb.patch
     0013-drm-crtc-drop-racy-BUG_ON-in-fence_to_crtc.patch
     0014-remoteproc-qcom-ratelimit-repeat-handover-error.patch
@@ -183,6 +194,47 @@ already_applied() {
     [ "$n" -gt 0 ] || return 1
     return 0
 }
+
+# ── --verify：干净 worktree 重放整条链，再与真实树逐文件比 ──
+if [ "$MODE" = "--verify" ]; then
+    WT=$(mktemp -d "${TMPDIR:-/tmp}/kap-verify.XXXXXX") && rmdir "$WT"
+    git -C "$TREE" worktree add --detach -q "$WT" HEAD || { echo "✗ 建不了临时 worktree" >&2; exit 2; }
+    trap 'git -C "$TREE" worktree remove --force "$WT" 2>/dev/null' EXIT
+    echo "内核树: $TREE（HEAD $(git -C "$TREE" rev-parse --short HEAD)）"
+    echo "重放到: $WT"
+    fails=0; fuzzed=0
+    for p in "${UPATCHES[@]}" "${KPATCHES[@]}"; do
+        f="$REPO/patches/$p"
+        [ -f "$f" ] || { echo "✗ 缺文件 $p"; fails=$((fails + 1)); continue; }
+        if git -C "$WT" apply "$f" 2>/dev/null; then
+            :
+        elif patch -p1 -d "$WT" -s --fuzz=3 < "$f" >/dev/null 2>&1; then
+            echo "  ⚠️ 用了 fuzz=3  $p"; fuzzed=$((fuzzed + 1))
+        else
+            echo "✗ 干净树上打不上  $p"; fails=$((fails + 1))
+        fi
+    done
+    # 被任何补丁碰过的文件，逐个比
+    files=$(for p in "${UPATCHES[@]}" "${KPATCHES[@]}"; do
+                grep -hE '^\+\+\+ b/' "$REPO/patches/$p" 2>/dev/null; done | sed 's|^+++ b/||' | sort -u)
+    diffs=0; same=0
+    for ff in $files; do
+        a=$(md5sum < "$WT/$ff" 2>/dev/null | cut -c1-32)
+        b=$(md5sum < "$TREE/$ff" 2>/dev/null | cut -c1-32)
+        if [ "$a" = "$b" ]; then same=$((same + 1)); else
+            echo "✗ 与配方重放不一致  $ff"
+            diff -u "$WT/$ff" "$TREE/$ff" 2>/dev/null | grep -E '^[-+][^-+]' | head -6 | sed 's/^/      /'
+            diffs=$((diffs + 1))
+        fi
+    done
+    echo
+    echo "重放：打不上 $fails · 用了 fuzz $fuzzed；核对：一致 $same 个文件 · 不一致 $diffs 个"
+    if [ "$fails" -eq 0 ] && [ "$diffs" -eq 0 ]; then
+        echo "✓ 真实树里被补丁碰过的每个文件都与配方逐字节相同"
+        exit 0
+    fi
+    exit 1
+fi
 
 cd "$TREE"
 echo "内核树: $TREE"

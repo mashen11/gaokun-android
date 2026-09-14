@@ -523,6 +523,11 @@ checkout，与本仓之间靠人手拷来拷去。于是它必然漂，而且是
 
 ⇒ 缓解措施已有（`kernel-apply-patches.sh`、`crdroid-tree-fixes.py` 12 条、
 `/proc/config.gz` 对账、全树 `git status` 普查），但**它们都是事后补救**。
+★ 2026-09-14 补了一个**精确的探测器**：`kernel-apply-patches.sh <tree> --verify` ——
+从 HEAD 起临时 worktree 把整条链重放，再把每个被补丁碰过的文件与真实树逐字节比
+（[#110](stage4-findings.md) 末尾）。第一次跑就抓到 `0011` 与 `upstream-venus/0020` 是
+同一个 `&venus` 块、重放出两份（0011 已从表里拿掉）。**每次编内核前先跑它**，
+绿了再 `make`。设备树那一半仍靠 `rsync --exclude '._*'` + 逐文件 md5 清单（#110）。
 **第一步**：把构建机上那个目录换成本仓的 git checkout（或 symlink 到一个
 checkout），让 `git status` 直接说话。⚠️ 换之前先做一次清单比对 —— 那里面有
 `.gitignore` 掉的固件/传感器配置/预编译内核，不能被覆盖。
@@ -655,7 +660,7 @@ range in the curve:`（后面是空的，连哪条曲线都没说）。
 
 ---
 
-### B9. SLPI 每 200 ms 一条 handover 噪声（根因未查）
+### B9. SLPI 每 200 ms 一条 handover 噪声 —— 2026-09-14 定位到 sensors HAL 的采样节拍
 详见 [#59](stage4-findings.md)。**它无害但有代价** —— 正是它把 [#58](stage4-findings.md)
 那两次 panic 的调用栈从 pstore 里挤掉了（45 条记录里有用的不到 10 条）。
 `patches/0014` 已把打印改成 ratelimited（治症状，正确且值得上游），
@@ -664,9 +669,22 @@ range in the curve:`（后面是空的，连哪条曲线都没说）。
 硬证据：SLPI 的 `q6v5 ready` 与 `q6v5 handover` 两条中断计数**完全相同、
 同步增长**（5 秒 5475→5502），ADSP/CDSP 各只有 2。
 
-**第一步**：5 Hz 很像一个采样节拍 —— 停掉 sensors HAL / `hexagonrpcd`
-看频率变不变。⚠️ **别在没人看着时做**：M12 记过停/重启 HAL 会污染 SSC 会话，
-自动旋转当场失效、要重启 `hexagonrpcd` 并等约 20 秒才恢复。
+**2026-09-14 第一步做了（用户在场）**，结果干净：
+
+| 状态 | `q6v5 handover`（SLPI，5 秒计数） |
+|---|---|
+| 基线（sensors HAL + hexagonrpcd 都在跑） | **25**（= 5 Hz） |
+| 只停 `vendor.sensors-gaokun3` | **0** |
+| 再停 `vendor.hexagonrpcd-sdsp` | 0 |
+| 两个都拉起、等 20 秒 | **25** |
+
+⇒ 5 Hz **就是 sensors HAL 的采样/请求节拍**，不是 DSP 自己的心跳：HAL 一停，
+`ready`/`handover` 两个 smp2p 位就不再翻。所以它不是"SLPI 在反复 handover"，
+而是 **SLPI 固件把这两个 smp2p 位当成了别的信号在用**（每批传感器数据翻一次），
+主线 `qcom_q6v5` 把每次翻转都当 handover 处理并打印。
+⬜ 下一步在 HAL 里：把 accel 采样率从现在的值改成 2× / ½×，看计数是否跟着变 ——
+若跟着变就是"每批样本翻一次"，`patches/0014` 的 ratelimit 就是正解，
+再往上游提"SLPI 的 handover 位复用"这条观察。
 
 ### B11. root（ReSukiSU）—— ✅ **已随 ROM 常驻**
 2026-08-23 夜装机验收（构建戳 `1787436126`，slot_a）：
