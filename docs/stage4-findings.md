@@ -7623,3 +7623,40 @@ MTU 1400 反而更慢；LAN 直连本机 37 MB/s。⇒ 瓶颈在 WAN 本身，�
 * **故意没做**：UBWC（B5b）—— 需要一次实测才改，无人值守做不了 A/B；GPU SMMU 中断号 DTB 实验（B6）—— 要人为制造
   fault 且需重启；自动亮度 / UCSI / 恢复出厂 / 硬件编码 —— 判死或属 B3。
 * 构建机已停；两次构建（内核 #19、ROM v0.6.1）合计约 25 分钟。
+
+## #109 ⚠️★★★ v0.6.0 正式镜像上相机打不开：IPA 模块装错了目录，HAL 拿到裸拜耳当 RGB 转、段错误循环（2026-09-14 中午）
+
+用户装完 v0.6.0（`_b` 槽、戳 `1789318530`）报相机打不开。105 秒 uptime 里 provider 已经崩 3 次、重启 4 次：
+
+```
+libcamera: WARN IPAManager: No IPA found in '/vendor/lib64/libcamera/ipa'
+libcamera: ERROR SoftwareIsp: Creating IPA for software ISP failed
+libcamera: WARN SimplePipeline: Failed to create software ISP, disabling software debayering
+provider:  SIGSEGV in libyuv RGB24ToUVJRow_NEON  ← Session::onRequestCompleted → RGB24ToJ420
+```
+
+**根因**：`config.h` 把 libcamera 的 `IPA_MODULE_DIR` 定成 `/vendor/lib64/libcamera/ipa`，而 Soong 把
+`libcamera_ipa_softisp_gk3.so` 装在 `/vendor/lib64/`。开发期我是**手动 push 到那个目录**的（overlay），
+装 OTA 前 `enable-verity` 把 overlay 拆了，正式镜像里根本没有那个目录。没有 IPA ⇒ simple 流水线关掉软件去拜耳
+⇒ 交给 HAL 的是裸拜耳 ⇒ HAL 按 RGB24 大小读 ⇒ 越界 ⇒ 崩。
+
+**验证**：`LIBCAMERA_IPA_MODULE_PATH=/vendor/lib64` 手动起 provider，IPA 立刻找到（"Using tuning file hi846.yaml"），
+"Creating IPA failed" 消失。**热修**：`adb remount` + `/vendor/lib64/libcamera/ipa/libcamera_ipa_softisp_gk3.so -> ../../…`，
+重启 provider，软件 ISP 正常，HAL 2 个相机。⚠️ 热修在 overlay 里，下次 OTA 前 `enable-verity` 会抹掉，
+所以正式修法必须进 v0.6.1。
+
+**修法**：
+1. `patches/libcamera/libcamera-Android.bp`：`libcamera_ipa_softisp_gk3` 加 `relative_install_path: "libcamera/ipa"`。
+2. HAL 两道保险（`Session.cpp`）：`configureStreams` 后若 libcamera 配置出的不是 `RGB888`，返回 INTERNAL_ERROR 并把
+   原因写进日志；`onRequestCompleted` 里帧长度不够 `w*h*3` 就整帧报 `ERROR_BUFFER`，绝不越界读。
+   —— 一个包装缺陷本不该表现成 SIGSEGV。
+
+**为什么装机验收没抓到**：验收跑的是 camtest（裸 V4L2，不经 libcamera）+ HAL **枚举**数（2 个）。枚举在没有 IPA 时
+照样成功，崩在第一次**出流**。★ 装机验收必须包含一次经 HAL 的真实出流（拉起相机应用后看 libcamera.log 里的
+`SoftwareIsp: Input …` 与 provider 的 pid 不变），已加进下面的清单。
+
+**顺带发现**：镜像里还有一对旧命名的库 `libcamera_gaokun3.so` / `libcamera_base_gaokun3.so`（3.7 MB，无人引用），
+来源待查（构建机树里某个陈旧的 Android.bp），下次构建时清掉。
+
+★ 教训：**overlay 里手工铺过的每一个文件，都是一条没进构建系统的依赖**；#86 那次是 `hi846.yaml`（发前抓到），
+这次是 IPA 目录（发后才抓到）。在 `adb remount` 的世界里，"能用"与"镜像里有"是两个事实。

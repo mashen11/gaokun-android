@@ -26,6 +26,14 @@
 > 我据此写了"硬挂死、安全阀都没触发"，还让用户去按电源键。实际上它**一直好好地
 > 跑着内核 `#5`**。★ 收窄搜索范围会把假阴性伪装成阳性结论。
 >
+> **⓪i ⚠️★★★ v0.6.0 正式镜像上相机打不开（[#109](docs/stage4-findings.md)）**：IPA 模块被装在 `/vendor/lib64/`，
+> libcamera 却在 `/vendor/lib64/libcamera/ipa/` 找 ⇒ 软件 ISP 建不起来 ⇒ HAL 把裸拜耳当 RGB24 喂 libyuv ⇒ SIGSEGV 循环。
+> 开发期那份是手动 push 到 overlay 的，`enable-verity` 一拆就露馅。用户机器已热修（remount + 符号链接，
+> ⚠️ 下次 OTA 前 `enable-verity` 会抹掉）；正式修法：Android.bp `relative_install_path: "libcamera/ipa"` + HAL 两道保险，
+> **必须进 v0.6.1**。★ 装机验收要包含一次经 HAL 的真实出流（枚举成功 ≠ 能出图）。
+> ★★ 教训：overlay 里手工铺过的每个文件都是一条没进构建系统的依赖 —— #86 抓到 yaml，#109 漏了 IPA 目录。
+> 另：用户反馈 #1 的 OTA 失败是手工分区无 PARTLABEL=esp（他自己解决了），postinstall/HAL 已改成按内容找 ESP。
+>
 > **⓪h ⚠️★★ 2026-09-14 中午：v0.6.0 一发就有用户反馈更新失败。** 原因几乎可以肯定是我昨夜把清单里的
 > `download` 改成了 GitHub Release 附件 —— 它 302 到 `release-assets.githubusercontent.com`，**国内不可达/极慢**
 > （Updater 的下载客户端确实跟随重定向，`HttpURLConnectionClient.java:275`，所以不是重定向的锅）。

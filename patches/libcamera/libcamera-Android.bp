@@ -227,6 +227,11 @@ cc_library_static {
 cc_library_shared {
     name: "libcamera_ipa_softisp_gk3",
     defaults: ["libcamera_gaokun3_defaults"],
+    // ⚠️★ 必须装到 libcamera 编译进去的 IPA_MODULE_DIR（config.h：/vendor/lib64/libcamera/ipa），
+    //   否则 IPAManager 报 "No IPA found in '/vendor/lib64/libcamera/ipa'"，软件 ISP 建不起来，
+    //   libcamera 把裸拜耳交给 HAL，HAL 当 RGB24 喂 libyuv 直接 SIGSEGV —— v0.6.0 正式镜像上
+    //   相机打不开就是它（#109）。开发期是手动 push 到那个目录的，overlay 一拆就露馅。
+    relative_install_path: "libcamera/ipa",
     static_libs: ["libcamera_ipa_gk3"],
     srcs: [
         "src/ipa/softisp/ipa_context.cpp",
