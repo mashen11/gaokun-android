@@ -7590,3 +7590,36 @@ supplicant 里 `DISCONNECTED/deauth/disassoc/beacon loss` **0 条**，BSSID 全�
 ⚠️ 一如既往：SSID / 密码 / BSSID 不写进本仓（公开仓库），本条与命令历史里一律占位符。
 顺带：平板现在回到局域网了（TCP adb 可用），CLAUDE.md 里"找不到平板"的那些运维注记里，
 "AP 不认密码"这一条原因已消失。
+
+## #108 收尾计划第一/二批的上午：全部构建好、验收等人（2026-09-14 上午）
+
+按 `docs/plan-2026-09-14.md` 执行；用户要求中午前不提问、"尽量做"。**新内核第一次开机必须有人能按电源键**，
+所以上午只构建、预装到测试槽、做不需要重启的验证。
+
+### 已构建、待重启验收
+
+* **内核 `#19`**（sha `89a1d14f…`，dtb `35575770…`，`slot_cam5`，条目 `cam5`=正常 / `cam6`=`ov13b10.fail_probe=1`）：
+  `patches/0035` camss 传感器等不到 20 s 就只带已绑上的传感器完成 notifier（解决"另一款后摄模组的机器前后摄一起消失"）；
+  `0034 v3` ov13b10 加 `get_selection` 与诊断开关 `fail_probe`；`0036` PMIC 闪光模块节点，四路各一个 LED、
+  torch 100 mA 逐路试接线（GPIO93 直驱实测不亮，Windows 的 FLSH 走 PMIC）；`LEDS_CLASS_FLASH`/`LEDS_QCOM_FLASH`=y；
+  camtest 重编（退出清零 Test Pattern）。验收脚本 `/data/local/tmp/k19test.sh {normal|fallback|flash}`。
+* **ROM v0.6.1 候选**（戳 `1789344148`，包 sha `0e226cc1…`，staging 未发布，payload 已预推到平板）：
+  libcamera `0004` 加 ov13b10 sensor helper（增益 code/128，从内核驱动定义推）与静态属性、`ov13b10.yaml` 进镜像、
+  **Updater 清单地址切到 `raw.githubusercontent.com/.../ota/{device}.json`**（实测 200、0 次重定向）—— 这是释放 R2 桶的前提。
+  ⚠️ 它的内核仍是 `#18`（prebuilt-boot 没换成 #19）：#19 上机验过之后再决定要不要一起进。
+
+### 结案：A8 "WAN 吞吐只有 PC 的 1/20"
+
+同一时刻、同一网络、同一 URL（Cloudflare 60 MB）：**平板 8.14 MB/s，本机 8.53 MB/s**；平板四连接并发合计 7.6 MB/s；
+MTU 1400 反而更慢；LAN 直连本机 37 MB/s。⇒ 瓶颈在 WAN 本身，平板与 PC 一样。#44 那次"1/20"多半是本机走了代理隧道
+（本机的 `cicd` 域名都被代理解析成 fake-IP），两边比的不是同一条路 —— **对照组要确认走的是同一条链路**。结案，从 TODO 摘掉。
+
+### 其它
+
+* hangdump：binder 日志改读 `/dev/binderfs/binder_logs/`（实测存在可读），不再碰 debugfs —— SELinux enforcing 的
+  两个结构性阻塞之一拆掉一半（它还要读所有域的 `/proc`）。另一个（smmustall 要 `/dev/mem`）仍要 B6。
+* hangdump 目录为空：音频/蓝牙死锁自看门狗上线（08-21）起一次没抓到，继续等。
+* `docs/upstream/`：三份英文投稿稿（RCG shared / GDSC 等待值 / ov13b10 OF 匹配），**未发送**。
+* **故意没做**：UBWC（B5b）—— 需要一次实测才改，无人值守做不了 A/B；GPU SMMU 中断号 DTB 实验（B6）—— 要人为制造
+  fault 且需重启；自动亮度 / UCSI / 恢复出厂 / 硬件编码 —— 判死或属 B3。
+* 构建机已停；两次构建（内核 #19、ROM v0.6.1）合计约 25 分钟。

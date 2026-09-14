@@ -26,6 +26,13 @@
 > 我据此写了"硬挂死、安全阀都没触发"，还让用户去按电源键。实际上它**一直好好地
 > 跑着内核 `#5`**。★ 收窄搜索范围会把假阴性伪装成阳性结论。
 >
+> **⓪g 🚦 收尾计划上午段（2026-09-14）：两样东西编好等中午重启验收（[#108](docs/stage4-findings.md)）。**
+> 内核 `#19` 在 `slot_cam5`（`cam5` 正常 / `cam6` 带 `ov13b10.fail_probe=1`）：0035 camss 容忍未绑传感器、
+> 0034 v3 get_selection、0036 PMIC 闪光四路试接线；验收脚本 `k19test.sh normal|fallback|flash`。
+> ROM v0.6.1 候选（戳 `1789344148`）在 staging、payload 已预推：ov13b10 增益模型/属性/yaml、**Updater 清单切 GitHub**。
+> ⚠️ v0.6.1 内核仍是 #18；#19 验过再定。A8（WAN 1/20）结案：平板与 PC 一样 8 MB/s。hangdump 改读 binderfs。
+> 上游稿在 `docs/upstream/`（未发）。
+>
 > **⓪f ✅ v0.6.0-alpha 已发布（2026-09-14）**：装机验收全绿（`_b` 槽、戳 `1789318530`、内核 `#18`、47 subdev、
 > 前后摄各 12 帧、PA=21、温控 HAL、0 崩溃 0 stuck），R2 清单已更新，GitHub Release 挂了全部产物
 > （用户决定：以后滚动更新走 GitHub Release，R2 桶要释放；清单 `download` 已改指 GitHub 附件）。
