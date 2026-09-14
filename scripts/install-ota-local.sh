@@ -24,6 +24,10 @@
 set -uo pipefail
 SER=${SER:-gaokun3}
 MODE=${1:---check}
+# ⚠️★ 挂载点故意用一个【别人不会碰】的名字（2026-09-14 踩的）：此前用 /mnt/esp，装机中途我另开一个
+#   adb shell 看进度、顺手 mount/umount 了同一个 /mnt/esp ⇒ 脚本第 4 步看到的是空目录、
+#   "ESP 上没有 -android-a.conf" 而停手；而 boot_control 已把 default 改成新槽，安全网没做上。
+#   ★ 与"ESP 上的 default 是谁改的"同一类问题：共享的可变状态要么私有、要么加锁，这里选私有。
 A() { adb -s "$SER" "$@"; }
 S() { adb -s "$SER" shell "$@"; }
 die() { echo "✗ $*" >&2; exit 1; }
@@ -50,7 +54,7 @@ else
     ok "overlayfs 未生效"
 fi
 
-DEF=$(S 'mkdir -p /mnt/esp; mount -t vfat /dev/block/by-name/esp /mnt/esp 2>/dev/null; grep ^default /mnt/esp/loader/loader.conf' | tr -d '\r')
+DEF=$(S 'mkdir -p /mnt/gaokun3_ota_install; mount -t vfat /dev/block/by-name/esp /mnt/gaokun3_ota_install 2>/dev/null; grep ^default /mnt/gaokun3_ota_install/loader/loader.conf' | tr -d '\r')
 ok "ESP 的 $DEF"
 
 # ★ ESP 空间（TODO B13，#110）：postinstall 要求"可用 + 目标槽将被覆盖的旧文件 > 56 MB"，
@@ -59,21 +63,21 @@ ok "ESP 的 $DEF"
 #   这里提前算同一笔账，并把 slot_a/slot_b 之外的目录点名 —— 那些就是该删的实验残留。
 case "$CUR" in _a) TGT=b ;; _b) TGT=a ;; *) die "看不懂当前槽 '$CUR'" ;; esac
 # ⚠️ 远端命令整体放在【单引号】里，TGT 用拼接注入：双引号会让本地 bash 先展开 $4 / $(…)（第一版就是这么炸的）。
-ESP_KB=$(S 'TGT='"$TGT"'; MID=$(ls /mnt/esp | grep -E "^[0-9a-f]{32}$" | head -1); a=$(df -k /mnt/esp | tail -1 | awk "{print \$4}"); for f in Image ramdisk.img gaokun3.dtb recovery-ramdisk.img; do p=/mnt/esp/$MID/android/slot_$TGT/$f; [ -f $p ] && a=$((a + $(stat -c %s $p) / 1024)); done; echo $a' | tr -d '\r' | tail -1)
-EXTRA=$(S 'MID=$(ls /mnt/esp | grep -E "^[0-9a-f]{32}$" | head -1); ls -d /mnt/esp/$MID/android/*/ 2>/dev/null | grep -v "/slot_[ab]/$" | xargs -r du -sk 2>/dev/null' | tr -d '\r')
+ESP_KB=$(S 'TGT='"$TGT"'; MID=$(ls /mnt/gaokun3_ota_install | grep -E "^[0-9a-f]{32}$" | head -1); a=$(df -k /mnt/gaokun3_ota_install | tail -1 | awk "{print \$4}"); for f in Image ramdisk.img gaokun3.dtb recovery-ramdisk.img; do p=/mnt/gaokun3_ota_install/$MID/android/slot_$TGT/$f; [ -f $p ] && a=$((a + $(stat -c %s $p) / 1024)); done; echo $a' | tr -d '\r' | tail -1)
+EXTRA=$(S 'MID=$(ls /mnt/gaokun3_ota_install | grep -E "^[0-9a-f]{32}$" | head -1); ls -d /mnt/gaokun3_ota_install/$MID/android/*/ 2>/dev/null | grep -v "/slot_[ab]/$" | xargs -r du -sk 2>/dev/null' | tr -d '\r')
 if [ "${ESP_KB:-0}" -gt 57344 ]; then
     ok "ESP 给目标槽 slot_$TGT 的空间约 $((ESP_KB/1024)) MB（含将被覆盖的旧文件；postinstall 要 56 MB）"
 else
     echo "✗ ESP 只够 $((ESP_KB/1024)) MB，postinstall 要 56 MB —— 会在最后一步失败"
     [ -n "$EXTRA" ] && { echo "  slot_a/slot_b 之外的目录（实验残留，KB）："; echo "$EXTRA" | sed 's/^/    /'; }
-    S 'umount /mnt/esp 2>/dev/null'
+    S 'umount /mnt/gaokun3_ota_install 2>/dev/null'
     die "先清 ESP（连同 loader/entries/ 里指向它们的条目）再来"
 fi
 [ -n "$EXTRA" ] && { echo "⚠️ ESP 上有 slot_a/slot_b 之外的目录（KB），验收完记得删："; echo "$EXTRA" | sed 's/^/    /'; }
 
 if [ "$MODE" != "--go" ]; then
     echo; echo "（--check 模式，没有改动任何东西。确认现场有人能按电源键后用 --go）"
-    S 'umount /mnt/esp 2>/dev/null'
+    S 'umount /mnt/gaokun3_ota_install 2>/dev/null'
     exit 0
 fi
 
@@ -122,12 +126,12 @@ echo "   （boot_control HAL 刚把它改成新槽了 —— 这一步是安全�
 #   ★ 规矩：写 glob 之前先确认它在真实目录上匹配得到东西，匹配不到就 die。
 SLOT=${CUR#_}                       # _b -> b
 GLOB="*-android-${SLOT}.conf"
-S "ls /mnt/esp/loader/entries/ | grep -q -- '-android-${SLOT}\.conf'" \
+S "ls /mnt/gaokun3_ota_install/loader/entries/ | grep -q -- '-android-${SLOT}\.conf'" \
     || die "ESP 上没有 -android-${SLOT}.conf 这个条目，glob '$GLOB' 会写成死链 —— 停手"
 ok "glob '$GLOB' 在 ESP 上匹配得到条目"
-S "sed -i 's|^default .*|default ${GLOB}|' /mnt/esp/loader/loader.conf; sync; grep ^default /mnt/esp/loader/loader.conf" 2>&1 | tr -d '\r'
+S "sed -i 's|^default .*|default ${GLOB}|' /mnt/gaokun3_ota_install/loader/loader.conf; sync; grep ^default /mnt/gaokun3_ota_install/loader/loader.conf" 2>&1 | tr -d '\r'
 echo
 echo "⬜ 剩下的手工两步（故意不自动做）："
 echo "   1) 写 LoaderEntryOneShot 指向新槽的条目"
 echo "   2) adb reboot，然后验收：uname / getprop ro.build.date.utc / tinymix 看 PA"
-S 'sync; umount /mnt/esp 2>/dev/null'
+S 'sync; umount /mnt/gaokun3_ota_install 2>/dev/null'
