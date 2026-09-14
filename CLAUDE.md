@@ -32,7 +32,10 @@
 > ⇒ **上游没有"adb 穿越睡眠"**。折中已写：`gaokun3-usbrole.sh` v2 插着主机息屏不切 host、不睡；拔线再切。
 > ⚠️ 本机 `persist.gaokun3.allow_suspend=0`（不知何时关的），现在根本不进 s2idle。
 > ★ 相机：软件 ISP **其实每帧报 AnalogueGain/ExposureTime**（libipa `fillMetadata`），HAL 此前没读。已加增益自适应降噪
-> （BLOB RGB ε 滤波 / 预览色度模糊）、预闪按亮度收敛（修白墙过曝→偏绿）。已编译、手动起 provider 待样片对比；**未进镜像**。
+> （BLOB RGB ε 滤波 / 预览色度模糊）、预闪按亮度收敛。**实测同场景**：不开闪光高频残差 3.62 → 2.01（−44%，增益 15.5x 顶格）；
+> 闪光片增益 15.5 → 4.95 说明预闪收敛生效，但白墙仍过曝/偏绿 —— 是动态范围 + AWB 统计不剔饱和像素，下一步 ExposureValue 负补偿
+> + swstats 剔饱和（#112 §5）。**未进镜像**，平板上以 bind mount 跑着新 HAL（重启消失）。
+> ⚠️ 测法坑：root 手动起 provider 会选 CMA 堆而分配失败；要用 `mount --bind` 盖到 vendor 路径再 `start` 服务。
 >
 > **⓪l ✅ 2026-09-14 13:26：v0.6.1（戳 `1789362233`）已装机验收通过（[#111](docs/stage4-findings.md) §6），【未发布】。**
 > `#19` / `_a` / IPA 目录对 / provider 在 `hal_camera_default` 域 0 denial / 后摄 flash TRUE / **快捷设置手电筒砖实测开关 LED**。
