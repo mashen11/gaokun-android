@@ -91,6 +91,46 @@ def report(path):
               f"p95 {allv[int(len(allv)*0.95)]:.2f} m/s  峰值 {allv[-1]:.2f} m/s  "
               f"超过 1.00 m/s 的帧 {100*sum(1 for v in allv if v>1.0)/len(allv):.0f}%")
 
+def gap_report(path):
+    """★ 判断"一条滑动有没有被驱动切开"最可靠的指标。
+
+    不要用"短轨迹的比例" —— 那只在用户【连续滑动】时才有意义，
+    正常使用里点按本身就是短轨迹，会得出假的回归结论（2026-09-14 我栽过一次）。
+
+    真正的判据是**相邻轨迹之间的间隔**：手指若真的抬起再按下，
+    跨过间隔的隐含速度应当接近 0；若是一条滑动被切开，手指在"隐形"期间
+    仍在移动，隐含速度就等于它当时的滑行速度。
+    #114 实测：修复前 35% 的间隔短于 100 ms、隐含速度中位 **1.01 m/s**
+    （正好是那条限速线）；修复后最小间隔 124 ms、隐含速度 0.08 m/s。
+    """
+    _, strokes = decode(path)
+    S = [(t, p) for t, p in strokes if p]
+    S.sort(key=lambda kp: kp[1][0][0])
+    g = []
+    for i in range(len(S) - 1):
+        a, b = S[i][1], S[i + 1][1]
+        dt = b[0][0] - a[-1][0]
+        dd = math.hypot(b[0][1] - a[-1][1], b[0][2] - a[-1][2]) * MM_PER_UNIT
+        g.append((dt * 1000, dd))
+    if not g:
+        print("  轨迹不足，无法做间隔分析")
+        return
+    ts = sorted(x for x, _ in g)
+    print(f"  相邻轨迹间隔 ms：最小 {ts[0]:.0f}  中位 {ts[len(ts)//2]:.0f}  最大 {ts[-1]:.0f}")
+    for thr in (25, 50, 100, 200):
+        n = sum(1 for x, _ in g if x < thr)
+        print(f"    < {thr:>3} ms：{n:>3} 个 ({100*n/len(g):>3.0f}%)")
+    close = [(x, d) for x, d in g if x < 100 and x > 0]
+    if close:
+        sp = sorted(d / (x / 1000) / 1000 for x, d in close)
+        v = sp[len(sp)//2]
+        verdict = "⚠️ 像是被切开的滑动" if v > 0.3 else "✓ 像是真实的抬手"
+        print(f"    间隔 <100 ms 时跨间隔的隐含速度中位 {v:.2f} m/s  {verdict}")
+    else:
+        print("    没有短于 100 ms 的间隔 ⇒ 每次轨迹边界都是真实抬手 ✓")
+
+
 if __name__ == '__main__':
     for p in sys.argv[1:]:
         report(p)
+        gap_report(p)

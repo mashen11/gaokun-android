@@ -155,9 +155,12 @@ Z8 孤立尖峰过滤实际从没生效（只毙掉八邻域和 <25 的尖峰）
 而 Android 侧 InputReader + `ViewConfiguration` 的 touch slop（本机约 24 px）本来就在做同一件事，
 驱动自己还带 IIR 平滑（`hx-algo.c`，默认开）——三层重复过滤。
 
-**第一步**：✅ `patches/0037` 已写好（把 fuzz 做成 0644 模块参数，**默认仍是 8，单独打上不改行为**），
-并已在构建机上编出内核 **`#20`**（`cf203b62…`，单文件零告警，`--verify` 30/30 一致，
-DTB 与 v0.6.1 逐字节相同 = 只动了驱动）。产物在本机 scratchpad 的 `k20/vmlinuz.efi`。
+**第一步**：✅ `patches/0037` 已写好（把 fuzz 做成 0644 模块参数，**默认仍是 8，单独打上不改行为**）。
+✅ 内核 **`#21`** 已编出（sha `6b87401d…`，15593984 字节，退出码 0、**零告警**，
+`--verify` **32/32 逐字节一致**，DTB `fedd3fb6…` 与设备上 v0.6.1 的两个槽**逐字节相同** = 只动了驱动）。
+`#21` = 0037 + 0038 + 0039，产物在本机 scratchpad 的 `k21/vmlinuz.efi`。
+已静态确认新旋钮进了二进制：`iso_nbr_ratio_q8` / `edge_min_area` / `track_jump_dist2` / `fuzz`
+以及两个 cmdline 参数 `himax_hx83121a_spi.fuzz` / `.disable_pressure`。
 **只差一次重启**（要用户在场）。起来之后就能用手指实时 A/B：
 `echo 0 > /sys/module/himax_hx83121a_spi/parameters/fuzz`。调定了再把值写进 DT 的
 `touchscreen-fuzz-x/y`（标准属性，`drivers/input/touchscreen.c:89` 会覆盖驱动默认值）。

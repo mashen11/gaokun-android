@@ -24,6 +24,9 @@
 > 2. **沙箱代理会掐断到构建机的 ssh，并 MITM 掉 `az` 的证书。**
 >    长任务与大流量的 ssh 一律绕沙箱；`az` 加 `AZURE_CLI_DISABLE_CONNECTION_VERIFICATION=1`。
 >    主机名 `cicd` 会被解析成 fake-IP `198.18.0.92`，**用真实 IP 直连**。
+>    ⚠️★ 两者的要求是**相反**的（2026-09-14 实测）：**ssh 要绕沙箱，`az` 要留在沙箱内**。
+>    绕沙箱跑 `az` 会直接 `Certificate verification failed` —— 而那次是 `vm deallocate`，
+>    失败了机器就一直在计费。★ 停机之后**必须回头查一次真实电源状态**，别信命令输出。
 > 3. **一行命令里永远不要 `pkill -f <名字>` / `pgrep -f <名字>`** —— 命令行自己就含那个名字，
 >    于是把自己的 shell 杀了，后面什么都没跑。2026-09-14 一天栽了三次。
 >    用 `pkill -x`、`kill $(pidof ...)`，或让长跑脚本自己写 pid 文件。
