@@ -170,4 +170,8 @@ cat <<EOF
   * 用【设备】而不是构建机去验一次抓取（沙箱会挡出站 HTTP，那边的结论不可信）：
       curl -sI $HOST/ota/gaokun3.json | head -3      # 必须 200，不能是 3xx
   * GitHub Release 另发（gh release create），把 install/$VER/ 那几个文件带上。
+    ⚠️ 两个 2026-09-14 踩过的坑：① gh 要在仓库目录里跑、或加 -R vahiru/gaokun-android，
+       在别的目录里它报 "not a git repository" 就什么都没传；② 别写 gh ... | tail -1 ——
+       管道的退出码是 tail 的，上传失败照样印"uploaded"（与 az/make 那两次是同一个坑）。
+    ③ 附件名就是文件名，"file#label" 里的 # 后面只是显示标签；要叫 install-artifacts.sha256 就先把文件改成这个名。
 EOF

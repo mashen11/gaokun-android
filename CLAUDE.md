@@ -28,7 +28,7 @@
 >
 > **⓪n ✅ v0.6.1-alpha 已发布（2026-09-14 17:5x，用户拍板）**：戳 `1789364282`，R2 `builds/` + `install/<ver>/` + 线上清单
 > 已切（设备侧 curl 200、download 指 R2）；GitHub Release `v0.6.1-alpha` 打在构建源 `10acff3` 上，附件 boot.img /
-> install-artifacts.sha256 / gaokun3.json 已挂，zip 与 super.img.zst 从本机上传中。仓库 `ota/gaokun3.json` 与线上逐字节同步。
+> install-artifacts.sha256 / gaokun3.json / zip / super.img.zst **五个附件全部就位**（下载 URL 200、大小与 sha 文件一致）。仓库 `ota/gaokun3.json` 与线上逐字节同步。
 > ⚠️ 下午的降噪 / 预闪 / usbrole v2 改动**不在**这一版里（只验过 bind mount，未进镜像），留给 v0.6.2。构建机已 deallocate。
 >
 > **⓪m 2026-09-14 下午两问（[#112](docs/stage4-findings.md)）：噪点 & 息屏 USB adb。**
