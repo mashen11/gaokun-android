@@ -119,6 +119,23 @@ KPATCHES=(
     # ★ 0039（#114）：Z8 孤立尖峰过滤与边缘单像素豁免做成可调（iso_nbr_ratio_q8 /
     #    edge_min_area），并标注掌压规则 3 是死代码。三项默认值不变 ⇒ 单独打上不改变行为。
     0039-Input-himax-spi-tunable-isolated-spike-and-edge-gates.patch
+    # ★ 0040（#115）：修好 SPI 读重试（tx/rx 同一块缓冲，重试发的是上次收到的数据 ⇒
+    #    三次机会实际只有一次），并让事件栈一次传完（原先每帧切成 5129+3 两次 spi_sync）。
+    0040-Input-himax-spi-fix-SPI-read-retry-and-split-event-stack.patch
+    # ★★ 0041（#115）：连通域表满时原先是 return 而不是 break ⇒ 放弃扫描网格【剩下的全部】。
+    #    噪声多（充电器耦合）时屏幕下半部分的真实手指整个消失。改成按 signal_sum 顶替最弱的。
+    0041-Input-himax-spi-do-not-abandon-the-grid-when-zones-fill.patch
+    # ★ 0042（#115）：掌压剔除改成【标记】而不是删除 —— BFS 是 8 连通，指尖挨着手掌会进同一个
+    #    zone，删掉就把手指一起删了。默认行为不变（标记的 zone 不出峰值），但决定变得可见可逆。
+    0042-Input-himax-spi-mark-palm-zones-instead-of-deleting-them.patch
+    # ★★★ 0043（#115）：逐级计数器（algo/stats）、最近 16 个触点出生记录（algo/contacts_log）、
+    #    debugfs 两个整帧导出（frame_raw = 面板产出的，frame = 流水线判定的）。
+    #    不改变任何触摸行为，只是让行为可观测 —— #114 那一晚的推理以后是一次 cat 的事。
+    0043-Input-himax-spi-per-stage-counters-and-raw-grid-dumps.patch
+    # ★ 0044（#115）：上报坐标轴分辨率（此前 resolution=0 = 告诉用户态"不知道"）。10 单位/毫米。
+    0044-Input-himax-spi-report-axis-resolution.patch
+    # ★ 0045（#115）：修好 W=1 报的两处 kerneldoc。纯注释，改完这个驱动 W=1 完全干净。
+    0045-Input-himax-spi-fix-two-kerneldoc-blocks.patch
 )
 
 # ⚠️ 诊断补丁【不进发版内核】：只在带 --with-diag 时打。顺序有依赖：0028/0029 依赖 0023，

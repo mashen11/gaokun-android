@@ -58,6 +58,9 @@
 > ⚠️ **触摸**：本机已现场改到 `track_jump_dist2=0` / `track_smoothing=0` / `track_start_debounce=2`；
 > 开机属性设成 `daily`，所以重启后落到安全值而不是坏配置。镜像里的
 > `/vendor/bin/gaokun3-touch-mode.sh` **还是旧的**（`/vendor` 只读），要下次构建才换掉。#114
+> ⚠️ ESP 上备着内核 **`#22`**（`slot_b/Image-test` + `…-android-b-test.conf`，带
+> `disable_pressure=0`），**default 没动**。验收手册见 `docs/touch-morning-runbook.md`。
+> ⚠️ ESP 只剩 **35 MB**（OTA postinstall 要 56 MB）—— **验完要删掉那两个文件**。
 
 ---
 
@@ -67,6 +70,7 @@
 |---|---|
 | **现在什么状态、有什么禁忌** | 本文件上面那个框 |
 | **还剩什么没做、优先级** | `docs/TODO.md` —— 顶上有一张「现在在做 / 待办」总表 |
+| **明早要做的触摸验收** | `docs/touch-morning-runbook.md` —— 按顺序，每步写了「看什么算通过」|
 | **某个结论是怎么来的**（最权威） | `docs/stage4-findings.md`，按 `#NN` 编号的案卷；Stage 5/6/7 另有专档 |
 | 那一周发生了什么 | `docs/project-log.md`（本文件的历史，原样搬过去的） |
 | 怎么装、用户会踩什么 | `docs/INSTALL.md` |
