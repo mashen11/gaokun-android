@@ -14,14 +14,13 @@ diff --git a/drivers/media/i2c/ov13b10.c b/drivers/media/i2c/ov13b10.c
 index b0d3414..41042b3 100644
 --- a/drivers/media/i2c/ov13b10.c
 +++ b/drivers/media/i2c/ov13b10.c
-@@ -1338,8 +1338,41 @@ static const struct v4l2_subdev_video_ops ov13b10_video_ops = {
+@@ -1338,8 +1338,40 @@ static const struct v4l2_subdev_video_ops ov13b10_video_ops = {
  	.s_stream = ov13b10_set_stream,
  };
  
 +/*
-+ * gaokun3: libcamera 要 NATIVE_SIZE / CROP_BOUNDS / CROP_DEFAULT / CROP，没有就把
-+ * 有效区默认成模式尺寸并警告"驱动要修"。上游驱动没给出含虚拟像素的完整阵列尺寸，
-+ * 这里按 4208x3120 全幅算，窄模式（4160 宽）居中裁切 —— 这是【假设】，不是手册值。
++ * All modes read out the full 4208x3120 array, so the crop rectangle is
++ * the whole active area in every mode.
 + */
 +static int ov13b10_get_selection(struct v4l2_subdev *sd,
 +				 struct v4l2_subdev_state *sd_state,
