@@ -58,8 +58,9 @@ ok "ESP 的 $DEF"
 #   （slot_cam / slot_cam4）吃到只剩 4.5 MB 可用（合计 47 MB），差 9 MB 就翻车。
 #   这里提前算同一笔账，并把 slot_a/slot_b 之外的目录点名 —— 那些就是该删的实验残留。
 case "$CUR" in _a) TGT=b ;; _b) TGT=a ;; *) die "看不懂当前槽 '$CUR'" ;; esac
-ESP_KB=$(S "df -k /mnt/esp | tail -1 | awk '{print \\$4}'; MID=\\$(ls /mnt/esp | grep -E '^[0-9a-f]{32}\\$' | head -1); for f in Image ramdisk.img gaokun3.dtb recovery-ramdisk.img; do [ -f /mnt/esp/\\$MID/android/slot_$TGT/\\$f ] && stat -c %s /mnt/esp/\\$MID/android/slot_$TGT/\\$f; done" | tr -d '\r' | awk 'NR==1{kb=$1} NR>1{kb+=$1/1024} END{printf "%d", kb}')
-EXTRA=$(S "MID=\\$(ls /mnt/esp | grep -E '^[0-9a-f]{32}\\$' | head -1); ls -d /mnt/esp/\\$MID/android/*/ 2>/dev/null | grep -v '/slot_[ab]/\\$' | xargs -r du -sk 2>/dev/null" | tr -d '\r')
+# ⚠️ 远端命令整体放在【单引号】里，TGT 用拼接注入：双引号会让本地 bash 先展开 $4 / $(…)（第一版就是这么炸的）。
+ESP_KB=$(S 'TGT='"$TGT"'; MID=$(ls /mnt/esp | grep -E "^[0-9a-f]{32}$" | head -1); a=$(df -k /mnt/esp | tail -1 | awk "{print \$4}"); for f in Image ramdisk.img gaokun3.dtb recovery-ramdisk.img; do p=/mnt/esp/$MID/android/slot_$TGT/$f; [ -f $p ] && a=$((a + $(stat -c %s $p) / 1024)); done; echo $a' | tr -d '\r' | tail -1)
+EXTRA=$(S 'MID=$(ls /mnt/esp | grep -E "^[0-9a-f]{32}$" | head -1); ls -d /mnt/esp/$MID/android/*/ 2>/dev/null | grep -v "/slot_[ab]/$" | xargs -r du -sk 2>/dev/null' | tr -d '\r')
 if [ "${ESP_KB:-0}" -gt 57344 ]; then
     ok "ESP 给目标槽 slot_$TGT 的空间约 $((ESP_KB/1024)) MB（含将被覆盖的旧文件；postinstall 要 56 MB）"
 else
