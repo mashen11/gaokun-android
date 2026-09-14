@@ -134,8 +134,14 @@ std::vector<uint8_t> buildCharacteristics(const SensorFacts &f)
 	add_camera_metadata_entry(m, ANDROID_REQUEST_PIPELINE_MAX_DEPTH, &pipelineDepth, 1);
 
 	/* ── 3A：软件 ISP 只有 AE/AWB，没有 AF（定焦镜头） ── */
-	const uint8_t aeModes[] = { ANDROID_CONTROL_AE_MODE_ON };
-	add_camera_metadata_entry(m, ANDROID_CONTROL_AE_AVAILABLE_MODES, aeModes, 1);
+	/* 有闪光灯的相机（后摄，#110）才声明两个闪光 AE 模式：框架规定 FLASH_INFO_AVAILABLE=true
+	 * 时 AE 模式必须含 ON_AUTO_FLASH / ON_ALWAYS_FLASH。 */
+	const bool hasFlash = !f.flashLed.empty();
+	const uint8_t aeModes[] = { ANDROID_CONTROL_AE_MODE_ON,
+				    ANDROID_CONTROL_AE_MODE_ON_AUTO_FLASH,
+				    ANDROID_CONTROL_AE_MODE_ON_ALWAYS_FLASH };
+	add_camera_metadata_entry(m, ANDROID_CONTROL_AE_AVAILABLE_MODES, aeModes,
+				  hasFlash ? 3 : 1);
 	const uint8_t awbModes[] = { ANDROID_CONTROL_AWB_MODE_AUTO };
 	add_camera_metadata_entry(m, ANDROID_CONTROL_AWB_AVAILABLE_MODES, awbModes, 1);
 	const uint8_t afModes[] = { ANDROID_CONTROL_AF_MODE_OFF };
@@ -170,7 +176,8 @@ std::vector<uint8_t> buildCharacteristics(const SensorFacts &f)
 	add_camera_metadata_entry(m, ANDROID_CONTROL_MAX_REGIONS, maxRegions, 3);
 
 	/* ── 闪光灯 / 镜头 ── */
-	const uint8_t flashAvailable = ANDROID_FLASH_INFO_AVAILABLE_FALSE;
+	const uint8_t flashAvailable = hasFlash ? ANDROID_FLASH_INFO_AVAILABLE_TRUE
+					       : ANDROID_FLASH_INFO_AVAILABLE_FALSE;
 	add_camera_metadata_entry(m, ANDROID_FLASH_INFO_AVAILABLE, &flashAvailable, 1);
 	const float focalLengths[] = { 3.0f };       /* ⚠️ 占位值，未测 */
 	add_camera_metadata_entry(m, ANDROID_LENS_INFO_AVAILABLE_FOCAL_LENGTHS,
@@ -250,8 +257,22 @@ std::vector<uint8_t> buildCharacteristics(const SensorFacts &f)
 	return out;
 }
 
+namespace {
+/* 请求里已有这个键就改，没有就加 —— 结果要回显请求键，但值以会话实际状态为准。 */
+template <typename T>
+void setOrAdd(camera_metadata_t *m, uint32_t tag, const T *v, size_t n)
+{
+	camera_metadata_entry_t e;
+	if (find_camera_metadata_entry(m, tag, &e) == 0)
+		update_camera_metadata_entry(m, e.index, v, n, nullptr);
+	else
+		add_camera_metadata_entry(m, tag, v, n);
+}
+} /* namespace */
+
 std::vector<uint8_t> buildResult(const std::vector<uint8_t> &requestSettings,
-				 int64_t timestampNs, uint8_t pipelineDepth)
+				 int64_t timestampNs, uint8_t pipelineDepth,
+				 const FrameResultFacts &fr)
 {
 	/*
 	 * 以请求设置为底（框架要求结果里能回显请求的键），再补上结果专有的。
@@ -276,14 +297,14 @@ std::vector<uint8_t> buildResult(const std::vector<uint8_t> &requestSettings,
 
 	/* 3A 状态：我们没有 AF，AE/AWB 由软件 ISP 的 IPA 在跑，
 	 * 这里如实报"已收敛"，不谎报正在搜索。 */
-	const uint8_t aeState = ANDROID_CONTROL_AE_STATE_CONVERGED;
-	add_camera_metadata_entry(m, ANDROID_CONTROL_AE_STATE, &aeState, 1);
+	add_camera_metadata_entry(m, ANDROID_CONTROL_AE_STATE, &fr.aeState, 1);
+	setOrAdd(m, ANDROID_CONTROL_AE_MODE, &fr.aeMode, 1);
+	setOrAdd(m, ANDROID_FLASH_MODE, &fr.flashMode, 1);
 	const uint8_t awbState = ANDROID_CONTROL_AWB_STATE_CONVERGED;
 	add_camera_metadata_entry(m, ANDROID_CONTROL_AWB_STATE, &awbState, 1);
 	const uint8_t afState = ANDROID_CONTROL_AF_STATE_INACTIVE;
 	add_camera_metadata_entry(m, ANDROID_CONTROL_AF_STATE, &afState, 1);
-	const uint8_t flashState = ANDROID_FLASH_STATE_UNAVAILABLE;
-	add_camera_metadata_entry(m, ANDROID_FLASH_STATE, &flashState, 1);
+	add_camera_metadata_entry(m, ANDROID_FLASH_STATE, &fr.flashState, 1);
 	const uint8_t lensState = ANDROID_LENS_STATE_STATIONARY;   /* 定焦 */
 	add_camera_metadata_entry(m, ANDROID_LENS_STATE, &lensState, 1);
 
@@ -294,14 +315,17 @@ std::vector<uint8_t> buildResult(const std::vector<uint8_t> &requestSettings,
 
 std::vector<uint8_t> buildDefaultRequest(int templateId, const SensorFacts &f)
 {
-	(void)templateId;
 	camera_metadata_t *m = allocate_camera_metadata(32, 2048);
 	if (!m)
 		return {};
 
 	const uint8_t controlMode = ANDROID_CONTROL_MODE_AUTO;
 	add_camera_metadata_entry(m, ANDROID_CONTROL_MODE, &controlMode, 1);
-	const uint8_t aeMode = ANDROID_CONTROL_AE_MODE_ON;
+	/* 有闪光灯时，静态拍照模板默认 ON_AUTO_FLASH（RequestTemplate.STILL_CAPTURE = 2），
+	 * 与 CameraCharacteristics 文档对模板的约定一致；其余模板不闪。 */
+	const uint8_t aeMode = (!f.flashLed.empty() && templateId == 2)
+				       ? ANDROID_CONTROL_AE_MODE_ON_AUTO_FLASH
+				       : ANDROID_CONTROL_AE_MODE_ON;
 	add_camera_metadata_entry(m, ANDROID_CONTROL_AE_MODE, &aeMode, 1);
 	const uint8_t awbMode = ANDROID_CONTROL_AWB_MODE_AUTO;
 	add_camera_metadata_entry(m, ANDROID_CONTROL_AWB_MODE, &awbMode, 1);

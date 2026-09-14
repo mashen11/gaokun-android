@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #pragma once
 
+#include <functional>
+#include <string>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -63,6 +65,9 @@ public:
 		::aidl::android::hardware::common::fmq::MQDescriptor<
 			int8_t, ::aidl::android::hardware::common::fmq::SynchronizedReadWrite>
 			*out) override;
+	/* 会话关闭时通知 Device（手电筒重新可用）。 */
+	void setOnClosed(std::function<void()> f) { onClosed_ = std::move(f); }
+
 	::ndk::ScopedAStatus signalStreamFlush(const std::vector<int32_t> &in_streamIds,
 					       int32_t in_streamConfigCounter) override;
 
@@ -93,6 +98,30 @@ private:
 	bool deliverJpeg(const uint8_t *rgb, buffer_handle_t dst,
 			 int32_t dstW, int32_t dstH, int32_t blobSize,
 			 int quality);
+
+	/*
+	 * ── 闪光灯（#110 / #111）──
+	 * LED 是 PM8350C 闪光模块的 torch 档（/sys/class/leds/white:flash/brightness），没有与传感器
+	 * 曝光同步的 strobe，所以"闪光"= 从预闪触发起把灯点着，直到那张静态照片完成再灭：
+	 * AGC 有几帧时间适应灯光，照片在灯下曝光，不会出现"灯亮了但那一帧已经曝完"的错位。
+	 * ⚠️ 灯【不能】在下一个请求入队时就灭：框架会把预览请求排在拍照请求后面立刻发来，
+	 *    那时拍照那一帧还没曝光 —— 所以用 firedPending_ 计数，等点过灯的请求都完成了才灭。
+	 */
+	void setLed(bool on);
+	void parseFlashControls(const std::vector<uint8_t> &settings, uint8_t *trigger,
+				uint8_t *intent);
+	static constexpr int kDarkLuma = 50;          /* AUTO 闪光的"太暗"判据（0..255 采样均值） */
+	static constexpr int kPrecaptureFrames = 4;   /* 预闪期间报几帧 AE_STATE_PRECAPTURE */
+	std::string flashLed_;          /* 空 = 这个相机没有闪光灯 */
+	std::string ledMax_ = "255";    /* max_brightness 的原文 */
+	bool ledOn_ = false;
+	uint8_t aeMode_ = ANDROID_CONTROL_AE_MODE_ON;   /* 粘滞：请求里没带就沿用上一帧 */
+	uint8_t flashMode_ = ANDROID_FLASH_MODE_OFF;
+	bool flashArmed_ = false;       /* 预闪触发后 → 到静态拍照完成为止保持点亮 */
+	int precaptureLeft_ = 0;
+	int firedPending_ = 0;          /* 在途的、点着灯的请求数 */
+	int lastLuma_ = 128;            /* 上一帧的采样平均亮度 */
+	std::function<void()> onClosed_;
 
 	std::shared_ptr<libcamera::Camera> cam_;
 	SensorFacts facts_;
@@ -150,6 +179,12 @@ private:
 		int32_t frameNumber = 0;
 		std::vector<PendingBuffer> buffers;
 		std::vector<uint8_t> settings;
+		/* 闪光灯：这一帧灯亮着吗 / 完成后要不要解除预闪 / 要报的 3A 状态 */
+		bool flashFired = false;
+		bool endsFlash = false;
+		uint8_t aeState = ANDROID_CONTROL_AE_STATE_CONVERGED;
+		uint8_t aeMode = ANDROID_CONTROL_AE_MODE_ON;
+		uint8_t flashMode = ANDROID_FLASH_MODE_OFF;
 	};
 	std::map<libcamera::Request *, Pending> pending_;
 

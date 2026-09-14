@@ -12,9 +12,12 @@
 
 namespace gaokun3 {
 
+class Provider;
+
 class Device : public aidl::android::hardware::camera::device::BnCameraDevice {
 public:
-	Device(std::shared_ptr<libcamera::Camera> cam, std::string name);
+	/* provider 只用来把手电筒状态推给框架；Provider 持有所有 Device，寿命更长。 */
+	Device(std::shared_ptr<libcamera::Camera> cam, std::string name, Provider *provider);
 	~Device() override;
 
 	/* 从 libcamera 抽出传感器事实并预先构造 characteristics。 */
@@ -57,9 +60,16 @@ public:
 	std::shared_ptr<libcamera::Camera> camera() const { return cam_; }
 
 private:
+	/* 会话关闭时由 Session 回调：相机不再占用，手电筒重新可用。 */
+	void onSessionClosed();
+	/* 写 LED 的 brightness（torch 档 = max_brightness）。没有闪光灯时返回 false。 */
+	bool setLed(bool on);
+
 	std::mutex mutex_;
 	std::shared_ptr<libcamera::Camera> cam_;
 	std::string name_;
+	Provider *provider_ = nullptr;
+	bool inUse_ = false;
 	SensorFacts facts_;
 	std::vector<uint8_t> characteristics_;
 };

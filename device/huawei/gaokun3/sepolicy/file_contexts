@@ -54,6 +54,10 @@
 /vendor/bin/hw/android\.hardware\.light-service\.gaokun3     u:object_r:hal_light_default_exec:s0
 /vendor/bin/hw/android\.hardware\.boot-service\.gaokun3      u:object_r:hal_bootctl_default_exec:s0
 /vendor/bin/hw/android\.hardware\.thermal-service\.gaokun3   u:object_r:hal_thermal_default_exec:s0
+# 相机 HAL（libcamera 软件 ISP）—— 2026-09-14 前它没有条目、跑在 init 域里（实机 ps -AZ 看到的）。
+# AOSP 的 hal_camera_default 域已放行 video_device / camera_device / dmabuf heap / gpu_device；
+# 本仓 hal_camera_default.te 补 libcamera 特有的几条（sysfs 枚举、闪光灯 LED、日志目录）。
+/vendor/bin/hw/android\.hardware\.camera\.provider-service\.gaokun3   u:object_r:hal_camera_default_exec:s0
 
 # ── 我们自己的服务脚本：各给一个域 ───────────────────────────────────────
 #
@@ -105,6 +109,16 @@
 /dev/block/nvme0n1p6     u:object_r:boot_block_device:s0
 /dev/block/nvme0n1p8     u:object_r:super_block_device:s0
 /dev/block/nvme0n1p10    u:object_r:metadata_block_device:s0
+
+# ── /dev/media* 与 /dev/v4l-subdev*：AOSP 只给 /dev/video* 打了 video_device ──────
+# （system/sepolicy/private/file_contexts:225 只有 video 一行；media/v4l-subdev 是主线
+#   Media Controller 的节点，手机 SoC 的相机 HAL 不经过它们，AOSP 就没想过）。
+# libcamera 三种节点都要开；hal_camera 域对 video_device 有 rw，标签对了规则就现成。
+/dev/media[0-9]*         u:object_r:video_device:s0
+/dev/v4l-subdev[0-9]*    u:object_r:video_device:s0
+
+# libcamera 的日志文件（gaokun3-camera.rc 的 LIBCAMERA_LOG_FILE）
+/data/vendor/camera(/.*)?   u:object_r:gaokun3_camera_vendor_data_file:s0
 
 # ── /dev/fastrpc-*：hexagonrpcd 的命根子，AOSP 里没有对应类型 ───────────
 # 传感器整条链（accel/gyro → SSC → QMI）都走它。此前是通用 device 类型。

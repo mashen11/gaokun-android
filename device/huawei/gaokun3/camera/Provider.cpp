@@ -4,12 +4,14 @@
 
 #include <aidl/android/hardware/camera/common/CameraDeviceStatus.h>
 #include <aidl/android/hardware/camera/common/Status.h>
+#include <aidl/android/hardware/camera/common/TorchModeStatus.h>
 #include <aidl/android/hardware/camera/common/VendorTagSection.h>
 #include <aidl/android/hardware/camera/device/ICameraDevice.h>
 #include <aidl/android/hardware/camera/provider/ICameraProviderCallback.h>
 #include <log/log.h>
 
 using ::aidl::android::hardware::camera::common::Status;
+using ::aidl::android::hardware::camera::common::TorchModeStatus;
 using ::aidl::android::hardware::camera::common::VendorTagSection;
 using ::aidl::android::hardware::camera::device::ICameraDevice;
 using ::aidl::android::hardware::camera::provider::CameraIdAndStreamCombination;
@@ -105,7 +107,7 @@ ndk::ScopedAStatus Provider::getCameraDeviceInterface(
 		return err(Status::ILLEGAL_ARGUMENT);
 	}
 
-	auto dev = ndk::SharedRefBase::make<Device>(cit->second, name);
+	auto dev = ndk::SharedRefBase::make<Device>(cit->second, name, this);
 	if (!dev->init()) {
 		ALOGE("Device::init 失败: %s", name.c_str());
 		return err(Status::INTERNAL_ERROR);
@@ -113,6 +115,17 @@ ndk::ScopedAStatus Provider::getCameraDeviceInterface(
 	devices_[name] = dev;
 	*out = dev;
 	return ndk::ScopedAStatus::ok();
+}
+
+void Provider::notifyTorch(const std::string &deviceName, TorchModeStatus status)
+{
+	std::shared_ptr<ICameraProviderCallback> cb;
+	{
+		std::lock_guard<std::mutex> lk(mutex_);
+		cb = cb_;
+	}
+	if (cb)
+		cb->torchModeStatusChange(deviceName, status);
 }
 
 ndk::ScopedAStatus Provider::notifyDeviceStateChange(int64_t state)

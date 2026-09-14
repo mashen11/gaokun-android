@@ -629,7 +629,7 @@ ssh 可达、WiFi 自动连上、全套分区工具就位、`lsblk` 看得见内
 下一步：按设计建 1 GiB 的 `gk3rescue` 分区、把 squashfs 挪过去、
 确认能启动之后再回收那 24.6 GiB。
 
-### B8. `invalid volume index range in the curve` ×12（既有，非回归）
+### B8. ✅（查明、不修）`invalid volume index range in the curve` ×12 —— AOSP legacy 音量配方的启动顺序噪声
 每次 audioserver 启动都吐 12 条 `E APM_AudioPolicyManager: invalid volume index
 range in the curve:`（后面是空的，连哪条曲线都没说）。
 **确认与耳机改动无关**：干净 A/B，旧策略 12 条、新策略 12 条。
@@ -637,8 +637,17 @@ range in the curve:`（后面是空的，连哪条曲线都没说）。
 `frameworks/av/services/audiopolicy/config/` 原样拷的）与本机 `devicePorts`
 的交集上。目前没有可观测的功能损害，故只记不修。
 
-**第一步**：给那条日志找出打印点（`EngineBase`/`VolumeCurve`），看它校验的是
-哪个字段，再对照我们装进去的两份 XML。
+**2026-09-14 查明（读源码，未改）**：打印点是 `AudioPolicyManager::checkAndSetVolume()`
+（`managerdefault/AudioPolicyManager.cpp:8835-8843`），条件是该 volume curves 的
+`getVolumeIndexMin()/Max() < 0`，每组只报一次（`invalidCurvesReported` 集合）。
+而 legacy 配方（我们用的 `audio_policy_volumes.xml` + `default_volume_tables.xml`）里
+**没有索引范围**——范围是 AudioService 开机后逐个 `initStreamVolume()` 灌进来的
+（`:3731`）；可是 APM 自己在 `initialize()` → `onNewAudioModulesAvailableInt()` 打开输出时
+就先 `applyStreamVolumes(..., force)`（`:7155`）走到了这里，那一刻 12 组范围全是 -1。
+⇒ **AOSP 通用的启动顺序噪声**，任何用 legacy 音量 XML 的设备都有，与我们的 devicePorts 无关；
+之后 AudioService 灌了范围就一切正常。根治 = 换成 engine 配置 XML
+（`audio_policy_engine_configuration.xml` 系列，`<volumeGroup>` 自带 `indexMin/indexMax`），
+是一次不小的音频策略搬家，只为消 12 行日志不值。**结案：只记不修。**
 
 ---
 

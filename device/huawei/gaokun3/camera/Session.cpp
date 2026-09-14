@@ -11,6 +11,8 @@
 #include "Session.h"
 
 #include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <aidl/android/hardware/camera/common/Status.h>
 #include <aidl/android/hardware/camera/device/ConfigureStreamsRet.h>
@@ -64,8 +66,63 @@ ndk::ScopedAStatus err(Status s)
 
 Session::Session(std::shared_ptr<libcamera::Camera> cam, SensorFacts facts,
 		 std::shared_ptr<ICameraDeviceCallback> cb)
-	: cam_(std::move(cam)), facts_(std::move(facts)), cb_(std::move(cb))
+	: flashLed_(facts.flashLed), cam_(std::move(cam)), facts_(std::move(facts)),
+	  cb_(std::move(cb))
 {
+	if (!flashLed_.empty()) {
+		char buf[32] = {};
+		int fd = open((flashLed_ + "/max_brightness").c_str(), O_RDONLY | O_CLOEXEC);
+		if (fd >= 0) {
+			ssize_t n = read(fd, buf, sizeof(buf) - 1);
+			::close(fd);   /* 不是 Session::close() */
+			if (n > 0) {
+				std::string v(buf, static_cast<size_t>(n));
+				while (!v.empty() && (v.back() == '\n' || v.back() == ' '))
+					v.pop_back();
+				if (!v.empty())
+					ledMax_ = v;
+			}
+		}
+	}
+}
+
+void Session::setLed(bool on)
+{
+	if (flashLed_.empty() || on == ledOn_)
+		return;
+	int fd = open((flashLed_ + "/brightness").c_str(), O_WRONLY | O_CLOEXEC);
+	if (fd < 0) {
+		ALOGE("闪光灯：打不开 %s/brightness: %s", flashLed_.c_str(), strerror(errno));
+		return;
+	}
+	const std::string v = on ? ledMax_ : "0";
+	if (write(fd, v.c_str(), v.size()) != static_cast<ssize_t>(v.size()))
+		ALOGE("闪光灯：写 brightness 失败: %s", strerror(errno));
+	else
+		ledOn_ = on;
+	::close(fd);
+}
+
+void Session::parseFlashControls(const std::vector<uint8_t> &settings, uint8_t *trigger,
+				 uint8_t *intent)
+{
+	/* 请求不带设置 = 与上一帧相同（CaptureRequest.aidl 的约定），粘滞值不动。 */
+	if (settings.empty())
+		return;
+	const camera_metadata_t *m =
+		reinterpret_cast<const camera_metadata_t *>(settings.data());
+	camera_metadata_ro_entry_t e;
+	if (find_camera_metadata_ro_entry(m, ANDROID_CONTROL_AE_MODE, &e) == 0 && e.count)
+		aeMode_ = e.data.u8[0];
+	if (find_camera_metadata_ro_entry(m, ANDROID_FLASH_MODE, &e) == 0 && e.count)
+		flashMode_ = e.data.u8[0];
+	if (trigger &&
+	    find_camera_metadata_ro_entry(m, ANDROID_CONTROL_AE_PRECAPTURE_TRIGGER, &e) == 0 &&
+	    e.count)
+		*trigger = e.data.u8[0];
+	if (intent &&
+	    find_camera_metadata_ro_entry(m, ANDROID_CONTROL_CAPTURE_INTENT, &e) == 0 && e.count)
+		*intent = e.data.u8[0];
 }
 
 Session::~Session()
@@ -93,23 +150,29 @@ bool Session::init()
 
 ndk::ScopedAStatus Session::close()
 {
-	std::lock_guard<std::mutex> lk(mutex_);
-	if (closed_)
-		return ndk::ScopedAStatus::ok();
-	closed_ = true;
+	{
+		std::lock_guard<std::mutex> lk(mutex_);
+		if (closed_)
+			return ndk::ScopedAStatus::ok();
+		closed_ = true;
 
-	if (streaming_) {
-		cam_->stop();
-		streaming_ = false;
+		if (streaming_) {
+			cam_->stop();
+			streaming_ = false;
+		}
+		cam_->requestCompleted.disconnect(this, &Session::onRequestCompleted);
+		freeRequests_.clear();
+		pending_.clear();
+		dropAllCaches();
+		allocator_.reset();
+		config_.reset();
+		cam_->release();
+		setLed(false);   /* 会话结束灯必须灭，别让 torch 请求把灯留着 */
+		ALOGI("会话已关闭");
 	}
-	cam_->requestCompleted.disconnect(this, &Session::onRequestCompleted);
-	freeRequests_.clear();
-	pending_.clear();
-	dropAllCaches();
-	allocator_.reset();
-	config_.reset();
-	cam_->release();
-	ALOGI("会话已关闭");
+	/* 在锁外通知 Device（它会拿自己的锁）。 */
+	if (onClosed_)
+		onClosed_();
 	return ndk::ScopedAStatus::ok();
 }
 
@@ -298,7 +361,21 @@ ndk::ScopedAStatus Session::processCaptureRequest(const std::vector<CaptureReque
 		libcamera::Request *key = lreq.get();
 		Pending p;
 		p.frameNumber = r.frameNumber;
-		p.settings = r.settings.metadata;
+		/*
+		 * ★ 设置可能走 FMQ（fmqSettingsSize > 0 时 settings 字段是空的）——框架优先写队列。
+		 *   此前只读 settings 字段，于是绝大多数请求在我们眼里"没有设置"：结果里回显不了
+		 *   请求键，闪光/AE 模式也读不到。现在两条路都收。
+		 */
+		if (r.fmqSettingsSize > 0) {
+			p.settings.resize(static_cast<size_t>(r.fmqSettingsSize));
+			if (!requestQueue_->read(reinterpret_cast<int8_t *>(p.settings.data()),
+						 static_cast<size_t>(r.fmqSettingsSize))) {
+				ALOGE("从 FMQ 读请求设置失败（%lld 字节）", (long long)r.fmqSettingsSize);
+				p.settings.clear();
+			}
+		} else {
+			p.settings = r.settings.metadata;
+		}
 
 		/* ⚠️ 现在就导入每一路的缓冲：AIDL 的 StreamBuffer 不可拷贝
 		 *    （见 Session.h 的说明），而入参是 const&，move 不出来。 */
@@ -326,6 +403,53 @@ ndk::ScopedAStatus Session::processCaptureRequest(const std::vector<CaptureReque
 			/* ⚠️ 不要在这里 free：句柄归缓存所有，下一帧还要用。 */
 			freeRequests_.push_back(std::move(lreq));
 			break;
+		}
+
+		/* ── 闪光灯策略（见 Session.h 里的说明）── */
+		{
+			uint8_t trigger = ANDROID_CONTROL_AE_PRECAPTURE_TRIGGER_IDLE;
+			uint8_t intent = ANDROID_CONTROL_CAPTURE_INTENT_PREVIEW;
+			parseFlashControls(p.settings, &trigger, &intent);
+			if (!flashLed_.empty()) {
+				bool hasBlob = false;
+				for (const auto &b : p.buffers)
+					hasBlob = hasBlob || b.isBlob;
+				const bool torch = flashMode_ == ANDROID_FLASH_MODE_TORCH;
+				const bool dark = lastLuma_ < kDarkLuma;
+				const bool flashAe =
+					aeMode_ == ANDROID_CONTROL_AE_MODE_ON_ALWAYS_FLASH ||
+					(aeMode_ == ANDROID_CONTROL_AE_MODE_ON_AUTO_FLASH && dark);
+				if (trigger == ANDROID_CONTROL_AE_PRECAPTURE_TRIGGER_START) {
+					flashArmed_ = flashAe;
+					precaptureLeft_ = flashAe ? kPrecaptureFrames : 1;
+				} else if (trigger == ANDROID_CONTROL_AE_PRECAPTURE_TRIGGER_CANCEL) {
+					flashArmed_ = false;
+					precaptureLeft_ = 0;
+				}
+				const bool still = hasBlob ||
+						   intent == ANDROID_CONTROL_CAPTURE_INTENT_STILL_CAPTURE ||
+						   flashMode_ == ANDROID_FLASH_MODE_SINGLE;
+				const bool fire = torch || (flashAe && (flashArmed_ || still));
+				if (fire) {
+					setLed(true);
+					firedPending_++;
+				} else if (firedPending_ == 0) {
+					setLed(false);
+				}
+				p.flashFired = fire;
+				p.endsFlash = flashArmed_ && still && !torch;
+				if (precaptureLeft_ > 0) {
+					p.aeState = ANDROID_CONTROL_AE_STATE_PRECAPTURE;
+					precaptureLeft_--;
+				} else if (aeMode_ == ANDROID_CONTROL_AE_MODE_ON_AUTO_FLASH && dark &&
+					   !fire) {
+					p.aeState = ANDROID_CONTROL_AE_STATE_FLASH_REQUIRED;
+				} else {
+					p.aeState = ANDROID_CONTROL_AE_STATE_CONVERGED;
+				}
+			}
+			p.aeMode = aeMode_;
+			p.flashMode = flashMode_;
 		}
 
 		pending_[key] = std::move(p);
@@ -697,6 +821,24 @@ void Session::onRequestCompleted(libcamera::Request *req)
 		}
 	}
 
+	/* 采样平均亮度（每 16 行 × 每 16 列），给 AUTO 闪光当"太暗"判据。软件 ISP 的 IPA
+	 * 不往结果元数据里写曝光/增益，这是我们唯一现成的亮度信号。 */
+	if (rgb) {
+		uint64_t sum = 0;
+		uint32_t n = 0;
+		for (int y = 0; y < srcHeight_; y += 16) {
+			const uint8_t *px = rgb + static_cast<size_t>(y) * srcWidth_ * 3;
+			for (int x = 0; x < srcWidth_; x += 16, px += 48) {
+				sum += px[0] + 2u * px[1] + px[2];
+				n++;
+			}
+		}
+		if (n) {
+			std::lock_guard<std::mutex> lk(mutex_);
+			lastLuma_ = static_cast<int>(sum / (4ull * n));
+		}
+	}
+
 	/* ── 顺序要求：先 shutter，后结果 ── */
 	NotifyMsg msg;
 	ShutterMsg shutter;
@@ -734,8 +876,14 @@ void Session::onRequestCompleted(libcamera::Request *req)
 	result.frameNumber = pend.frameNumber;
 	result.fmqResultSize = 0;
 	result.partialResult = 1;
-	/* ⬜ 之后应把 libcamera 的实际曝光/增益也填回去。 */
-	result.result.metadata = buildResult(pend.settings, timestamp, /*pipelineDepth=*/4);
+	/* ⬜ 之后应把 libcamera 的实际曝光/增益也填回去（软件 ISP 的 IPA 目前不报）。 */
+	FrameResultFacts fr;
+	fr.flashState = flashLed_.empty() ? ANDROID_FLASH_STATE_UNAVAILABLE
+			: (pend.flashFired ? ANDROID_FLASH_STATE_FIRED : ANDROID_FLASH_STATE_READY);
+	fr.aeState = pend.aeState;
+	fr.aeMode = pend.aeMode;
+	fr.flashMode = pend.flashMode;
+	result.result.metadata = buildResult(pend.settings, timestamp, /*pipelineDepth=*/4, fr);
 
 	for (size_t i = 0; i < pend.buffers.size(); i++) {
 		StreamBuffer sb;
@@ -757,6 +905,12 @@ void Session::onRequestCompleted(libcamera::Request *req)
 	{
 		std::lock_guard<std::mutex> lk(mutex_);
 		freeRequests_.push_back(std::unique_ptr<libcamera::Request>(req));
+		/* 闪光灯：点过灯的请求都完成了、而且没人还要灯，才灭。 */
+		if (pend.endsFlash)
+			flashArmed_ = false;
+		if (pend.flashFired && --firedPending_ == 0 && !flashArmed_ &&
+		    flashMode_ != ANDROID_FLASH_MODE_TORCH)
+			setLed(false);
 	}
 }
 

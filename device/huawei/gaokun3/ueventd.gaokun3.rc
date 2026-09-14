@@ -35,3 +35,14 @@
 #   ★ 判据：同一个程序 root 跑得通、服务用户跑不通 ⇒ 先查节点权限，别查驱动。
 /dev/media*               0660   media      camera
 /dev/v4l-subdev*          0660   media      camera
+
+# ── 后摄闪光灯（#110 / #111）──
+# LED 在 PM8350C 闪光模块上，内核暴露成 /sys/class/leds/white:flash（patches/0036）。
+# 相机 HAL 以 cameraserver 跑、在 camera 组里；节点默认 root 0644，HAL 写不了 brightness
+# —— 症状会是应用里有闪光按钮、按了不亮，logcat 只有一条 EACCES。
+# ★ ueventd 按 "/sys/class/<subsystem>/<basename>" 匹配（SysfsPermissions::MatchWithSubsystem），
+#   所以这里可以写 class 路径而不用写 PMIC 那串真实设备路径。
+/sys/class/leds/white:flash   brightness         0664   root   camera
+/sys/class/leds/white:flash   flash_brightness   0664   root   camera
+/sys/class/leds/white:flash   flash_strobe       0664   root   camera
+/sys/class/leds/white:flash   flash_timeout      0664   root   camera

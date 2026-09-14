@@ -53,6 +53,23 @@ fi
 DEF=$(S 'mkdir -p /mnt/esp; mount -t vfat /dev/block/by-name/esp /mnt/esp 2>/dev/null; grep ^default /mnt/esp/loader/loader.conf' | tr -d '\r')
 ok "ESP 的 $DEF"
 
+# ★ ESP 空间（TODO B13，#110）：postinstall 要求"可用 + 目标槽将被覆盖的旧文件 > 56 MB"，
+#   不够就在最后一步失败，而那看起来像"新版本有问题"。2026-09-14 本机被三周的实验槽位
+#   （slot_cam / slot_cam4）吃到只剩 4.5 MB 可用（合计 47 MB），差 9 MB 就翻车。
+#   这里提前算同一笔账，并把 slot_a/slot_b 之外的目录点名 —— 那些就是该删的实验残留。
+case "$CUR" in _a) TGT=b ;; _b) TGT=a ;; *) die "看不懂当前槽 '$CUR'" ;; esac
+ESP_KB=$(S "df -k /mnt/esp | tail -1 | awk '{print \\$4}'; MID=\\$(ls /mnt/esp | grep -E '^[0-9a-f]{32}\\$' | head -1); for f in Image ramdisk.img gaokun3.dtb recovery-ramdisk.img; do [ -f /mnt/esp/\\$MID/android/slot_$TGT/\\$f ] && stat -c %s /mnt/esp/\\$MID/android/slot_$TGT/\\$f; done" | tr -d '\r' | awk 'NR==1{kb=$1} NR>1{kb+=$1/1024} END{printf "%d", kb}')
+EXTRA=$(S "MID=\\$(ls /mnt/esp | grep -E '^[0-9a-f]{32}\\$' | head -1); ls -d /mnt/esp/\\$MID/android/*/ 2>/dev/null | grep -v '/slot_[ab]/\\$' | xargs -r du -sk 2>/dev/null" | tr -d '\r')
+if [ "${ESP_KB:-0}" -gt 57344 ]; then
+    ok "ESP 给目标槽 slot_$TGT 的空间约 $((ESP_KB/1024)) MB（含将被覆盖的旧文件；postinstall 要 56 MB）"
+else
+    echo "✗ ESP 只够 $((ESP_KB/1024)) MB，postinstall 要 56 MB —— 会在最后一步失败"
+    [ -n "$EXTRA" ] && { echo "  slot_a/slot_b 之外的目录（实验残留，KB）："; echo "$EXTRA" | sed 's/^/    /'; }
+    S 'umount /mnt/esp 2>/dev/null'
+    die "先清 ESP（连同 loader/entries/ 里指向它们的条目）再来"
+fi
+[ -n "$EXTRA" ] && { echo "⚠️ ESP 上有 slot_a/slot_b 之外的目录（KB），验收完记得删："; echo "$EXTRA" | sed 's/^/    /'; }
+
 if [ "$MODE" != "--go" ]; then
     echo; echo "（--check 模式，没有改动任何东西。确认现场有人能按电源键后用 --go）"
     S 'umount /mnt/esp 2>/dev/null'

@@ -33,3 +33,8 @@ genfscon sysfs /devices/platform/soc@0/ae00000.display-subsystem/ae96000.dsi/ae9
 # ⚠️ wakeup 目录在很多设备下都有，这里只标有证据的那一处。
 #    以后普查再发现别的，照样一条一条加 —— 别图省事去标整个 /devices/platform。
 genfscon sysfs /devices/platform/soc@0/a6f8800.usb/a600000.usb/xhci-hcd.5.auto/wakeup u:object_r:sysfs_wakeup:s0
+
+# 后摄闪光灯 LED（PM8350C 闪光模块，patches/0036）。/sys/class/leds 只是符号链接，标签要打在
+# 真实 inode 路径上（同 backlight 那条的教训，#77）。打上 sysfs_leds 之后 hal_camera_default.te
+# 里那两条 allow 才有对象。路径来自实机 readlink -f /sys/class/leds/white:flash。
+genfscon sysfs /devices/platform/soc@0/c440000.spmi/spmi-0/0-02/c440000.spmi:pmic@2:led-controller@ee00/leds u:object_r:sysfs_leds:s0

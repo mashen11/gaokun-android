@@ -54,6 +54,10 @@ public:
 					  CameraIdAndStreamCombination> &in_configs,
 		bool *_aidl_return) override;
 
+	/* 手电筒状态变化 → 框架（Device 在 setTorchMode / open / close 时调）。 */
+	void notifyTorch(const std::string &deviceName,
+			 aidl::android::hardware::camera::common::TorchModeStatus status);
+
 private:
 	std::mutex mutex_;
 	std::unique_ptr<libcamera::CameraManager> cm_;

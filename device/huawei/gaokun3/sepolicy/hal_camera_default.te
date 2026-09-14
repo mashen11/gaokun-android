@@ -1,0 +1,20 @@
+# 相机 HAL（android.hardware.camera.provider-service.gaokun3，libcamera 软件 ISP）。
+#
+# 域复用 AOSP 的 hal_camera_default（system/sepolicy/vendor/hal_camera_default.te）：
+# binder / 服务注册 / video_device / camera_device / dmabuf heap / gpu_device 都现成。
+# 这里只补 libcamera 这条与手机 SoC 相机 HAL 不同的路径上缺的几样。
+# ⚠️ 全系统仍 permissive（TODO B1）：这些规则现在的作用是让 denial 日志里剩下的
+#    才是真缺口，不是"HAL 跑在 init 域里"那种照抄就错的噪声。
+
+# libcamera 的日志（LIBCAMERA_LOG_FILE=/data/vendor/camera/libcamera.log）
+type gaokun3_camera_vendor_data_file, file_type, data_file_type;
+allow hal_camera_default gaokun3_camera_vendor_data_file:dir create_dir_perms;
+allow hal_camera_default gaokun3_camera_vendor_data_file:file create_file_perms;
+
+# libcamera 枚举设备走 sysfs（/sys/class/video4linux/*、/sys/devices/…/uevent、dev），
+# 主线 V4L2 的 Media Controller 也靠它把 /dev/media* 对到 /dev/v4l-subdev*。
+r_dir_file(hal_camera_default, sysfs)
+
+# 后摄闪光灯：/sys/class/leds/white:flash/{brightness,…}（genfs_contexts 打成 sysfs_leds）
+allow hal_camera_default sysfs_leds:dir r_dir_perms;
+allow hal_camera_default sysfs_leds:file rw_file_perms;
