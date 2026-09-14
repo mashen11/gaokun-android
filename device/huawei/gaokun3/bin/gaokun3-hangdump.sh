@@ -76,8 +76,13 @@ collect() {
         { echo "== $f"; timeout 5 cat "$f"; } >> $O/05-pcm.txt 2>&1
     done
 
-    { echo "== failed_transaction_log"; timeout 5 cat /sys/kernel/debug/binder/failed_transaction_log
-      echo "== transactions (前 300 行)"; timeout 5 head -300 /sys/kernel/debug/binder/transactions
+    # ★ 2026-09-14：binder 日志改从 binderfs 读（/dev/binderfs/binder_logs/，本机实测存在且可读），
+    #   不再碰 debugfs —— 那条 neverallow（domain.te 读 debugfs）没有 userdebug 豁免，是 SELinux
+    #   转 enforcing 的两个结构性阻塞之一（TODO B1）。debugfs 只作回落。
+    BL=/dev/binderfs/binder_logs; [ -r $BL/transactions ] || BL=/sys/kernel/debug/binder
+    { echo "== source: $BL"
+      echo "== failed_transaction_log"; timeout 5 cat $BL/failed_transaction_log
+      echo "== transactions (前 300 行)"; timeout 5 head -300 $BL/transactions
     } > $O/06-binder.txt 2>&1
 
     timeout 30 logcat -d -b all -t 3000 > $O/07-logcat.txt 2>&1
