@@ -88,6 +88,14 @@ KPATCHES=(
     #    0033（s5k3l6xx 驱动）故意【不列】：本机后摄不是 S5K3L6，文件留作案卷。
     0032-arm64-dts-gaokun3-camera-rear-ov13b10-with-board-rails.patch
     0034-media-i2c-ov13b10-of-match-and-gaokun3-power-sequence.patch
+    # ★ 0035（#108）：camss 等不到某颗传感器时（同板另一种后摄模组），超时后只带绑上的传感器
+    #    完成 notifier —— 于是"后摄模组不对"只丢后摄，前摄照常。内核 #19 两路实测：
+    #    正常 47 个 subdev；ov13b10.fail_probe=1 时 20 s 后回落、45 个 subdev、前摄出帧。
+    0035-media-camss-continue-without-never-bound-sensors.patch
+    # ★ 0036（#110）：后摄闪光灯 = PMIC pmc8280c 闪光模块 1+4 路（内核 #19 逐路点亮实测），
+    #    并删掉不亮的 GPIO93 gpio-led。只动 camera.dtsi，叠在 0032 之后。
+    #    ⚠️ 需要 LEDS_CLASS_FLASH=y LEDS_QCOM_FLASH=y（kernel-config-android.sh 已断言）。
+    0036-arm64-dts-gaokun3-pmic-flash-led-channels-1-4.patch
 )
 
 # ⚠️ 诊断补丁【不进发版内核】：只在带 --with-diag 时打。顺序有依赖：0028/0029 依赖 0023，
