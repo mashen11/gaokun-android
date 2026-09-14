@@ -50,6 +50,10 @@ struct FrameResultFacts {
 	/* 请求里可能不带这两项（沿用上一帧），结果里要按会话的粘滞值回显。 */
 	uint8_t aeMode = ANDROID_CONTROL_AE_MODE_ON;
 	uint8_t flashMode = ANDROID_FLASH_MODE_OFF;
+	/* libcamera 报回来的实际曝光/增益（软件 ISP 的 libipa Agc 每帧填 ExposureTime/AnalogueGain）。
+	 * 0 = 这一帧没有。ISO 按 100 × 模拟增益折算（软件 ISP 没有别的定义）。 */
+	int64_t exposureNs = 0;
+	int32_t sensitivity = 0;
 };
 std::vector<uint8_t> buildResult(const std::vector<uint8_t> &requestSettings,
 				 int64_t timestampNs, uint8_t pipelineDepth,

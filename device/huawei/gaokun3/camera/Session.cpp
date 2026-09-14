@@ -10,8 +10,11 @@
  */
 #include "Session.h"
 
+#include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <thread>
 #include <unistd.h>
 
 #include <aidl/android/hardware/camera/common/Status.h>
@@ -35,6 +38,7 @@
 #include <ui/Rect.h>
 #include <utils/Errors.h>
 
+#include <libcamera/control_ids.h>
 #include <libcamera/formats.h>
 
 using ::aidl::android::hardware::camera::common::Status;
@@ -415,16 +419,20 @@ ndk::ScopedAStatus Session::processCaptureRequest(const std::vector<CaptureReque
 				for (const auto &b : p.buffers)
 					hasBlob = hasBlob || b.isBlob;
 				const bool torch = flashMode_ == ANDROID_FLASH_MODE_TORCH;
-				const bool dark = lastLuma_ < kDarkLuma;
+				/* "暗" = 画面均值低，或 AGC 已把模拟增益推到 kDarkGain 以上（后者更可靠：
+				 * AGC 会把能救的场景拉亮，增益高就是它在硬撑）。 */
+				const bool dark = lastLuma_ < kDarkLuma || lastGain_ >= kDarkGain;
 				const bool flashAe =
 					aeMode_ == ANDROID_CONTROL_AE_MODE_ON_ALWAYS_FLASH ||
 					(aeMode_ == ANDROID_CONTROL_AE_MODE_ON_AUTO_FLASH && dark);
 				if (trigger == ANDROID_CONTROL_AE_PRECAPTURE_TRIGGER_START) {
 					flashArmed_ = flashAe;
-					precaptureLeft_ = flashAe ? kPrecaptureFrames : 1;
+					precaptureActive_ = true;
+					precaptureFrames_ = 0;
+					lumaStable_ = 0;
 				} else if (trigger == ANDROID_CONTROL_AE_PRECAPTURE_TRIGGER_CANCEL) {
 					flashArmed_ = false;
-					precaptureLeft_ = 0;
+					precaptureActive_ = false;
 				}
 				const bool still = hasBlob ||
 						   intent == ANDROID_CONTROL_CAPTURE_INTENT_STILL_CAPTURE ||
@@ -438,9 +446,19 @@ ndk::ScopedAStatus Session::processCaptureRequest(const std::vector<CaptureReque
 				}
 				p.flashFired = fire;
 				p.endsFlash = flashArmed_ && still && !torch;
-				if (precaptureLeft_ > 0) {
+				/*
+				 * 预闪收敛：灯是在这个请求点亮的，而在途的几帧还是没灯的曝光；等 libcamera 的
+				 * AGC 在灯光下重新收敛（亮度连续 2 帧变化 < kLumaStableDelta）再报 CONVERGED，
+				 * 应用才按快门。至少 kPrecaptureMin 帧兜住排队深度，最多 kPrecaptureMax 帧兜住不收敛。
+				 */
+				if (precaptureActive_) {
+					precaptureFrames_++;
+					if ((precaptureFrames_ >= kPrecaptureMin && lumaStable_ >= 2) ||
+					    precaptureFrames_ >= kPrecaptureMax)
+						precaptureActive_ = false;
+				}
+				if (precaptureActive_) {
 					p.aeState = ANDROID_CONTROL_AE_STATE_PRECAPTURE;
-					precaptureLeft_--;
 				} else if (aeMode_ == ANDROID_CONTROL_AE_MODE_ON_AUTO_FLASH && dark &&
 					   !fire) {
 					p.aeState = ANDROID_CONTROL_AE_STATE_FLASH_REQUIRED;
@@ -578,7 +596,7 @@ void Session::dropAllCaches()
 }
 
 bool Session::deliver(const uint8_t *rgb, buffer_handle_t dst,
-		      int32_t dstW, int32_t dstH)
+		      int32_t dstW, int32_t dstH, int chromaBlur)
 {
 	const int srcStride = srcWidth_ * 3;
 
@@ -632,6 +650,12 @@ bool Session::deliver(const uint8_t *rgb, buffer_handle_t dst,
 					       srcWidth_, srcHeight_,
 					       dy, dstW, du, cw, dv, cw,
 					       dstW, dstH, libyuv::kFilterBilinear);
+	}
+
+	if (rc == 0 && chromaBlur > 0) {
+		/* 色度降噪：U/V 只有 1/4 分辨率，盒式模糊几乎免费，而彩色噪点正是最难看的那种。 */
+		boxBlurPlane(du, cw, chh, cw, chromaBlur);
+		boxBlurPlane(dv, cw, chh, cw, chromaBlur);
 	}
 
 	if (rc == 0) {
@@ -766,6 +790,93 @@ bool Session::deliverJpeg(const uint8_t *rgb, buffer_handle_t dst,
 	return ok;
 }
 
+int Session::denoiseThreshold() const
+{
+	/* 调用方不持锁也没关系：lastGain_ 是个 double，读到旧值只是差一帧的强度。 */
+	if (lastGain_ < kDenoiseGain)
+		return 0;
+	return std::clamp(static_cast<int>(lastGain_ * 3.0), 6, 36);
+}
+
+int Session::chromaBlurRadius() const
+{
+	if (lastGain_ < kDenoiseGain)
+		return 0;
+	return lastGain_ < 5.0 ? 1 : 2;
+}
+
+/*
+ * 3×3 ε 滤波：只把与中心像素相差 ≤ T 的邻居算进平均 —— 平掉噪声、保住边缘（边缘两侧差值大于 T，
+ * 不会被平均进来）。按行切给 4 个线程；13 MP 单线程约 1 秒，四线程约 0.3 秒，静态照片能接受。
+ */
+void Session::epsilonFilterRgb(const uint8_t *src, uint8_t *dst, int w, int h, int threshold)
+{
+	auto work = [=](int y0, int y1) {
+		for (int y = y0; y < y1; y++) {
+			const int ym = y > 0 ? y - 1 : y;
+			const int yp = y < h - 1 ? y + 1 : y;
+			const uint8_t *r0 = src + static_cast<size_t>(ym) * w * 3;
+			const uint8_t *r1 = src + static_cast<size_t>(y) * w * 3;
+			const uint8_t *r2 = src + static_cast<size_t>(yp) * w * 3;
+			uint8_t *out = dst + static_cast<size_t>(y) * w * 3;
+			for (int x = 0; x < w; x++) {
+				const int xm = (x > 0 ? x - 1 : x) * 3;
+				const int x0 = x * 3;
+				const int xp = (x < w - 1 ? x + 1 : x) * 3;
+				for (int c = 0; c < 3; c++) {
+					const int center = r1[x0 + c];
+					int sum = center, n = 1;
+					const int nb[8] = { r0[xm + c], r0[x0 + c], r0[xp + c],
+							    r1[xm + c],             r1[xp + c],
+							    r2[xm + c], r2[x0 + c], r2[xp + c] };
+					for (int v : nb) {
+						if (std::abs(v - center) <= threshold) {
+							sum += v;
+							n++;
+						}
+					}
+					out[x0 + c] = static_cast<uint8_t>((sum + n / 2) / n);
+				}
+			}
+		}
+	};
+	const int nthreads = std::clamp(h / 256, 1, 4);
+	std::vector<std::thread> pool;
+	for (int t = 0; t < nthreads; t++) {
+		const int y0 = h * t / nthreads, y1 = h * (t + 1) / nthreads;
+		pool.emplace_back(work, y0, y1);
+	}
+	for (auto &t : pool)
+		t.join();
+}
+
+/* 可分离盒式模糊（先横后纵），半径 radius，边界夹紧。用在 1/4 分辩率的色度平面上。 */
+void Session::boxBlurPlane(uint8_t *plane, int w, int h, int stride, int radius)
+{
+	if (radius <= 0 || w <= 0 || h <= 0)
+		return;
+	std::vector<uint8_t> tmp(static_cast<size_t>(w) * h);
+	const int win = 2 * radius + 1;
+	for (int y = 0; y < h; y++) {
+		const uint8_t *row = plane + static_cast<size_t>(y) * stride;
+		uint8_t *out = tmp.data() + static_cast<size_t>(y) * w;
+		for (int x = 0; x < w; x++) {
+			int sum = 0;
+			for (int k = -radius; k <= radius; k++)
+				sum += row[std::clamp(x + k, 0, w - 1)];
+			out[x] = static_cast<uint8_t>((sum + win / 2) / win);
+		}
+	}
+	for (int x = 0; x < w; x++) {
+		for (int y = 0; y < h; y++) {
+			int sum = 0;
+			for (int k = -radius; k <= radius; k++)
+				sum += tmp[static_cast<size_t>(std::clamp(y + k, 0, h - 1)) * w + x];
+			plane[static_cast<size_t>(y) * stride + x] = static_cast<uint8_t>((sum + win / 2) / win);
+		}
+	}
+}
+
 void Session::onRequestCompleted(libcamera::Request *req)
 {
 	if (req->status() == libcamera::Request::RequestCancelled)
@@ -834,8 +945,45 @@ void Session::onRequestCompleted(libcamera::Request *req)
 			}
 		}
 		if (n) {
+			const int luma = static_cast<int>(sum / (4ull * n));
 			std::lock_guard<std::mutex> lk(mutex_);
-			lastLuma_ = static_cast<int>(sum / (4ull * n));
+			lumaStable_ = (std::abs(luma - lastLuma_) < kLumaStableDelta) ? lumaStable_ + 1 : 0;
+			lastLuma_ = luma;
+		}
+	}
+
+	/* libcamera（libipa 的 Agc::fillMetadata）每帧报实际曝光与模拟增益：回填结果、驱动降噪强度与闪光判据。 */
+	int64_t exposureNs = 0;
+	int32_t sensitivity = 0;
+	{
+		const libcamera::ControlList &md = req->metadata();
+		auto gain = md.get(libcamera::controls::AnalogueGain);
+		auto expo = md.get(libcamera::controls::ExposureTime);
+		std::lock_guard<std::mutex> lk(mutex_);
+		if (gain && *gain > 0)
+			lastGain_ = *gain;
+		if (expo && *expo > 0)
+			lastExposureUs_ = *expo;
+		if (gain)
+			sensitivity = static_cast<int32_t>(*gain * 100.0f + 0.5f);
+		if (expo)
+			exposureNs = static_cast<int64_t>(*expo) * 1000;
+	}
+
+	/* 降噪：静态照片走 RGB ε 滤波（有 BLOB 流且增益够高才算，13 MP 不便宜）；预览只模糊色度。 */
+	const int denoiseT = denoiseThreshold();
+	const int chromaBlur = chromaBlurRadius();
+	std::vector<uint8_t> denoised;
+	const uint8_t *rgbStill = rgb;
+	if (rgb && denoiseT > 0) {
+		bool hasBlob = false;
+		for (const auto &pb : pend.buffers)
+			hasBlob = hasBlob || pb.isBlob;
+		if (hasBlob) {
+			denoised.resize(static_cast<size_t>(srcWidth_) * srcHeight_ * 3);
+			epsilonFilterRgb(rgb, denoised.data(), srcWidth_, srcHeight_, denoiseT);
+			rgbStill = denoised.data();
+			ALOGD("静态照片降噪：增益 %.2f → ε=%d", lastGain_, denoiseT);
 		}
 	}
 
@@ -853,9 +1001,9 @@ void Session::onRequestCompleted(libcamera::Request *req)
 	std::vector<bool> okv;
 	for (auto &pb : pend.buffers) {
 		bool ok = rgb && (pb.isBlob
-				  ? deliverJpeg(rgb, pb.handle, pb.width, pb.height,
+				  ? deliverJpeg(rgbStill, pb.handle, pb.width, pb.height,
 						pb.blobSize, /*quality=*/90)
-				  : deliver(rgb, pb.handle, pb.width, pb.height));
+				  : deliver(rgb, pb.handle, pb.width, pb.height, chromaBlur));
 		okv.push_back(ok);
 		if (!ok) {
 			NotifyMsg emsg;
@@ -883,6 +1031,8 @@ void Session::onRequestCompleted(libcamera::Request *req)
 	fr.aeState = pend.aeState;
 	fr.aeMode = pend.aeMode;
 	fr.flashMode = pend.flashMode;
+	fr.exposureNs = exposureNs;
+	fr.sensitivity = sensitivity;
 	result.result.metadata = buildResult(pend.settings, timestamp, /*pipelineDepth=*/4, fr);
 
 	for (size_t i = 0; i < pend.buffers.size(); i++) {

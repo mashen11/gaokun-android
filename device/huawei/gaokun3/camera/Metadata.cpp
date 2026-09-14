@@ -305,6 +305,10 @@ std::vector<uint8_t> buildResult(const std::vector<uint8_t> &requestSettings,
 	const uint8_t afState = ANDROID_CONTROL_AF_STATE_INACTIVE;
 	add_camera_metadata_entry(m, ANDROID_CONTROL_AF_STATE, &afState, 1);
 	add_camera_metadata_entry(m, ANDROID_FLASH_STATE, &fr.flashState, 1);
+	if (fr.exposureNs > 0)
+		setOrAdd(m, ANDROID_SENSOR_EXPOSURE_TIME, &fr.exposureNs, 1);
+	if (fr.sensitivity > 0)
+		setOrAdd(m, ANDROID_SENSOR_SENSITIVITY, &fr.sensitivity, 1);
 	const uint8_t lensState = ANDROID_LENS_STATE_STATIONARY;   /* 定焦 */
 	add_camera_metadata_entry(m, ANDROID_LENS_STATE, &lensState, 1);
 

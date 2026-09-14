@@ -16,20 +16,63 @@
 WANT="$1"
 S=/sys/class/usb_role/a600000.usb-role-switch/role
 D=/sys/bus/platform/devices/a600000.usb
+UDC=/sys/class/udc/a600000.usb/state
 WL=gaokun3_usbrole
 TAG=gaokun3-usbrole
+WATCH_PID=/data/vendor/gaokun3/usbrole-watch.pid
 
 say() { log -t $TAG "$*"; }
 
 case "$WANT" in
-    host|device) ;;
-    *) say "用法: $0 host|device"; exit 2 ;;
+    host|device|watch) ;;
+    *) say "用法: $0 host|device|watch"; exit 2 ;;
 esac
 
 if [ ! -e "$S" ]; then
     say "没有 $S —— 不做任何事（wakelock 保持原状）"
     exit 0
 fi
+
+# ★ 2026-09-14（#112）：插着 USB 主机（PC 在用 adb）时【不切 host、不放行挂起】。
+#   依据：#56 实测 device 模式带着已枚举的 gadget 挂起照样整板复位，所以"插着线睡"在这块板子上
+#   目前不可能安全；而切 host 就等于把用户正在用的 adb 拔掉。折中：插着主机 → 息屏但不睡（反正在充电），
+#   拔线后再切 host 放行挂起（watch 模式每 2 秒看一次 UDC 状态）。判据用 UDC 的 state：
+#   configured/addressed = 有主机在总线另一端；not attached = 没有。
+#   ⚠️ 这不是根治。根治是让 dwc3 device 模式的挂起不复位（见 docs/stage4-findings.md #112）。
+host_attached() {
+    case "$(cat $UDC 2>/dev/null)" in
+        configured|addressed|default) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+stop_watch() {
+    if [ -f "$WATCH_PID" ]; then
+        kill "$(cat $WATCH_PID)" 2>/dev/null
+        rm -f "$WATCH_PID"
+    fi
+}
+
+if [ "$WANT" = watch ]; then
+    # 息屏期间插着主机：等到拔线（或亮屏把我们杀掉）再切 host。
+    echo $$ > "$WATCH_PID"
+    while host_attached; do
+        [ "$(getprop debug.tracing.screen_state)" = 2 ] && { rm -f "$WATCH_PID"; exit 0; }
+        sleep 2
+    done
+    rm -f "$WATCH_PID"
+    say "USB 主机已拔掉（UDC=$(cat $UDC 2>/dev/null)）→ 现在切 host 放行挂起"
+    exec "$0" host
+fi
+
+if [ "$WANT" = host ] && host_attached; then
+    echo $WL > /sys/power/wake_lock
+    say "USB 主机在线（UDC=$(cat $UDC 2>/dev/null)）→ 保持 device、不放行挂起（充电中，息屏不睡）；拔线后自动切 host"
+    stop_watch
+    (setsid "$0" watch >/dev/null 2>&1 &)
+    exit 0
+fi
+[ "$WANT" = device ] && stop_watch
 
 # ★ 先把门关上，再动 role。失败路径全都停在这个状态。
 echo $WL > /sys/power/wake_lock

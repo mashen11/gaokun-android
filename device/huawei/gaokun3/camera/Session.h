@@ -93,7 +93,7 @@ private:
 	/* 把一帧 RGB（源尺寸 srcWidth_×srcHeight_）交付到一个 gralloc 缓冲，
 	 * 必要时缩放到该路流自己的尺寸。 */
 	bool deliver(const uint8_t *rgb, buffer_handle_t dst,
-		     int32_t dstW, int32_t dstH);
+		     int32_t dstW, int32_t dstH, int chromaBlur);
 	/* JPEG 流：把 RGB 编码成 JPEG 写进 BLOB 缓冲。 */
 	bool deliverJpeg(const uint8_t *rgb, buffer_handle_t dst,
 			 int32_t dstW, int32_t dstH, int32_t blobSize,
@@ -110,17 +110,38 @@ private:
 	void setLed(bool on);
 	void parseFlashControls(const std::vector<uint8_t> &settings, uint8_t *trigger,
 				uint8_t *intent);
-	static constexpr int kDarkLuma = 50;          /* AUTO 闪光的"太暗"判据（0..255 采样均值） */
-	static constexpr int kPrecaptureFrames = 4;   /* 预闪期间报几帧 AE_STATE_PRECAPTURE */
+	static constexpr int kDarkLuma = 50;          /* AUTO 闪光的"太暗"判据之一（0..255 采样均值） */
+	static constexpr double kDarkGain = 4.0;      /* 之二：模拟增益 ≥ 4x 就算暗（libcamera 报的） */
+	/* 预闪：至少 kPrecaptureMin 帧、且亮度连续 2 帧稳定才报收敛；最多等 kPrecaptureMax 帧。
+	 * ★ 2026-09-14 第一版固定 4 帧，用户拍出来白墙全过曝：软件 ISP 的 AGC 要十几帧才收敛。 */
+	static constexpr int kPrecaptureMin = 8;
+	static constexpr int kPrecaptureMax = 15;
+	static constexpr int kLumaStableDelta = 8;
 	std::string flashLed_;          /* 空 = 这个相机没有闪光灯 */
 	std::string ledMax_ = "255";    /* max_brightness 的原文 */
 	bool ledOn_ = false;
 	uint8_t aeMode_ = ANDROID_CONTROL_AE_MODE_ON;   /* 粘滞：请求里没带就沿用上一帧 */
 	uint8_t flashMode_ = ANDROID_FLASH_MODE_OFF;
 	bool flashArmed_ = false;       /* 预闪触发后 → 到静态拍照完成为止保持点亮 */
-	int precaptureLeft_ = 0;
+	bool precaptureActive_ = false; /* 预闪进行中（报 AE_STATE_PRECAPTURE） */
+	int precaptureFrames_ = 0;
+	int lumaStable_ = 0;            /* 连续几帧亮度变化 < kLumaStableDelta */
 	int firedPending_ = 0;          /* 在途的、点着灯的请求数 */
 	int lastLuma_ = 128;            /* 上一帧的采样平均亮度 */
+	double lastGain_ = 1.0;         /* 上一帧 libcamera 报的模拟增益 */
+	int32_t lastExposureUs_ = 0;
+
+	/*
+	 * ── 降噪（#112）：软件 ISP 里一个降噪算法都没有，高增益下噪点直接进照片 ──
+	 * 静态照片（BLOB）：RGB 域 3×3 ε 滤波（只平均与中心差 ≤ T 的邻居，T 随增益走），多线程分行。
+	 * 预览（YUV）：只对 U/V 平面做盒式模糊 —— 彩色噪点最难看、色度平面又只有 1/4 分辨率，几乎免费。
+	 * 增益 < kDenoiseGain 一律不动：白天的图别被磨掉细节。
+	 */
+	static constexpr double kDenoiseGain = 2.0;
+	static void epsilonFilterRgb(const uint8_t *src, uint8_t *dst, int w, int h, int threshold);
+	static void boxBlurPlane(uint8_t *plane, int w, int h, int stride, int radius);
+	int denoiseThreshold() const;   /* 0 = 不降噪 */
+	int chromaBlurRadius() const;   /* 0 = 不模糊 */
 	std::function<void()> onClosed_;
 
 	std::shared_ptr<libcamera::Camera> cam_;
