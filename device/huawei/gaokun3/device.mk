@@ -737,10 +737,20 @@ PRODUCT_COPY_FILES += \
 #   ⇒ 「换成 EGoTouchRev」换不来任何东西，我们已经在跑它了。
 #
 # 真正的差距在【参数】：驱动跑的是日用默认值，而它的调参工具里另有一套
-# game_preset，我们从来没用过。差三项，见 bin/gaokun3-touch-mode.sh。
+# game_preset。差三项，见 bin/gaokun3-touch-mode.sh。
 #
-# 默认设 game：本机的目标就是跑手游，而这三项只关掉平滑与按下防抖
-# （少 2 帧延迟），不动任何信号处理门限。切回来：
+# ⚠️★★★ 2026-09-14 更正（#114）：本节原先写着"这三项只关掉平滑与按下防抖
+#   （少 2 帧延迟），不动任何信号处理门限"—— **第三项不是这样**。
+#   `track_jump_dist2=6400` 不是"关掉"什么，而是【打开】了跳点检测；
+#   而驱动里那个判据拿原始位移比阈值，等于一条 **1.0 m/s 的限速线**，
+#   越过之后轨迹反复自毁、永远回不到可上报状态 ⇒ 快滑时**一个点都不上报**。
+#   实测一次甩动被切成 87 条轨迹（详见 bin/gaokun3-touch-mode.sh 顶部）。
+#   ★ 教训：照搬上游预设时，"另外两项是关掉东西，所以第三项也无害"是一次
+#   **没做的功课**，不是一个结论。逐项问"它打开了什么"。
+#   两版预设现在都把 JUMP 清 0，game 与 daily 只差 track_smoothing。
+#
+# 默认仍设 game：本机目标是跑手游，game 关掉坐标平滑（省约 25 ms 稳态滞后），
+# 保留按下防抖（2 帧确认，约 8 ms，换噪声不易变成"按下"）。切回来：
 #   setprop persist.sys.gaokun3.touch_mode daily
 PRODUCT_COPY_FILES += \
     $(LOCAL_PATH)/bin/gaokun3-touch-mode.sh:$(TARGET_COPY_OUT_VENDOR)/bin/gaokun3-touch-mode.sh \

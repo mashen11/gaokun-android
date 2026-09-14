@@ -31,7 +31,7 @@ Everything below was measured on hardware, not inferred. The evidence is in
 | Boot (UEFI + systemd-boot, internal disk) | ✅ | No USB media required |
 | Display 1600×2560 @ 120 Hz | ✅ | The framework default pinned rendering to 60; overridden, measured 8.33 ms vsync |
 | GPU — Adreno 690, hardware Vulkan | ✅ | Mesa 26.0.3 `turnip`; zero SMMU faults over a 22-minute soak |
-| Touchscreen | ⚠️ | Works — Himax HX83121A, needs the gpio174 patch in `patches/` ([#26](docs/stage4-findings.md)). ⚠️ **Not yet tuned for feel**: the driver hard-codes an input `fuzz` of 8 on the MT position axes, which on Android discards slow movement under ~0.4 mm — that value was picked for libinput on the Linux side. The driver also does not report contact size by default, so the framework has nothing to do palm rejection with. [#113](docs/stage4-findings.md) |
+| Touchscreen | ⚠️ | Works — Himax HX83121A, needs the gpio174 patch in `patches/` ([#26](docs/stage4-findings.md)). **A significant defect is fixed in v0.6.2**: the jump-detection threshold in the shipped preset was in effect a 1.0 m/s speed limit, above which the driver reported no contact at all — one fast flick arrived as a dozen separate touches, which is what made lists refuse to fling, gestures get cancelled, and phantom taps appear along the path ([#114](docs/stage4-findings.md)). ⚠️ Still untuned: the driver hard-codes an input `fuzz` of 8 on the MT position axes, which on Android discards slow movement under ~0.4 mm — that value was picked for libinput on the Linux side. The driver also does not report contact size by default, so the framework has nothing to do palm rejection with. [#113](docs/stage4-findings.md) |
 | Detachable keyboard + touchpad | ✅ | USB HID `12d1:10b8` |
 | Wi-Fi | ✅ | ath11k / WCN6855. Measured 61.7 MB/s pulling 200 MB over the LAN. ⚠️ Downloads *from the internet* run at only 1–2 MB/s on this machine while a PC on the same network gets 36.9 MB/s from the same URL — cause not established, and **not** the Wi-Fi: ping to the gateway is 0% loss at 1400 bytes. It does make an in-system OTA slow. [#44](docs/stage4-findings.md) **WPA3-SAE verified (2026-09-14):** connects to a WPA2/WPA3 mixed-mode home AP with SAE group 19, H2E and PMF, zero disconnects in a 3-minute soak with traffic — the earlier "WPA3 fails" report on this machine was a mis-remembered passphrase, and [issue #2](https://github.com/vahiru/gaokun-android/issues/2) (kicked after association on a ZTE router) does not reproduce here. [#107](docs/stage4-findings.md) |
 | Bluetooth | ⚠️ | Works — `hci_qca`, adapter `ON`, zero crashes at boot. **But it can deadlock after long uptime**, together with audio; see [#38](docs/stage4-findings.md) |
@@ -204,7 +204,11 @@ Concrete, well-scoped work, roughly easiest first:
 2. **GPU SMMU interrupt fix.** The SMMU asserts SPI 675/680; the device tree
    declares 678/679, so context faults never reach the CPU. A DTB change should
    remove the need for the `smmu-nostall.sh` polling workaround entirely.
-3. **Touch feel.** The panel and IC are fine — the driver hard-codes an input
+3. **Touch feel.** The panel and IC are fine. (The worst defect is already
+   fixed: the tracker's jump detection was in effect a speed limit above
+   which no contact was reported at all — see [#114](docs/stage4-findings.md)
+   and `patches/0038`. **Please don't re-report that one.**) What is left:
+   the driver hard-codes an input
    `fuzz` of 8 on the MT position axes, which the kernel turns into "discard any
    movement under 0.4 mm and damp everything under 1.6 mm". That value was
    chosen for libinput on the Linux side; Android already applies its own touch

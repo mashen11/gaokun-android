@@ -27,7 +27,7 @@ recovery 分区，也没有串口。这不是一次常规移植 —— 它是 **
 | 引导（UEFI + systemd-boot，内置盘） | ✅ | 不需要 U 盘 |
 | 屏幕 1600×2560 @ 120 Hz | ✅ | 框架默认值把渲染钉在 60，已覆盖；实测 vsync 周期 8.33 ms |
 | GPU —— Adreno 690 硬件 Vulkan | ✅ | Mesa 26.0.3 `turnip`；22 分钟浸泡零 SMMU fault |
-| 触摸屏 | ⚠️ | 可用 —— Himax HX83121A，需要 `patches/` 里的 gpio174 补丁（[#26](docs/stage4-findings.md)）。⚠️ **手感还没调**：驱动给坐标轴写死的 `fuzz = 8` 是为 Linux 侧 libinput 选的，在 Android 上会把**0.4 mm 以内的慢速移动整个丢掉**；另外驱动默认不报触点面积，框架因此没有手掌误触抑制可用。[#113](docs/stage4-findings.md) |
+| 触摸屏 | ⚠️ | 可用 —— Himax HX83121A，需要 `patches/` 里的 gpio174 补丁（[#26](docs/stage4-findings.md)）。**v0.6.2 起修好了一个大缺陷**：此前默认预设里的跳点检测阈值实际上是一条 1.0 m/s 的限速线，快滑时驱动会**一个点都不上报**，于是一次甩动被切成十几次触摸 —— 表现为列表甩不动、手势失灵，以及沿途冒出来的"幽灵触摸"（[#114](docs/stage4-findings.md)）。⚠️ 仍未调的：坐标轴 `fuzz = 8` 是为 Linux 侧 libinput 选的，在 Android 上会把 **0.4 mm 以内的慢速移动整个丢掉**；驱动默认不报触点面积，框架因此没有手掌误触抑制可用。[#113](docs/stage4-findings.md) |
 | 磁吸键盘 + 触控板 | ✅ | USB HID `12d1:10b8` |
 | Wi-Fi | ✅ | ath11k / WCN6855 |
 | 蓝牙 | ⚠️ | 可用 —— `hci_qca`，adapter `ON`，开机后零崩溃。**但长期运行后可能与音频一起死锁**，见 [#38](docs/stage4-findings.md) |
@@ -181,7 +181,9 @@ Android 相关的配置断言在
 2. **GPU SMMU 中断修复。** SMMU 拉的是 SPI 675/680，设备树声明的是 678/679，
    所以 context fault 永远到不了 CPU。改 DTB 应该就能彻底丢掉
    `smmu-nostall.sh` 那个轮询 workaround。
-3. **触摸手感。** 面板与 IC 都是好的 —— 驱动给 MT 坐标轴写死了 `fuzz = 8`，
+3. **触摸手感。** 面板与 IC 都是好的。（最要命的那条已经修了：跟踪器的跳点检测
+   实际上是一条限速线，快滑时不上报任何触点 —— 见 [#114](docs/stage4-findings.md)
+   与 `patches/0038`。**别再重复报告这一条。**）剩下的是：驱动给 MT 坐标轴写死了 `fuzz = 8`，
    内核据此把**0.4 mm 以内的移动整个丢掉、1.6 mm 以内衰减**。那个值是为 Linux
    侧的 libinput 选的；Android 自己有 touch slop，驱动自己还带 IIR 平滑，
    于是三层重复过滤。`patches/0037` 把它做成可运行时改的模块参数，好对着真手指调。

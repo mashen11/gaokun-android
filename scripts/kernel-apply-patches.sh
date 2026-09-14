@@ -111,6 +111,14 @@ KPATCHES=(
     #    默认仍是 8 ⇒ 单独打上【不改变行为】，要的是"调参不用重启"这个能力。
     #    调定之后把值写进 DT 的 touchscreen-fuzz-x/y（标准属性，touchscreen.c:89 会覆盖驱动默认）。
     0037-Input-himax-spi-runtime-tunable-coordinate-fuzz.patch
+    # ★★ 0038（#114）：跳点检测的判据从【原始位移】改成【与预测位置的偏差】。
+    #    原判据等于一条 1.0 m/s 的限速线，越过之后 debounce 永远回不到 0 ⇒
+    #    手指只要持续快过它，驱动【一个点都不上报】。实测：一次甩动被切成 87 条轨迹。
+    #    本补丁不改默认值，只改判据含义。
+    0038-Input-himax-spi-jump-detection-vs-predicted-position.patch
+    # ★ 0039（#114）：Z8 孤立尖峰过滤与边缘单像素豁免做成可调（iso_nbr_ratio_q8 /
+    #    edge_min_area），并标注掌压规则 3 是死代码。三项默认值不变 ⇒ 单独打上不改变行为。
+    0039-Input-himax-spi-tunable-isolated-spike-and-edge-gates.patch
 )
 
 # ⚠️ 诊断补丁【不进发版内核】：只在带 --with-diag 时打。顺序有依赖：0028/0029 依赖 0023，
