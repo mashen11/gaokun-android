@@ -21,6 +21,26 @@
 
 ---
 
+## 0bis. ⚠️ 先把 ESP 上的测试内核换成 `#23`
+
+ESP 上现在放的是 **`#22`**（sha `a99c5ad8…`）。`#23` 修掉了 `#22` 里一个自审发现的
+bug：探测延迟时 debugfs 诊断接口会**静默消失**（案卷 #115 §8bis）——
+而那正是这次上机最主要的工具。**别用 `#22` 启动。**
+
+```sh
+SC=<scratchpad>/k23out          # vmlinuz.efi，sha b05bcc6e84264305
+adb push $SC/vmlinuz.efi /data/local/tmp/k23.efi
+adb shell 'M=/mnt/gk3esp; mkdir -p $M && mount -t vfat /dev/block/by-name/esp $M
+MID=$(ls $M | grep -E "^[0-9a-f]{32}$" | head -1)
+cp /data/local/tmp/k23.efi $M/$MID/android/slot_b/Image-test; sync
+sha256sum $M/$MID/android/slot_b/Image-test        # 期望 b05bcc6e…
+sha256sum $M/$MID/android/slot_b/Image             # 期望 89a1d14f…（回落，没动）
+umount $M; rmdir $M'
+adb shell 'rm -f /data/local/tmp/k23.efi'
+```
+
+起来之后 `cat /proc/version | grep -o "#[0-9]*"` 应当是 **#23**。
+
 ## 1. 启动到测试内核（唯一需要你在场的一步）
 
 ```sh
