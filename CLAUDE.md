@@ -61,15 +61,12 @@
 > * **不推仓库、不发版**是需要用户点头的两件事；其余（本地提交、构建、staging、设备实验）直接做。
 >
 > ### 现在设备上跑的是什么
-> 槽 `_b` = v0.6.1 系统（戳 `1789364282`），但**内核是走 oneshot 起来的测试内核 `#24`**
-> （`slot_b/Image-test` + `slot_b/gaokun3-test.dtb`，0037–0047 全套 + DT fuzz=0 + cmdline `disable_pressure=0`）。
-> **下次重启回 `#19`**（`default` 没动，回落内核 `89a1d14f…` 原封不动）。
-> 运行时参数已掰到定案值：`smooth=0 debounce=1/1 jump=0 pressure=1 peak=800`；
-> 镜像里的 `gaokun3-touch-mode.sh` **还是旧版**（`/vendor` 只读），靠 `persist.sys.gaokun3.touch_mode=daily` 兜着。
-> ⚠️ ESP 只剩 **35 MB**（OTA postinstall 要 56 MB）—— 新 ROM 装机前先删 `Image-test` 与 `gaokun3-test.dtb` 及其条目。
+> 槽 `_a` = **v0.6.2 第一版**（戳 `1789568947`，内核 `#24`，fuzz=0 生效、新触摸脚本、`game` 预设）。
+> ⚠️ 它**没有**触点面积轴：OTA postinstall 从不把 boot.img 的 cmdline 同步进启动项（#116 §17），
+> `disable_pressure=0` 没到 `.conf`。已修并**重编为第二版**（戳 `1789570683`），正在装进槽 `_b`
+> （覆盖 v0.6.1）。`default` 目前指向 `_b`，装完由脚本掰回已知可用的槽。
 > ⚠️ 本机 `persist.gaokun3.allow_suspend` 仍是 **0**（镜像默认 1），它现在不进 s2idle。
-> **ROM v0.6.2 正在构建机上编**（2026-09-16 14:29 UTC 起，`BUILD_NUMBER=20260916142903`），
-> 编完走 `release.sh --no-build --stage-only` 断言 → 装机验收（要重启）→ 发版要用户点头。
+> 发版（R2 清单 + GitHub release + push）在第二版验收通过后进行 —— 用户已授权"能用就发"。
 
 ---
 

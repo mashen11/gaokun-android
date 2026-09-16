@@ -21,7 +21,7 @@
 
 | # | 事情 | 现在卡在哪 | 下一步（具体） |
 |---|---|---|---|
-| **T1** | **触摸** | ✅ 主因（跳点检测 = 1.0 m/s 限速线）修掉；✅ fuzz 定案 0（实测抖动 <½ 单位）；✅ 按下延迟 25→17 ms；✅ 触点面积轴进镜像；✅ 6 个驱动缺陷 + 逐级计数器/整帧导出；⛔ peak_threshold 不能抬（切碎快滑）（[#114](stage4-findings.md)–[#116](stage4-findings.md)） | **ROM v0.6.2 在编**（增量，几分钟）→ `release.sh --no-build --dry-run` 断言 → 装机验收（要重启）→ 发版要点头。⬜ 手掌碎成多触点（不影响点击）留下版 |
+| **T1** | **触摸** | ✅ 主因（跳点检测 = 1.0 m/s 限速线）修掉；✅ fuzz 定案 0（实测抖动 <½ 单位）；✅ 按下延迟 25→17 ms；✅ 触点面积轴进镜像；✅ 6 个驱动缺陷 + 逐级计数器/整帧导出；⛔ peak_threshold 不能抬（切碎快滑）（[#114](stage4-findings.md)–[#116](stage4-findings.md)） | v0.6.2 **第一版**装机验收抓到 cmdline 未同步进启动项（#116 §17），已修并重编**第二版**（戳 `1789570683`，四断言全绿）→ 装 `_b` 验轴 → 发版（用户已授权"能用就发"）。⬜ 手掌碎成多触点（不影响点击）留下版 |
 | **T2** | **Google 未认证** | Play 商店报"设备未经 Play 保护机制认证" | 工具与文档已就位（`scripts/google/gsf-android-id.sh` + INSTALL.md）。**剩下的是用户动作**：拿 Android ID 去 google.com/android/uncertified 登记 |
 | **T3** | **相机画质** | 暗光噪点（增益顶到 15.5x）、闪光白墙过曝 34%、偏绿（[#112](stage4-findings.md) §5） | 降噪已实测有效（高频残差 −44%），**未进镜像**。闪光还要两条：给闪光帧下发 `ExposureValue` 负补偿；libcamera AWB 统计剔除饱和像素（值得投上游） |
 | **T4** | **息屏 USB adb 断** | dwc3 在 device 模式挂起时无条件 `core_exit()`，且 gadget 总 soft disconnect ⇒ 上游没有"adb 穿越睡眠"（[#112](stage4-findings.md) §1） | `usbrole.sh` v2 已写（插着主机就不睡），**未进镜像**。原生化要先修 UCSI 的数据角色（它现在是反的） |
