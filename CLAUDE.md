@@ -21,6 +21,8 @@
 > 1. **`| tail` 之后取 `$?` 拿到的是 `tail` 的退出码。** 在 `az`（打印"已下发停机"而机器没停）、
 >    `make`（报 `KBUILD_RC=0` 而构建失败）、`gh release upload`（报"uploaded"而什么都没传）上
 >    各栽过一次。判据要看**产物**（时间戳 / 大小 / 服务端列表），不看管道尾巴。
+>    ★ 大文件传输同理：2026-09-16 `scp` 1.35 GB 的 payload **退出码 0、文件只有 77%**（连接中途断了）。
+>    传完必看字节数 + sha256；续传用 `rsync --partial --append-verify`，别重来。
 > 2. **沙箱代理会掐断到构建机的 ssh，并 MITM 掉 `az` 的证书。**
 >    长任务与大流量的 ssh 一律绕沙箱；`az` 加 `AZURE_CLI_DISABLE_CONNECTION_VERIFICATION=1`。
 >    主机名 `cicd` 会被解析成 fake-IP `198.18.0.92`，**用真实 IP 直连**。
