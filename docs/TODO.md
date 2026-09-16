@@ -705,6 +705,12 @@ features xml 补 `android.hardware.camera` + `android.hardware.camera.flash`（S
 **现状**：`~/crdroid/device/huawei/gaokun3` 是一个**普通目录**，不是 git
 checkout，与本仓之间靠人手拷来拷去。于是它必然漂，而且是**双向**漂。
 
+**第 6 咬（2026-09-16，#116 §15）**：`rsync --delete` 把构建机上 `.gitignore` 挡着的四样构建输入
+（adb_keys / firmware/** / hexagonrpcd-root/** / prebuilt-boot/**）全删了。构建 42 秒 panic 在 `adb_keys`；
+但 `hexagonrpcd-root/sensors/config/*.json` 与 `socinfo/*` 走 **wildcard**，缺了会**静默**产出没传感器的镜像。
+更糟的是事后 127 文件 md5 核对**通过了** —— 两边一样地缺。★ **参照物必须是"构建需要什么"，不是"本机有什么"。**
+从设备 `/vendor` 与上次 `out/` 恢复，52 个文件与设备逐字节相同。→ `scripts/sync-device-tree.sh`（带断言）。
+
 **已经付过的四次账**（全是同一个形状）：
 1. M17：上游 Venus 补丁集只活在构建机 ⇒ 从干净树重建不出发版内核
 2. [#79](stage4-findings.md)/[#80](stage4-findings.md)：`ashmem` + `xt_quota2`

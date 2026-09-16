@@ -51,7 +51,9 @@
 > ### 发布与构建
 > * 构建机用完 **`az vm deallocate`**（按分钟计费）。构建机的树**不等于**本仓 checkout ——
 >   这个坑咬过五次，编内核前先 `bash scripts/kernel-apply-patches.sh <树> --verify`（绿了再 make），
->   同步设备树一律 `rsync --exclude '._*' --exclude '.DS_Store'`（macOS 的 tar 会撒 AppleDouble 文件）。
+>   同步设备树**只用 `bash scripts/sync-device-tree.sh <IP>`**，别手写 rsync：2026-09-16 一条
+>   `rsync --delete` 把构建机上四样**不入库但构建必需**的输入（adb_keys / firmware / hexagonrpcd-root /
+>   prebuilt-boot）全删了，而事后的 md5 核对还通过了 —— 两边一样地缺。脚本会断言它们在。
 > * 发版一律 **`release.sh --no-build`** —— build stamp 每次构建都变，重跑构建发出去的
 >   **不是**你在硬件上验过的那一版。
 > * **不推仓库、不发版**是需要用户点头的两件事；其余（本地提交、构建、staging、设备实验）直接做。

@@ -8676,3 +8676,39 @@ id 432 说明小的瞬态接触确实存在，1 帧的过滤留着。
 ★ 负面结果的价值：这一晚三个"从数据反推的旋钮假设"（`palm_contact_area`、
 `palm_area_threshold`、`peak_threshold`）**全部被实测否决**，每个都在 3 分钟内。
 没有 `contacts_log` 与事件驱动的采集脚本，这三条会各花一晚。
+
+### 15. ⚠️★★ B0 第 6 咬：`rsync --delete` 删光了构建机上四样"不入库但构建必需"的输入
+
+为了让构建机的树等于本仓，我跑了 `rsync -a --delete device/huawei/gaokun3/ → 构建机`，
+然后做了 127 个文件的 md5 核对，**通过**。接着启动 ROM 构建 —— **42 秒后 soong panic**：
+`adb_keys` 模块在无效路径上调 `OptionalPath.Path()`。
+
+`.gitignore` 挡着四样东西不进公开仓：`adb_keys`（个人 adb 公钥）、`firmware/**`（华为专有 .mbn +
+linux-firmware，18 个）、`hexagonrpcd-root/**`（SLPI 传感器 VFS 根，34 个）、`prebuilt-boot/**`。
+我本机 checkout 里**没有前三样**，`--delete` 就把构建机上的删了。
+
+★★ 最危险的不是 panic 那一个：`adb_keys` 与 18 个固件都是**显式路径**，缺了构建会**报错**；
+而 `hexagonrpcd-root/sensors/config/*.json` 与 `socinfo/*` 走 **`$(wildcard)`** ——
+缺了构建会**成功**，产出一个**没有传感器配置的镜像**，而且没有任何地方说过。
+如果第一次失败的是别的原因、被我修掉了，这颗雷就直接进发版镜像。
+
+★★ 那道"127 个文件逐字节一致"的核对为什么过了：**参照物是我本机的树，而它本来就不完整。**
+两边一样地缺，md5 自然一致。**参照物必须是"构建需要什么"，不是"本机有什么"。**
+
+恢复：`firmware/README.md` 早写了路 —— 设备上 `/vendor/firmware` 就是装进去的那一套；
+`out/target/product/gaokun3/vendor/` 是上一次构建的安装副本。按 `device.mk` 的映射
+（安装时 ath11k 多装一份 hw2.1、tplg 多装一份别名、hexagonrpcd 的 registry 来自别处）
+反推源布局，恢复 18 + 34 个文件，**与设备上实际装的逐字节相同**；`adb_keys` 从 out/ 拿回
+（723 字节，md5 `23b0b507` —— 与我这台 Mac 现在的 adbkey.pub **不是同一把**，所以不能重拷）。
+
+⚠️ 中途又踩了一次 `pkill -f "build-rom.sh"`：命中了自己那条 ssh 命令行，远端 shell 被杀、
+ssh 返回 255、盘点没跑。**这是本仓运维坑第 3 条，同一晚第二次。**
+
+→ `scripts/sync-device-tree.sh`：`--delete` 排除四样、prebuilt-boot 单独不带 `--delete`、
+**断言构建机上 18/34/adb_keys/1 dtb 都在**、然后只对 `git ls-files` 做 md5。
+
+### 16. `peak_threshold` 回 800 之后快速甩动恢复完整
+
+7 条甩动轨迹、`tracks_jump=0`、0 条 ≤3 帧碎片，所有先后相接的边界都是真实抬手
+（那 1 个 "<100 ms" 是**负间隔** = 双指重叠，`max_contacts=2` 印证；`evdev-strokes.py`
+现在把重叠对单列，不再混进间隔直方图）。今晚唯一改坏过的地方确认改回来了。

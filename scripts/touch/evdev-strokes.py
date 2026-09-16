@@ -115,6 +115,13 @@ def gap_report(path):
     if not g:
         print("  轨迹不足，无法做间隔分析")
         return
+    overlap = sum(1 for x, _ in g if x <= 0)
+    g = [(x, d) for x, d in g if x > 0]          # ≤0 ms = 两条轨迹在时间上重叠 = 多指，不是碎片
+    if overlap:
+        print(f"  时间上重叠的轨迹对（多指同时在屏）：{overlap} 对 —— 不计入下面的间隔统计")
+    if not g:
+        print("  没有先后相接的轨迹，无法做间隔分析")
+        return
     ts = sorted(x for x, _ in g)
     print(f"  相邻轨迹间隔 ms：最小 {ts[0]:.0f}  中位 {ts[len(ts)//2]:.0f}  最大 {ts[-1]:.0f}")
     for thr in (25, 50, 100, 200):
