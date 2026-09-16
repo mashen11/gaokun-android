@@ -59,15 +59,15 @@
 > * **不推仓库、不发版**是需要用户点头的两件事；其余（本地提交、构建、staging、设备实验）直接做。
 >
 > ### 现在设备上跑的是什么
-> 槽 `_b` = v0.6.1（戳 `1789364282`，内核 `#19`），槽 `_a` = 同版前一构建，两个槽都能回落。
-> ⚠️ 平板上可能还以 `mount --bind` 跑着**未进镜像**的相机 HAL（带降噪），**重启即消失**。
-> ⚠️ 本机 `persist.gaokun3.allow_suspend` 现在是 **0**（镜像默认 1），所以它现在根本不进 s2idle。
-> ⚠️ **触摸**：本机已现场改到 `track_jump_dist2=0` / `track_smoothing=0` / `track_start_debounce=2`；
-> 开机属性设成 `daily`，所以重启后落到安全值而不是坏配置。镜像里的
-> `/vendor/bin/gaokun3-touch-mode.sh` **还是旧的**（`/vendor` 只读），要下次构建才换掉。#114
-> ⚠️ ESP 上备着内核 **`#23`**（`slot_b/Image-test` + `…-android-b-test.conf`，带
-> `disable_pressure=0`），**default 没动**。验收手册见 `docs/touch-morning-runbook.md`。
-> ⚠️ ESP 只剩 **35 MB**（OTA postinstall 要 56 MB）—— **验完要删掉那两个文件**。
+> 槽 `_b` = v0.6.1 系统（戳 `1789364282`），但**内核是走 oneshot 起来的测试内核 `#24`**
+> （`slot_b/Image-test` + `slot_b/gaokun3-test.dtb`，0037–0047 全套 + DT fuzz=0 + cmdline `disable_pressure=0`）。
+> **下次重启回 `#19`**（`default` 没动，回落内核 `89a1d14f…` 原封不动）。
+> 运行时参数已掰到定案值：`smooth=0 debounce=1/1 jump=0 pressure=1 peak=800`；
+> 镜像里的 `gaokun3-touch-mode.sh` **还是旧版**（`/vendor` 只读），靠 `persist.sys.gaokun3.touch_mode=daily` 兜着。
+> ⚠️ ESP 只剩 **35 MB**（OTA postinstall 要 56 MB）—— 新 ROM 装机前先删 `Image-test` 与 `gaokun3-test.dtb` 及其条目。
+> ⚠️ 本机 `persist.gaokun3.allow_suspend` 仍是 **0**（镜像默认 1），它现在不进 s2idle。
+> **ROM v0.6.2 正在构建机上编**（2026-09-16 14:29 UTC 起，`BUILD_NUMBER=20260916142903`），
+> 编完走 `release.sh --no-build --stage-only` 断言 → 装机验收（要重启）→ 发版要用户点头。
 
 ---
 
@@ -77,7 +77,7 @@
 |---|---|
 | **现在什么状态、有什么禁忌** | 本文件上面那个框 |
 | **还剩什么没做、优先级** | `docs/TODO.md` —— 顶上有一张「现在在做 / 待办」总表 |
-| **明早要做的触摸验收** | `docs/touch-morning-runbook.md` —— 按顺序，每步写了「看什么算通过」|
+| **触摸调参的实机记录与工具** | `docs/stage4-findings.md` #114–#116 + `scripts/touch/README.md`（手册 `touch-morning-runbook.md` 已完成使命，留作 2026-09-16 那一晚的操作记录）|
 | **某个结论是怎么来的**（最权威） | `docs/stage4-findings.md`，按 `#NN` 编号的案卷；Stage 5/6/7 另有专档 |
 | 那一周发生了什么 | `docs/project-log.md`（本文件的历史，原样搬过去的） |
 | 怎么装、用户会踩什么 | `docs/INSTALL.md` |
