@@ -8742,3 +8742,19 @@ BOARD_KERNEL_CMDLINE 与 BLS 条目漂移各教育过一次"，却只让 recover
 ⬜ 技术债：cmdline 现在在**四处**各有一份 —— `BoardConfig.mk`（权威）、`install-gaokun3.sh` 的
 `$ANDROID_CMDLINE`、`live/installer-lib.sh:506`、`deploy-android.sh:133`（后两者还带着已过时的
 `loglevel` / `deferred_probe_timeout=30`）。全新安装应当同样从 boot.img 的 cmdline.txt 派生。
+
+### 18. ✅ 第二版装机验收全过，含 postinstall 修复的直接证据
+
+装进 `_b` 之后、重启之前，ESP 上 `_b` 条目的 `options` 已从
+`…usbhid.quirks=… androidboot.slot_suffix=_b` 变成
+`…usbhid.quirks=… himax_hx83121a_spi.disable_pressure=0 androidboot.slot_suffix=_b`
+—— 与 `slot_b/cmdline.txt` 一致，修好的 postinstall 在这次 OTA 里跑的就是它自己。
+
+重启（49 秒）后：槽 `_b`、戳 `1789570683`、incremental `20260916145759`、内核 `#24`、
+`/proc/cmdline` 含 `disable_pressure=0`、模块参数 `N`、**`ABS_MT_TOUCH_MAJOR` + `ABS_MT_PRESSURE` 两轴在**、
+`fuzz 0 / resolution 10`、`pressure_enabled 1`、`game` 预设落成 `smooth=0 deb=1/1 jump=0 peak=800`、IRQ 120 Hz。
+**"能用就发"的条件成立，发版。**
+
+★ 第一版与第二版之间只差 `gaokun3-ota-postinstall.sh` 那一段 —— 而如果第一版直接发了，
+v0.6.1 的用户更新后会和我第一次装机一样：一切都对，只有轴没建，且没有任何地方会报。
+**验收表里每一行都要有一个能被"看原始数据"推翻的期望值** —— 这次靠的就是"压力轴 2 个"那一行。
