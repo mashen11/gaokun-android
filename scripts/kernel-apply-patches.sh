@@ -136,6 +136,10 @@ KPATCHES=(
     0044-Input-himax-spi-report-axis-resolution.patch
     # ★ 0045（#115）：修好 W=1 报的两处 kerneldoc。纯注释，改完这个驱动 W=1 完全干净。
     0045-Input-himax-spi-fix-two-kerneldoc-blocks.patch
+    # ★★ 0046（#116）：坐标 fuzz 定案为 0，写进 DT 的标准属性 touchscreen-fuzz-x/y。
+    #    实机量的：空载噪声 RMS 29.6 ⇒ 质心抖动 σ 只有 0.16/0.10 输出单位（不到半个单位），
+    #    而 fuzz=8 的死区是 ±4 单位（大 8 倍）。慢速拖动 A/B：位移为 0 的帧 13.7% → 1.8%。
+    0046-arm64-dts-gaokun3-touchscreen-fuzz-0.patch
 )
 
 # ⚠️ 诊断补丁【不进发版内核】：只在带 --with-diag 时打。顺序有依赖：0028/0029 依赖 0023，
