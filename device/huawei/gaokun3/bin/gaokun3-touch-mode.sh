@@ -3,7 +3,7 @@
 #
 # 后端是 himax hx83121a 驱动自己暴露的算法参数
 # （/sys/bus/spi/devices/spi0.0/algo/，共 27 项），运行期可改、立刻生效。
-# 这里只动三项，取自上游 EGoTouchRev 的 game_preset：
+# 这里动五项（原来只动三项，取自上游 EGoTouchRev 的 game_preset）：
 #   track_smoothing      基于速度预测的坐标平滑。开着更稳，代价是多一层延迟。
 #                        实现是 x = (3*旧 + 新)/4，稳态滞后 3 帧 ≈ 25 ms —— 不小。
 #   track_start_debounce touch_active 要连续几帧才确认。2 帧 ≈ 按下多 1 帧（8 ms）延迟，
@@ -27,8 +27,10 @@
 MODE="$1"
 case "$MODE" in
     # game 与 daily 现在只差 track_smoothing —— 那才是"跟手 vs 稳"的真实取舍。
-    game)  SMOOTH=0; DEB=2; JUMP=0 ;;
-    daily) SMOOTH=1; DEB=2; JUMP=0 ;;
+    # DEB=1：2026-09-16 实测（#116）36 次点击 + 甩动，0 条 ≤2 帧的短触点、guard_kill=0，
+    #        按下延迟 25 → 17 ms 无代价。空载 14636 帧一个像素都没越过阈值，噪声离阈值 11.6 倍。
+    game)  SMOOTH=0; DEB=1; JUMP=0 ;;
+    daily) SMOOTH=1; DEB=1; JUMP=0 ;;
     *) log -t gaokun3-touch "用法: $0 game|daily"; exit 2 ;;
 esac
 
@@ -41,7 +43,9 @@ done
 [ -n "$ALGO" ] || { log -t gaokun3-touch "找不到 algo 目录 —— 触摸驱动没起来？"; exit 1; }
 
 fail=0
-for kv in "track_smoothing=$SMOOTH" "track_start_debounce=$DEB" "track_jump_dist2=$JUMP"; do
+# ★ debounce_base 与 track_start_debounce 一起降；pressure_enabled 在轴存在时必须为 1
+#   （否则驱动报常数 1/4095，每个触点都成"针尖"，比没有轴还糟 —— patches/0047 起默认已跟着轴走，这里兜底）。
+for kv in "track_smoothing=$SMOOTH" "track_start_debounce=$DEB" "debounce_base=$DEB" "track_jump_dist2=$JUMP" "pressure_enabled=1"; do
     k="${kv%%=*}"; v="${kv##*=}"
     if ! echo "$v" > "$ALGO/$k" 2>/dev/null; then
         log -t gaokun3-touch "写 $k 失败"; fail=1; continue

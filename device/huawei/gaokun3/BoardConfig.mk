@@ -130,7 +130,10 @@ BOARD_KERNEL_CMDLINE := \
     init=/init printk.devkmsg=on deferred_probe_timeout=10 \
     console=tty0 \
     clk_ignore_unused pd_ignore_unused arm64.nopauth efi=noruntime \
-    fbcon=rotate:1 usbhid.quirks=0x12d1:0x10b8:0x20000000
+    fbcon=rotate:1 usbhid.quirks=0x12d1:0x10b8:0x20000000 \
+    himax_hx83121a_spi.disable_pressure=0
+# ↑ 触摸报 ABS_MT_TOUCH_MAJOR/PRESSURE（#116 实测：轴建起、真值上报正常，Android 侧无异常）。
+#   这是 0444 模块参数，只能走 cmdline。配套 gaokun3-touch-mode.sh 里 pressure_enabled=1。
 
 # ------------------------------------------------------------ 分区布局
 # 动态分区（super）而不是分立分区：AOSP 16 默认如此，构建直接产出
