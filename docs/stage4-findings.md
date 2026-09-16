@@ -8712,3 +8712,33 @@ ssh 返回 255、盘点没跑。**这是本仓运维坑第 3 条，同一晚第�
 7 条甩动轨迹、`tracks_jump=0`、0 条 ≤3 帧碎片，所有先后相接的边界都是真实抬手
 （那 1 个 "<100 ms" 是**负间隔** = 双指重叠，`max_contacts=2` 印证；`evdev-strokes.py`
 现在把重叠对单列，不再混进间隔直方图）。今晚唯一改坏过的地方确认改回来了。
+
+### 17. ⚠️★★ 验收抓到：cmdline 改动进了 boot.img，却永远到不了实际启动用的 .conf
+
+v0.6.2 第一次装机验收：槽 `_a`、戳、内核 `#24`、`fuzz 0`、新脚本都对，**但触点面积轴 0 个**。
+原始数据一目了然：
+
+```
+slot_a/cmdline.txt（从新 boot.img 解出）: … usbhid.quirks=… himax_hx83121a_spi.disable_pressure=0
+…-android-a.conf 的 options:              … usbhid.quirks=… androidboot.slot_suffix=_a     ← 没有
+/proc/cmdline 含 disable_pressure: 【没有】   ⇒ disable_pressure=Y ⇒ 轴没建
+```
+
+`gaokun3-ota-postinstall.sh` 只替换槽目录里的 Image / ramdisk / dtb（并写出 `cmdline.txt`），
+**从不碰启动项的 `options` 行** —— 那一行是装机当天写死的。于是 `BOARD_KERNEL_CMDLINE` 的任何改动
+都会进 boot.img，却**永远到不了**实际启动用的 .conf。脚本注释里甚至写着"本仓已被
+BOARD_KERNEL_CMDLINE 与 BLS 条目漂移各教育过一次"，却只让 recovery 条目跟随 android 条目，
+没让 android 条目跟随 boot.img。
+
+★ **这是"静默"那一类**：构建成功、断言全绿、装机成功、内核起来、触摸能用 ——
+只有一句发版说明是假的。要不是验收表里有"压力轴 2 个"这一行**且我去看了原始数据**
+（第一次 grep 数出 0 我还怀疑是 toybox grep 的语法），它就直接发出去了。
+
+修法（`0`-行为改动，只在 OTA 路径）：解包之后把该槽 .conf 的 `options` 重写为
+`cmdline.txt 内容 + androidboot.slot_suffix=_X`，临时文件再改名，cmdline.txt 缺失则保留旧行。
+⚠️ update_engine 跑的是**新镜像**里的 postinstall，所以 v0.6.1 → v0.6.2 的用户会经由
+修好的脚本拿到新 cmdline —— 前提是 v0.6.2 **重编**带上这个修复。因此不发第一版，重编。
+
+⬜ 技术债：cmdline 现在在**四处**各有一份 —— `BoardConfig.mk`（权威）、`install-gaokun3.sh` 的
+`$ANDROID_CMDLINE`、`live/installer-lib.sh:506`、`deploy-android.sh:133`（后两者还带着已过时的
+`loglevel` / `deferred_probe_timeout=30`）。全新安装应当同样从 boot.img 的 cmdline.txt 派生。

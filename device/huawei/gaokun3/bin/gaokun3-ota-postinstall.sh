@@ -98,6 +98,31 @@ log "可用（含将被覆盖的旧文件）约 ${avail_kb} KB"
 # 解包器自己会写临时文件再改名，并逐段核对长度
 "$EXTRACT" "$BOOT_DEV" "$DEST" || fail "从 $BOOT_DEV 解包失败"
 
+# ── 把 boot.img 里的 cmdline 同步进该槽的启动项 ──────────────────────────────
+# ★ 2026-09-16（#116 §17）：此前这里只换 Image/ramdisk/dtb，启动项的 options 行
+#   是装机当天写死的、以后永远不动。于是 BOARD_KERNEL_CMDLINE 的任何改动都会进
+#   boot.img（解出来的 cmdline.txt 里有），却【永远到不了】实际启动用的 .conf ——
+#   v0.6.2 的 himax_hx83121a_spi.disable_pressure=0 就是这么静默丢掉的。
+#   现在 options = cmdline.txt 的内容 + slot_suffix，与 boot.img 永远一致。
+#   写法与 recovery 条目一样：临时文件再改名；cmdline.txt 缺失或为空则保留旧 options。
+ENT="$MNT/loader/entries/$MID-android-$SUFFIX.conf"
+if [ -s "$DEST/cmdline.txt" ] && [ -f "$ENT" ]; then
+    NEWCMD=$(tr -d '\r\n' < "$DEST/cmdline.txt")
+    case " $NEWCMD " in
+        *" androidboot.slot_suffix="*) ;;                       # 万一 cmdline 已带，不重复
+        *) NEWCMD="$NEWCMD androidboot.slot_suffix=_$SUFFIX" ;;
+    esac
+    if awk -v cmd="$NEWCMD" '/^options[[:space:]]/ { print "options    " cmd; next } { print }'            "$ENT" > "$ENT.new" && grep -q "^options " "$ENT.new"; then
+        mv -f "$ENT.new" "$ENT"
+        log "启动项 options 已同步为 boot.img 的 cmdline（$(wc -c < "$DEST/cmdline.txt") 字节）"
+    else
+        rm -f "$ENT.new"
+        log "⚠️ 同步 options 失败，保留旧启动项（内核仍能起，但 cmdline 改动不会生效）"
+    fi
+else
+    log "⚠️ 没有 cmdline.txt 或找不到 $ENT，启动项 options 未更新"
+fi
+
 # ── recovery ────────────────────────────────────────────────────────────────
 # ★ recovery 与系统【共用同一个内核和 dtb】（实测 recovery.img 里的 kernel 与
 #   boot.img 里的 sha256 完全相同），所以条目直接复用该槽刚解出来的

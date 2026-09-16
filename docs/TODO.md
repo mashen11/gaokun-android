@@ -39,6 +39,7 @@
 | # | 事情 | 为什么值得做 |
 |---|---|---|
 | **B0** | 让构建机的树**就是**本仓 checkout | **已经咬了五次**。`kernel-apply-patches.sh --verify` 是新造的精确探测器，但设备树那半边仍靠 rsync + md5 |
+| **B15** | 内核 cmdline 在四处各有一份 | `BoardConfig.mk`（权威）之外，`install-gaokun3.sh` / `live/installer-lib.sh` / `deploy-android.sh` 各写死一份且已过时。OTA 路径已改为从 boot.img 的 `cmdline.txt` 派生（[#116](stage4-findings.md) §17）；全新安装路径也应如此 |
 | **B12** | 释放 R2 桶前要有国内可达的镜像 | GitHub 附件国内不可达（v0.6.0 当天就有用户反馈）。要用户定方案 |
 | **B14** | 息屏 USB adb 的原生化 + 复位根因 | 见 T4，这是它的长期解 |
 | **B1** | SELinux 转 enforcing | 四步已走完，剩两个**结构性**阻塞（hangdump 读 debugfs 的 neverallow 无 userdebug 豁免；smmustall 要 `/dev/mem`）。后者做掉 B6 就消失 |
