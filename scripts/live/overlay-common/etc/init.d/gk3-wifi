@@ -58,7 +58,7 @@ start() {
     fi
 
     if [ ! -e "/sys/class/net/$IFACE" ]; then
-        eerror "还是没有 $IFACE。看 /media/gk3/gaokun3/diag/ 里 gk3-diag 写的日志"
+        eerror "还是没有 ${IFACE}。看 /media/gk3/gaokun3/diag/ 里 gk3-diag 写的日志"
         return 1
     fi
     CONF=
@@ -69,7 +69,7 @@ start() {
         ewarn "  放一份到 $MEDIA_CONF 再重启即可"
         return 0
     fi
-    ebegin "启动 WiFi（配置来自 $CONF）"
+    ebegin "启动 WiFi（配置来自 ${CONF}）"
     ip link set "$IFACE" up
     # 让 wpa_supplicant 自己 daemonize(-B) 并自己写 pidfile(-P)：
     # 比 start-stop-daemon 的 --background --make-pidfile 可靠 ——

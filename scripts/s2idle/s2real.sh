@@ -29,7 +29,7 @@ for i in 1 2 3; do
     echo +40 > /sys/class/rtc/rtc0/wakealarm
     AL=$(cat /sys/class/rtc/rtc0/wakealarm)
     [ -z "$AL" ] && { say "⚠️ 闹钟没设上，中止"; break; }
-    say "RTC 闹钟=$AL（$(( AL - $(date +%s) )) 秒后）"
+    say "RTC 闹钟=${AL}（$(( AL - $(date +%s) )) 秒后）"
     say "★★★ PRE 第$i 次真实挂起 —— 下一行如果出现，就是醒回来了"
     sync
     echo mem > /sys/power/state

@@ -68,7 +68,7 @@ else
     #   互相矛盾的 incremental，崩溃归并、缺陷报告、任何解析指纹的东西都会拿到没用的值。
     #   见 docs/stage4-findings.md #113。
     export BUILD_NUMBER=${BUILD_NUMBER:-$(date -u +%Y%m%d%H%M%S)}
-    echo "  BUILD_NUMBER=$BUILD_NUMBER（进指纹的 incremental）"
+    echo "  BUILD_NUMBER=${BUILD_NUMBER}（进指纹的 incremental）"
     m -j"$(nproc)" bacon superimage
 fi
 

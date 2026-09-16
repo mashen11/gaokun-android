@@ -159,7 +159,7 @@ else
         f="$REPO/patches/$p"
         [ -f "$f" ] || continue
         if git -C "$TREE" apply --check -R "$f" 2>/dev/null; then
-            echo "✗ 诊断补丁 $p 还在树里 —— 发版内核不能带它。撤掉：git apply -R patches/$p（倒序）" >&2
+            echo "✗ 诊断补丁 $p 还在树里 —— 发版内核不能带它。撤掉：git apply -R patches/${p}（倒序）" >&2
             exit 1
         fi
     done
@@ -229,7 +229,7 @@ if [ "$MODE" = "--verify" ]; then
     WT=$(mktemp -d "${TMPDIR:-/tmp}/kap-verify.XXXXXX") && rmdir "$WT"
     git -C "$TREE" worktree add --detach -q "$WT" HEAD || { echo "✗ 建不了临时 worktree" >&2; exit 2; }
     trap 'git -C "$TREE" worktree remove --force "$WT" 2>/dev/null' EXIT
-    echo "内核树: $TREE（HEAD $(git -C "$TREE" rev-parse --short HEAD)）"
+    echo "内核树: ${TREE}（HEAD $(git -C "$TREE" rev-parse --short HEAD)）"
     echo "重放到: $WT"
     fails=0; fuzzed=0
     for p in "${UPATCHES[@]}" "${KPATCHES[@]}"; do
@@ -257,7 +257,7 @@ if [ "$MODE" = "--verify" ]; then
         fi
     done
     echo
-    echo "重放：打不上 $fails · 用了 fuzz $fuzzed；核对：一致 $same 个文件 · 不一致 $diffs 个"
+    echo "重放：打不上 $fails · 用了 fuzz ${fuzzed}；核对：一致 $same 个文件 · 不一致 $diffs 个"
     if [ "$fails" -eq 0 ] && [ "$diffs" -eq 0 ]; then
         echo "✓ 真实树里被补丁碰过的每个文件都与配方逐字节相同"
         exit 0

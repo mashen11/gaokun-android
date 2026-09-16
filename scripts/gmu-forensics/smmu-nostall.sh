@@ -88,7 +88,7 @@ check_cb() {
     $DM $((B + 0x58)) 4 $F 2>/dev/null              # FSR 写 1 清位
 }
 
-log -t smmustall "启动 v2：CB0..CB$((NCB - 1)) @ $CB_BASE，无限运行"
+log -t smmustall "启动 v2：CB0..CB$((NCB - 1)) @ ${CB_BASE}，无限运行"
 while true; do
     check_cb 0                                      # GPU 主 CB：每轮
     if [ $((round % 20)) -eq 0 ]; then               # 全扫：约每 2s

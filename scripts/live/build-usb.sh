@@ -48,7 +48,7 @@ head -c 2 "$KERNEL" | grep -q MZ || die "$KERNEL 不是 PE 文件（要 EFI stub
 ok "输入体检通过（PE / PE / FDT）"
 
 for t in sgdisk mformat mmd mcopy; do
-    command -v "$t" >/dev/null || die "缺工具：$t（apt install gdisk mtools）"
+    command -v "$t" >/dev/null || die "缺工具：${t}（apt install gdisk mtools）"
 done
 
 # —— 算大小 ——

@@ -52,7 +52,7 @@ for kv in "track_smoothing=$SMOOTH" "track_start_debounce=$DEB" "track_jump_dist
 done
 
 if [ "$fail" = 0 ]; then
-    log -t gaokun3-touch "触摸模式 = $MODE（$ALGO）"
+    log -t gaokun3-touch "触摸模式 = ${MODE}（${ALGO}）"
 else
     log -t gaokun3-touch "触摸模式 $MODE 未完全应用"
 fi

@@ -51,7 +51,7 @@ do_mount() {
     echo "loop: $LOOP"
     sudo mkdir -p $MNT
     sudo mount "$1" "$LOOP" $MNT || { sudo losetup -d "$LOOP"; exit 1; }
-    echo "已挂载 $MNT（$1）"
+    echo "已挂载 ${MNT}（$1）"
 }
 
 do_umount() {

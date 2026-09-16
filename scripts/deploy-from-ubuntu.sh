@@ -117,7 +117,7 @@ flash_boot() {
     if pull "$OUT/boot.img" /tmp/boot.img; then
       sudo -n dd if=/tmp/boot.img of="/dev/disk/by-partlabel/boot_$slot"                  bs=4M conv=fsync status=none
       sync
-      echo "boot.img 也已写入 boot_$slot（与 ESP 上的派生文件保持一致）"
+      echo "boot.img 也已写入 boot_${slot}（与 ESP 上的派生文件保持一致）"
     fi
   else
     echo "  ⚠️ 没能从条目名推出槽位或找不到 boot_$slot 分区 —— boot 分区未更新。"
@@ -155,7 +155,7 @@ case "$MODE" in
   rollback) flash_rollback ;;
   super) flash_super ;;
   boot)  flash_boot ;;
-  *) echo "未知模式: $MODE（all|super|boot|rollback）"; exit 2 ;;
+  *) echo "未知模式: ${MODE}（all|super|boot|rollback）"; exit 2 ;;
 esac
 
 # ⚠️⚠️ 这里【不再】改默认启动项，而是设 oneshot（2026-08-19 M3 血泪）。
@@ -181,7 +181,7 @@ esac
 # bootctl 会失败。实战里这一步是成功过的，说明 Ubuntu 侧仍有 efivarfs；
 # 但不能靠"应该能行"，失败必须炸出来，否则会重启进 Ubuntu 然后一脸茫然。
 if sudo -n bootctl set-oneshot "$ENTRY"; then
-  echo "下次启动 → $ENTRY（一次性，默认仍是 Ubuntu）"
+  echo "下次启动 → ${ENTRY}（一次性，默认仍是 Ubuntu）"
 else
   echo "!!! bootctl set-oneshot 失败（多半是 efi=noruntime 导致 EFI 变量不可写）"
   echo "!!! 手动改默认项（记得事后改回 Ubuntu，那是唯一的自动回落安全网）："

@@ -58,7 +58,7 @@ WANT=u:object_r:fs_bpf_net_shared:s0
 CUR=$(ls -Zd "$PROBE" 2>/dev/null | awk '{print $1}')
 
 if [ "$CUR" = "$WANT" ]; then
-    log -t bpfrelabel "标签已正确（$CUR）—— 内核惰性 genfscon 正常，不做任何事"
+    log -t bpfrelabel "标签已正确（${CUR}）—— 内核惰性 genfscon 正常，不做任何事"
     exit 0
 fi
 

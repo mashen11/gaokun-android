@@ -31,7 +31,7 @@ for k in decoder.supported.av1 encoder.supported.h264 encoder.supported.vp8 enco
     if [ -z "$v" ] || [ "$v" = false ]; then ok "$k 未启用（有意为之）"; else bad "$k = [$v]，不该启用"; fi
 done
 v=$($A shell getprop debug.stagefright.c2-poolmask | tr -d '\r')
-[ "$v" = 0xfc0000 ] && ok "poolmask = $v（BLOB；本机没有 ION）" || bad "poolmask = [$v]，应为 0xfc0000"
+[ "$v" = 0xfc0000 ] && ok "poolmask = ${v}（BLOB；本机没有 ION）" || bad "poolmask = [$v]，应为 0xfc0000"
 v=$($A shell getprop debug.stagefright.c2inputsurface | tr -d '\r')
 [ "$v" = "-1" ] && ok "c2inputsurface = -1（绕开框架的空指针崩溃）" || bad "c2inputsurface = [$v]，应为 -1"
 

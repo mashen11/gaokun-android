@@ -19,7 +19,7 @@ for i in $(seq 1 $N); do
     echo devices > /sys/power/pm_test
     sync
     T0=$(cut -d. -f1 /proc/uptime)
-    say "PRE  第$i/$N 次（尝试 $TRY）"
+    say "PRE  第$i/$N 次（尝试 ${TRY}）"
     echo mem > /sys/power/state
     RC=$?
     T1=$(cut -d. -f1 /proc/uptime)

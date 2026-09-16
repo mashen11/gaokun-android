@@ -83,7 +83,7 @@ if (Test-Path (Join-Path $entries $std)) {
     Write-Host ""
     Write-Host "默认项已指回: $std"
 } else {
-    Write-Host "警告: 找不到 $std，请手动确认 loader.conf" -ForegroundColor Yellow
+    Write-Host "警告: 找不到 ${std}，请手动确认 loader.conf" -ForegroundColor Yellow
 }
 
 # ---- 7. 结果 ----

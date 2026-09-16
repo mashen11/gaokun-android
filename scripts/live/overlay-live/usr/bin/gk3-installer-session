@@ -22,7 +22,7 @@ sync
 mount -o remount,ro /media/gk3 2>/dev/null
 
 echo
-echo "安装器退出（退出码 $RC）。日志：$LOG"
+echo "安装器退出（退出码 ${RC}）。日志：$LOG"
 echo "下面是 shell。要再试一次就敲 gk3-installer。"
 echo
 exec /bin/sh -l

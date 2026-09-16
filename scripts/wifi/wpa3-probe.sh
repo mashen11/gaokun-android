@@ -53,7 +53,7 @@ say "4. supplicant 的原始日志（-dd，含 SAE 交互）"
 logcat -d -s wpa_supplicant 2>/dev/null | tail -30
 
 if [ -n "$SSID" ] && [ -n "$PSK" ]; then
-  say "5. 实连一次 $SSID（抓失败点）"
+  say "5. 实连一次 ${SSID}（抓失败点）"
   logcat -c 2>/dev/null
   cmd wifi connect-network "$SSID" wpa3 "$PSK" 2>&1 | head -5
   sleep 12

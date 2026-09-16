@@ -345,7 +345,7 @@ gk3_apply() {
         [ -n "$medium_disk" ] && medium_disk=/dev/$medium_disk
     fi
     if [ "$mode" = wipe ] && [ -n "${medium_disk:-}" ] && [ "$medium_disk" = "$disk" ]; then
-        gk3_die "拒绝：安装介质（$medium_dev）就在目标盘 $disk 上，整盘清空会锯掉自己脚下的地板"
+        gk3_die "拒绝：安装介质（${medium_dev}）就在目标盘 $disk 上，整盘清空会锯掉自己脚下的地板"
         return 1
     fi
 
@@ -353,7 +353,7 @@ gk3_apply() {
     local mounted
     mounted=$(lsblk -nro MOUNTPOINT "$disk" 2>/dev/null | grep -v '^$' | tr '\n' ' ')
     if [ -n "$mounted" ] && [ "$mode" = wipe ]; then
-        gk3_die "拒绝：$disk 上还有挂载着的分区（$mounted）"
+        gk3_die "拒绝：$disk 上还有挂载着的分区（${mounted}）"
         return 1
     fi
 
@@ -376,7 +376,7 @@ gk3_apply() {
         [ -d "$bkdir" ] || bkdir=/tmp
         bk="$bkdir/gpt-backup-$(basename "$disk")-$(date +%Y%m%d-%H%M%S).bin"
         if sgdisk --backup="$bk" "$disk" >/dev/null 2>&1; then
-            echo "分区表已备份到 $bk（还原：sgdisk --load-backup=$bk $disk）"
+            echo "分区表已备份到 ${bk}（还原：sgdisk --load-backup=$bk ${disk}）"
         else
             echo "警告：分区表备份失败（继续，但出事就没有还原点了）"
         fi
@@ -441,7 +441,7 @@ EOF
                 return 1
             fi
         fi
-        echo "复用现有 ESP：$p_esp（不格式化）"
+        echo "复用现有 ESP：${p_esp}（不格式化）"
     fi
     gk3__run mkfs.ext4 -q -F -L metadata "$p_meta" || return 1
     gk3__run mkfs.ext4 -q -F -L userdata "$p_data" || return 1
@@ -697,7 +697,7 @@ gk3_shrink() {
     bk=/media/gk3/gaokun3/gpt-before-shrink-$(date +%Y%m%d-%H%M%S).bin
     [ -d /media/gk3/gaokun3 ] || bk=/tmp/gpt-before-shrink.bin
     if sgdisk --backup="$bk" "$disk" >/dev/null 2>&1; then
-        echo "分区表备份：$bk（还原：sgdisk --load-backup=$bk $disk）"
+        echo "分区表备份：${bk}（还原：sgdisk --load-backup=$bk ${disk}）"
     else
         echo "警告：分区表备份失败"
     fi
@@ -719,7 +719,7 @@ gk3_shrink() {
             e2fsck -fp "$part" >/dev/null 2>&1; rc=$?
             # e2fsck 返回 1/2 表示"修好了"；>=4 才是真出事
             if [ "$rc" -ge 4 ]; then
-                gk3_die "e2fsck 报错（$rc），不敢缩"; return 1
+                gk3_die "e2fsck 报错（${rc}），不敢缩"; return 1
             fi
             gk3_prog 30 "缩小 ext 文件系统"
             if ! resize2fs "$part" "${target_mib}M" >/dev/null 2>&1; then
@@ -749,10 +749,10 @@ gk3_shrink() {
     gk3_prog 90 "复核"
     newpu=$(sgdisk -i "$num" "$disk" 2>/dev/null | grep '^Partition unique GUID:' | awk '{print $4}')
     if [ "$newpu" != "$pu" ]; then
-        gk3_die "PARTUUID 变了（$pu -> $newpu）—— Windows 会起不来"; return 1
+        gk3_die "PARTUUID 变了（$pu -> ${newpu}）—— Windows 会起不来"; return 1
     fi
     newmib=$(( $(blockdev --getsize64 "$part" 2>/dev/null || echo 0) / 1048576 ))
-    echo "分区 $num：${cur} MiB -> ${newmib} MiB（PARTUUID 未变）"
+    echo "分区 ${num}：${cur} MiB -> ${newmib} MiB（PARTUUID 未变）"
     gk3_prog 100 "缩小完成"
     return 0
 }
@@ -840,7 +840,7 @@ gk3_wifi_connect() {
         esac
         i=$((i+1)); sleep 0.5
     done
-    [ "$st" = COMPLETED ] || { gk3_die "连不上 $ssid（密码错？信号弱？）"; return 1; }
+    [ "$st" = COMPLETED ] || { gk3_die "连不上 ${ssid}（密码错？信号弱？）"; return 1; }
 
     gk3_prog 60 "取 IP 地址"
     dhcpcd -n "$ifc" >/dev/null 2>&1 || dhcpcd "$ifc" >/dev/null 2>&1

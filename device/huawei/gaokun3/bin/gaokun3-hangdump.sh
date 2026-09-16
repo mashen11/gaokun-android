@@ -93,7 +93,7 @@ collect() {
 
     sync
     touch $DONE
-    log -t hangdump "取证完成：$O（本次启动不再重复采集）"
+    log -t hangdump "取证完成：${O}（本次启动不再重复采集）"
 }
 
 PREV=""

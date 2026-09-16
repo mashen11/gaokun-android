@@ -32,7 +32,7 @@ for d in /sys/class/input/input*; do
 done
 
 if [ "$N" = 0 ]; then
-    log -t gaokun3-keyboard "键盘已 $WANT：没有匹配的设备（键盘没接？）"
+    log -t gaokun3-keyboard "键盘已 ${WANT}：没有匹配的设备（键盘没接？）"
 else
-    log -t gaokun3-keyboard "键盘已 $WANT（inhibited=$VAL，共 $N 个 input 设备）"
+    log -t gaokun3-keyboard "键盘已 ${WANT}（inhibited=${VAL}，共 $N 个 input 设备）"
 fi

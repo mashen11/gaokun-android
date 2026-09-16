@@ -53,7 +53,7 @@ case "$PROFILE" in rescue|live) ;; *) die "--profile 只能是 rescue 或 live" 
 [ "$(id -u)" = 0 ] || die "要 root（chroot + mknod）"
 
 for t in curl tar chroot mksquashfs cpio sha256sum; do
-    command -v "$t" >/dev/null || die "缺工具：$t（Debian/Ubuntu: apt install squashfs-tools cpio curl）"
+    command -v "$t" >/dev/null || die "缺工具：${t}（Debian/Ubuntu: apt install squashfs-tools cpio curl）"
 done
 
 WORK=$OUT/work-$PROFILE
@@ -409,7 +409,7 @@ for chip in $FW_CHIPS; do
     mkdir -p "$OUT/fw/lib/firmware/$(dirname "$chip")"
     cp -a "$src" "$OUT/fw/lib/firmware/$(dirname "$chip")/"
 done
-ok "留下固件给 initramfs：$FW_CHIPS（$(du -sh "$OUT/fw" | cut -f1)）"
+ok "留下固件给 initramfs：${FW_CHIPS}（$(du -sh "$OUT/fw" | cut -f1)）"
 
 SQUASH=$OUT/gaokun3-$PROFILE.squashfs
 rm -f "$SQUASH"

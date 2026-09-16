@@ -40,11 +40,13 @@ echo "═══ 2. 驱动在跑（活体证据，不看开机日志）═══"
 # ⚠️ 别拿开机那行 "KernelSU: Initialized with driver version" 当判据 ——
 #    本机 dmesg 环形缓冲开机十几秒就绕回了，那行早没了，判据会稳定假阴性。
 #    改成看【现在还在产生】的钩子活动：hook_manager 每拦一次 execve 就打一行。
-BEFORE=$(adb shell 'dmesg | grep -c "KernelSU: hook_manager:"' | tr -d '')
+BEFORE=$(adb shell 'dmesg | grep -c "KernelSU: hook_manager:"' | tr -d '
+')
 # 制造一次 execve：用一个平时不会被执行的路径，好在日志里认得出来
 adb shell '/system/bin/toybox true' >/dev/null 2>&1
 sleep 1
-AFTER=$(adb shell 'dmesg | grep -c "KernelSU: hook_manager:"' | tr -d '')
+AFTER=$(adb shell 'dmesg | grep -c "KernelSU: hook_manager:"' | tr -d '
+')
 if [ "${AFTER:-0}" -gt "${BEFORE:-0}" ]; then
     ok "tracepoint 钩子活着：制造一次 execve 后 hook_manager 日志 $BEFORE → $AFTER"
 elif [ "${AFTER:-0}" -gt 0 ]; then
@@ -56,7 +58,8 @@ fi
 adb shell 'dmesg | grep "KernelSU:" | tail -3' | sed 's/^/         /'
 
 echo "═══ 3. 驱动版本（如果开机日志还在的话）═══"
-INIT=$(adb shell 'dmesg | grep "Initialized with driver version"' | tr -d '')
+INIT=$(adb shell 'dmesg | grep "Initialized with driver version"' | tr -d '
+')
 if [ -n "$INIT" ]; then
     ok "$(printf '%s' "$INIT" | sed 's/.*KernelSU: //')"
     case "$INIT" in
@@ -71,7 +74,7 @@ echo "═══ 4. 回归：SELinux 还是 permissive ═══"
 # ⚠️ init.c:268 在【后加载】分支里会 setenforce(true)。我们是内建，不该走到那儿，
 #    但这条值得每次都验 —— 本机没写 sepolicy，被切成 enforcing 会大面积失效。
 SE=$(A 'getenforce')
-[ "$SE" = "Permissive" ] && ok "getenforce = Permissive" || bad "getenforce = $SE（被改了？）"
+[ "$SE" = "Permissive" ] && ok "getenforce = Permissive" || bad "getenforce = ${SE}（被改了？）"
 
 echo "═══ 5. 管理器 App ═══"
 if A 'pm list packages' | grep -q 'com.resukisu.resukisu'; then

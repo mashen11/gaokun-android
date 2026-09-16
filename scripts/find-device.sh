@@ -54,5 +54,5 @@ for ip in $CANDS; do
         case "$h" in gaokun3-rescue|gaokun3-live) echo "$ip"; exit 0 ;; esac
     fi
 done
-echo "!! 扫完 $(echo "$CANDS" | wc -w) 个邻居，没有一台确认是我们的设备（$MODE）" >&2
+echo "!! 扫完 $(echo "$CANDS" | wc -w) 个邻居，没有一台确认是我们的设备（${MODE}）" >&2
 exit 1

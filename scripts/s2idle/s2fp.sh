@@ -32,7 +32,7 @@ if [ $ID -lt $N_TARGET ]; then
     fi
 else
     rm -f /etc/systemd/system/multi-user.target.wants/s71test.service
-    say "这是最后一轮（$ID/$N_TARGET），跑完回 Android 停下"
+    say "这是最后一轮（$ID/${N_TARGET}），跑完回 Android 停下"
 fi
 sync
 sleep 35
@@ -82,7 +82,7 @@ for i in $(seq 1 10); do
     TRY=$((TRY+1))
     echo devices > /sys/power/pm_test; sync
     T0=$(cut -d. -f1 /proc/uptime)
-    say "PRE 第$i/10（尝试 $TRY）"
+    say "PRE 第$i/10（尝试 ${TRY}）"
     echo mem > /sys/power/state
     RC=$?
     T1=$(cut -d. -f1 /proc/uptime)

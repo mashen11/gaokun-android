@@ -18,7 +18,7 @@ if ! mountpoint -q "$MNT"; then
   # ro + 忽略 hibernate/dirty 标志，纯读不修复
   sudo -n mount -t ntfs3 -o ro,noatime "$WIN" "$MNT" 2>/dev/null \
     || sudo -n mount -t ntfs   -o ro,noatime "$WIN" "$MNT" 2>/dev/null \
-    || { echo "挂不上 $WIN（ntfs3/ntfs-3g 都不行）"; exit 1; }
+    || { echo "挂不上 ${WIN}（ntfs3/ntfs-3g 都不行）"; exit 1; }
 fi
 echo "已只读挂载 $WIN -> $MNT"
 echo

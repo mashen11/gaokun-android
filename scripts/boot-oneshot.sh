@@ -62,7 +62,7 @@ case "${1:---list}" in
     GOT=$(S "dd if=$EFI/$VAR bs=1 skip=4 2>/dev/null | tr -d '\\0'" | tr -d '\r')
     # ★ 回读校验：写成功不等于内容对（#42 的三个坑都在这一步暴露）
     [ "$GOT" = "$ENTRY" ] || die "回读是 '$GOT'，期望 '$ENTRY' —— oneshot 没写对，别重启"
-    echo "✓ oneshot = $ENTRY（回读一致）"
+    echo "✓ oneshot = ${ENTRY}（回读一致）"
     echo "  下一次启动会走它，之后自动回到 default。重启请征得用户同意。"
     ;;
 esac

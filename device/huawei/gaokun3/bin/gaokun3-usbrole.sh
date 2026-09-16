@@ -101,7 +101,7 @@ NX=$(ls "$D"/ 2>/dev/null | grep -c '^xhci')
 if [ "$WANT" = host ]; then
     if [ "$OK" = 1 ]; then
         echo $WL > /sys/power/wake_unlock
-        say "已确认 role=host（子 xhci=$NX，耗时 $((i * 100))ms）→ 放行挂起"
+        say "已确认 role=host（子 xhci=${NX}，耗时 $((i * 100))ms）→ 放行挂起"
     else
         say "⚠️ 切 host 失败：role=[$(cat $S 2>/dev/null)] 子xhci=$NX —— 保持 wakelock，不放行挂起"
     fi

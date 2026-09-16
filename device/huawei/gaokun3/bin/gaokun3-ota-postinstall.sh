@@ -132,7 +132,7 @@ if [ -f "$REC_SRC" ]; then
                 "$SRC_ENT" > "$DST_ENT" &&
                 log "recovery 条目已写: $MID-recovery-$SUFFIX.conf"
         else
-            log "警告: 找不到 $SRC_ENT，跳过 recovery 条目"
+            log "警告: 找不到 ${SRC_ENT}，跳过 recovery 条目"
         fi
     else
         log "警告: recovery ramdisk 写入失败，recovery 条目不会更新"
