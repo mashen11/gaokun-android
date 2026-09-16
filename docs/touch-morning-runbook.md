@@ -100,7 +100,8 @@ adb shell 'echo 0 > /sys/module/himax_hx83121a_spi/parameters/fuzz'
 量化验收（把感觉变成数字）：
 
 ```sh
-adb shell 'nohup sh -c "cat /dev/input/event7 > /data/local/tmp/fz.bin" >/dev/null 2>&1 &'
+EV=$(adb shell 'grep -A8 \'Name="Himax\' /proc/bus/input/devices | grep -o \'event[0-9]*\' | head -1' | tr -cd 'a-z0-9')
+adb shell "nohup sh -c 'cat /dev/input/$EV > /data/local/tmp/fz.bin' >/dev/null 2>&1 &"
 # —— 慢速拖动 20 秒 ——
 adb shell 'kill $(pidof cat)'; adb pull /data/local/tmp/fz.bin
 python3 scripts/touch/evdev-strokes.py fz.bin
@@ -122,7 +123,7 @@ python3 scripts/touch/evdev-strokes.py fz.bin
 # ★ 必须先开这个，否则驱动报的是常数（TOUCH_MAJOR=1、PRESSURE=4095），
 #   每个触点都成了"针尖"，比没有还糟
 adb shell 'echo 1 > /sys/bus/spi/devices/spi0.0/algo/pressure_enabled'
-adb shell 'getevent -lp /dev/input/event7 | grep -E "TOUCH_MAJOR|PRESSURE"'
+adb shell "getevent -lp /dev/input/$EV | grep -E 'TOUCH_MAJOR|PRESSURE'"   # $EV 见上
 ```
 
 然后**把手掌压在屏幕上**，看：
