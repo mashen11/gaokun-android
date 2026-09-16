@@ -39,19 +39,18 @@ Subject: [PATCH] arm64: dts: gaokun3: 把触摸坐标的 fuzz 设为 0（实机�
 模块参数仍可在运行时再改。
 
 案卷：`docs/stage4-findings.md` #116。
+
+⚠️ 第一版正文是停机后凭记忆手工构造的，`--verify` 在干净树上打不上（31/32）。
+现在这份是从真实树上反向去掉改动后 `diff -u` 出来的，上下文逐字节真实。
+**补丁正文永远从树上生成，不要手写** —— 哪怕改动只有两行。
 ---
 diff --git a/arch/arm64/boot/dts/qcom/sc8280xp-huawei-gaokun3.dts b/arch/arm64/boot/dts/qcom/sc8280xp-huawei-gaokun3.dts
 --- a/arch/arm64/boot/dts/qcom/sc8280xp-huawei-gaokun3.dts
 +++ b/arch/arm64/boot/dts/qcom/sc8280xp-huawei-gaokun3.dts
-@@ -663,6 +663,25 @@
- 		panel = <&panel>;
- 
- 		spi-max-frequency = <12000000>;
- 
- 		touchscreen-size-x = <2560>;
+@@ -668,6 +668,24 @@
  		touchscreen-size-y = <1600>;
-+
-+		/*
+ 
+ 		/*
 +		 * The driver hard-codes a fuzz of 8, a value picked so that libinput
 +		 * would not turn a resting finger into a swipe.  Android applies its
 +		 * own touch slop (~24 units here) and the driver runs an IIR filter of
@@ -68,6 +67,8 @@ diff --git a/arch/arm64/boot/dts/qcom/sc8280xp-huawei-gaokun3.dts b/arch/arm64/b
 +		 */
 +		touchscreen-fuzz-x = <0>;
 +		touchscreen-fuzz-y = <0>;
- 
- 		/*
++
++		/*
  		 * internally handle invert first, two transformations are
+ 		 * non-comutative even if we can swap first.
+ 		 */
