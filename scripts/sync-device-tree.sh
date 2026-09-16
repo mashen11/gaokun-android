@@ -20,7 +20,9 @@ HOST=${1:?用法: $0 <构建机 IP>}
 SSH="ssh -o StrictHostKeyChecking=no -o BatchMode=yes"
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SRC=$REPO/device/huawei/gaokun3
-DST=vahiru@$HOST:~/crdroid/device/huawei/gaokun3
+# ⚠️ 不能写 …:~/crdroid：bash 对赋值里 ":" 后面的 "~" 做波浪号展开（PATH 风格），
+#   远端会拿到【本机】的 home 路径。用相对远端 home 的路径。
+DST=vahiru@$HOST:crdroid/device/huawei/gaokun3
 die() { echo "✗ $*" >&2; exit 1; }
 ok()  { echo "✓ $*"; }
 
