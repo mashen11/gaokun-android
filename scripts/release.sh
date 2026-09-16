@@ -182,4 +182,8 @@ cat <<EOF
        在别的目录里它报 "not a git repository" 就什么都没传；② 别写 gh ... | tail -1 ——
        管道的退出码是 tail 的，上传失败照样印"uploaded"（与 az/make 那两次是同一个坑）。
     ③ 附件名就是文件名，"file#label" 里的 # 后面只是显示标签；要叫 install-artifacts.sha256 就先把文件改成这个名。
+    ④ 2026-09-16：gh release create 一次带 5 个附件，1.28 GB 那个上传收到 HTTP 400（本机上行不稳），
+       gh 随即把刚建的 release 整个删掉 —— 所以别一把全传。稳妥顺序：--draft 建草稿 + 小附件 →
+       大附件逐个 gh release upload --clobber、每个都用 gh release view --json assets 核对字节数、失败重试 →
+       全对再 gh release edit --draft=false --latest。草稿期间外面看不见，半途失败也没有半发布状态。
 EOF

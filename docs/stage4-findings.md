@@ -8758,3 +8758,15 @@ BOARD_KERNEL_CMDLINE 与 BLS 条目漂移各教育过一次"，却只让 recover
 ★ 第一版与第二版之间只差 `gaokun3-ota-postinstall.sh` 那一段 —— 而如果第一版直接发了，
 v0.6.1 的用户更新后会和我第一次装机一样：一切都对，只有轴没建，且没有任何地方会报。
 **验收表里每一行都要有一个能被"看原始数据"推翻的期望值** —— 这次靠的就是"压力轴 2 个"那一行。
+
+### 19. 发版：R2 一次过，GitHub 附件要"草稿 + 逐个传 + 服务端核对"
+
+R2：`release.sh --no-build` 一次过（产物先传、清单最后传），设备侧 `curl -sI …/ota/gaokun3.json`
+**200**、`timestamp 1789570683`。
+
+GitHub：`gh release create` 一次带 5 个附件，1.28 GB 的 `super.img.zst` 上传收到 **HTTP 400**
+（本机上行今晚不稳，scp 也断过一次）；`gh` 失败时把刚建的 release **整个删掉**，服务端回到"没有 v0.6.2"
+—— 干净，但也意味着一把全传的做法在弱网下永远发不出去。改为：`--draft` 建草稿 + 三个小附件 →
+两个大附件逐个 `upload --clobber`、每个都以 `gh release view --json assets` 的字节数为判据、失败重试 →
+五个全对才 `edit --draft=false --latest`。草稿期间外面看不见，半途失败没有半发布状态。
+记进 `release.sh` 的 gh 坑第 ④ 条。
