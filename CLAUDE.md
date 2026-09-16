@@ -65,7 +65,8 @@
 > 槽 `_a` = v0.6.2 第一版（戳 `1789568947`，缺触点面积轴，其余相同）—— 可回落。v0.6.1 已被覆盖。
 > `default` 由 boot_control 在成功启动后自动指向当前槽。
 > ⚠️ 本机 `persist.gaokun3.allow_suspend` 仍是 **0**（镜像默认 1），它现在不进 s2idle。
-> v0.6.2 已发到 R2（清单已更新）；GitHub release 与 push 见 `docs/relnotes/v0.6.2-alpha.md`。
+> **v0.6.2-alpha 已全部发布**（2026-09-16）：R2 清单已更新（设备侧抓取 200）、
+> GitHub release 5 个附件服务端字节数逐一核对并标 Latest、仓库已推送。说明见 `docs/relnotes/v0.6.2-alpha.md`。
 
 ---
 
