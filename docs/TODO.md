@@ -179,7 +179,7 @@ Z8 孤立尖峰过滤实际从没生效（只毙掉八邻域和 <25 的尖峰）
 ★ **明早照着 [`touch-morning-runbook.md`](touch-morning-runbook.md) 走**，每一步都写了「看什么算通过」。
 已在 ESP 上就位（**default 没动、原内核原封不动**）：
 
-* `slot_b/Image-test`（内核 **`#22`**，sha `a99c5ad8…`）与条目 `…-android-b-test.conf`，
+* `slot_b/Image-test`（内核 **`#23`**，sha `b05bcc6e…`）与条目 `…-android-b-test.conf`，
   复用 slot_b 的 ramdisk/dtb，只多占 15.6 MB。slot_b 原内核 `89a1d14f…`（`#19`）**没动**，留作回落。
 * 那个条目的 cmdline 里加了 `himax_hx83121a_spi.disable_pressure=0`，
   好让**同一次重启**把 fuzz 与触点面积一起验掉。

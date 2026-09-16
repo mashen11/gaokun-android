@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """把 himax 驱动导出的 40×60 电容网格画成能一眼看懂的图。
 
-数据来源（内核 #22 起，patches/0043）：
+数据来源（内核 #23 起，patches/0043）：
     /sys/kernel/debug/himax-hx83121a/frame_raw   面板【产出】的（仅去基线）
     /sys/kernel/debug/himax-hx83121a/frame       流水线【判定】的（CMF/边缘增强/IIR 之后）
 各 4800 字节 = 40 行 × 60 列 × s16 小端。

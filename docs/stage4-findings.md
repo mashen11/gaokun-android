@@ -8375,6 +8375,47 @@ zone**；而 `hx_reject_palms()` 把命中规则的 zone 从数组里整个删�
 ⚠️ 文件一度叫 `Image-k21` 而里面已经是 `#22` —— 当场改成版本中立的 `Image-test`。
 **名字与内容不一致的东西一定会在最不该出错的时候咬人。**
 
+### 8bis. 自审抓到的一个真 bug：debugfs 会在最需要它的场合消失（2026-09-16）
+
+补丁写完之后又通读了一遍 `0043` 的 probe 路径，发现：
+
+```c
+ts->dbg_dir = debugfs_create_dir("himax-hx83121a", NULL);
+debugfs_create_file(...);  debugfs_create_file(...);
+
+ts->panel_follower.funcs = &himax_panel_follower_funcs;
+ret = devm_drm_panel_add_follower(ts->dev, &ts->panel_follower);
+if (ret)
+        return dev_err_probe(...);        /* ← 这里返回时 dbg_dir 泄漏 */
+```
+
+`devm_drm_panel_add_follower()` **会返回 `-EPROBE_DEFER`** —— 现有错误路径用的正是
+`dev_err_probe()`，而那个函数存在的唯一理由就是安静地处理延迟探测，
+**驱动作者自己就预期它会延迟**。于是：
+
+1. 那条路径上 dentry 泄漏；
+2. **更糟的是重试时目录名已被占用** —— `debugfs_create_dir()` 返回 `-EEXIST`，
+   `debugfs_create_file()` 拿着这个错误指针**静默什么都不做**，
+   驱动照常起来、**诊断接口一个都没有、而且没有任何地方说过这件事**。
+
+★ 也就是说：**探测顺序一旦有问题（正是最需要诊断的场合），诊断接口恰好会消失。**
+
+改法：`devm_add_action_or_reset()` 把 debugfs 树绑到设备生命周期上，
+不手写 create/remove 配对。devm 的清理在 `ts` 之后注册、因而在 `ts` 被释放**之前**运行，
+顺序是对的。→ 内核 **`#23`**（sha `b05bcc6e…`，零告警、`W=1` 干净、`--verify` 32/32、
+DTB 仍与 v0.6.1 逐字节相同）。
+
+⚠️★★ **同一轮里我自己犯了一个操作错误，值得记下来**：为了撤掉旧版 `0043`，
+我在构建机上跑了 `git checkout -- drivers/input/touchscreen/`。
+**这棵内核树上补丁只活在工作区里（从未提交）**，所以那条命令把三个驱动文件
+全部打回 HEAD，`0037`–`0045` 九个补丁一次清空。
+★ 幸运的是恢复很干净：`kernel-apply-patches.sh` 把整条链重放了一遍，
+终态与本机预期**逐字节一致**，`--verify` 也是 32/32。
+★ **教训**：在"补丁只存在于工作区"的树上，`git checkout --` / `git restore` /
+`git stash` 都是**破坏性**的，而且不会有任何警告。要撤补丁就用 `git apply -R`
+（撤不掉就说明正文变了，那时才该换别的办法），或者干脆重放整条链 ——
+**这也正是那个脚本存在的理由**。
+
 ### 9. 没做的，以及为什么
 
 * **重启**：用户睡了，没人能按电源键。

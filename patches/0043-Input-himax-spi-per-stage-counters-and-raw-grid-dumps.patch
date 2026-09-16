@@ -57,7 +57,17 @@ Subject: [PATCH] Input: himax-spi: 加逐级计数器与原始网格导出 —�
 均值之外（也就是说一个卡在 900 的坏格子永远修不掉）。这条我此前**答不上来**，
 现在有工具了。
 
-**两个刻意的实现决定：**
+**三个刻意的实现决定：**
+
+* **debugfs 树用 `devm_add_action_or_reset()` 绑生命周期，不手写 create/remove 配对。**
+  ⚠️★ 下面的 `devm_drm_panel_add_follower()` **会返回 `-EPROBE_DEFER`**（现有错误路径
+  用的正是 `dev_err_probe()` —— 那个函数存在的理由就是安静地处理延迟探测）。
+  手写"这里建、在 `.remove()` 里删"的配对在那条路径上会**泄漏 dentry**；
+  更糟的是**重试时目录名已被占用**：`debugfs_create_dir()` 返回 `-EEXIST`，
+  `debugfs_create_file()` 拿着这个错误指针**静默什么都不做**，于是驱动起来了、
+  诊断接口一个都没有、而且**没有任何地方说过这件事**。
+  ★ 这是本补丁自审时抓到的 —— 它会在最需要诊断接口的场合（探测顺序有问题时）
+  恰好让诊断接口消失。
 
 * **计数器读取不加锁。** 唯一的写者是 IRQ 线程，跨字段撕裂的快照对诊断毫无影响；
   反过来，在这里拿 `op_lock` 会让**触摸路径卡死时，那个唯一能解释它为什么卡死的
@@ -103,15 +113,7 @@ diff --git a/drivers/input/touchscreen/himax-spi-core.c b/drivers/input/touchscr
  };
  
  static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on);
-@@ -833,6 +836,7 @@
- 	struct himax_ts_data *ts = container_of(follower, struct himax_ts_data,
- 						panel_follower);
- 
-+	debugfs_remove_recursive(ts->dbg_dir);
- 	cancel_delayed_work_sync(&ts->panel_reinit_work);
- 
- 	himax_lock(ts);
-@@ -1046,6 +1050,79 @@
+@@ -1046,6 +1049,79 @@
  HX_ALGO_ATTR_U8_RW(track_start_debounce);
  HX_ALGO_ATTR_S32_RW(track_jump_dist2);
  
@@ -191,7 +193,7 @@ diff --git a/drivers/input/touchscreen/himax-spi-core.c b/drivers/input/touchscr
  static struct attribute *hx_algo_attrs[] = {
  	&dev_attr_cmf_enabled.attr,
  	&dev_attr_cmf_exclusion.attr,
-@@ -1078,6 +1155,8 @@
+@@ -1078,6 +1154,8 @@
  	&dev_attr_track_active_guard.attr,
  	&dev_attr_track_start_debounce.attr,
  	&dev_attr_track_jump_dist2.attr,
@@ -200,7 +202,7 @@ diff --git a/drivers/input/touchscreen/himax-spi-core.c b/drivers/input/touchscr
  	NULL,
  };
  
-@@ -1086,6 +1165,71 @@
+@@ -1086,6 +1164,76 @@
  	.attrs = hx_algo_attrs,
  };
  
@@ -262,6 +264,11 @@ diff --git a/drivers/input/touchscreen/himax-spi-core.c b/drivers/input/touchscr
 +	.llseek = default_llseek,
 +};
 +
++static void himax_debugfs_release(void *dir)
++{
++	debugfs_remove_recursive(dir);
++}
++
 +static const struct file_operations himax_dbg_out_fops = {
 +	.owner  = THIS_MODULE,
 +	.open   = simple_open,
@@ -272,7 +279,7 @@ diff --git a/drivers/input/touchscreen/himax-spi-core.c b/drivers/input/touchscr
  static const struct drm_panel_follower_funcs himax_panel_follower_funcs = {
  	.panel_prepared = himax_panel_prepared,
  	.panel_unpreparing = himax_panel_unpreparing,
-@@ -1198,6 +1342,11 @@
+@@ -1198,6 +1346,11 @@
  	hx_expand_and_resolve(algo, pos, &cnt);
  	hx_track_contacts(algo, pos, cnt);
  	stable_cnt = hx_count_stable_tracks(algo);
@@ -284,19 +291,35 @@ diff --git a/drivers/input/touchscreen/himax-spi-core.c b/drivers/input/touchscr
  
  	/* Not final results, touchscreen_report_pos will handle this (x-y swap, y invert) */
  	for (int i = 0; i < HIMAX_MAX_TOUCH; ++i) {
-@@ -1489,6 +1638,12 @@
- 		device_remove_file(ts->dev, &dev_attr_inplace_reset);
+@@ -1490,6 +1643,28 @@
  		return ret;
  	}
-+
+ 
++	/*
++	 * Tie the debugfs tree to the device with devm rather than unwinding it
++	 * by hand.  devm_drm_panel_add_follower() below can return -EPROBE_DEFER
++	 * (that is why the existing error path uses dev_err_probe()), and a
++	 * hand-rolled create-here / remove-in-.remove() pair leaks the dentry on
++	 * that path.  Worse, the retry then finds the directory name already
++	 * taken: debugfs_create_dir() returns -EEXIST, debugfs_create_file()
++	 * quietly does nothing with that error pointer, and the driver comes up
++	 * with no diagnostic interface at all and nothing said so.
++	 */
 +	ts->dbg_dir = debugfs_create_dir("himax-hx83121a", NULL);
++	ret = devm_add_action_or_reset(ts->dev, himax_debugfs_release,
++				      ts->dbg_dir);
++	if (ret) {
++		device_remove_file(ts->dev, &dev_attr_inplace_reset);
++		return ret;
++	}
 +	debugfs_create_file("frame_raw", 0400, ts->dbg_dir, ts,
 +			    &himax_dbg_raw_fops);
 +	debugfs_create_file("frame", 0400, ts->dbg_dir, ts,
 +			    &himax_dbg_out_fops);
- 
++
  	ts->panel_follower.funcs = &himax_panel_follower_funcs;
  	ret = devm_drm_panel_add_follower(ts->dev, &ts->panel_follower);
+ 	if (ret) {
 diff --git a/drivers/input/touchscreen/hx-algo.c b/drivers/input/touchscreen/hx-algo.c
 --- a/drivers/input/touchscreen/hx-algo.c
 +++ b/drivers/input/touchscreen/hx-algo.c

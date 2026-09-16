@@ -17,7 +17,7 @@
 > 误判成"内核挂死"并让用户去按电源键的。判据用 `getprop ro.crdroid.device`，
 > 局域网里那台小米手机（`pudding`）也开着 5555。
 >
-> ### 三条会让你损失一小时以上的运维坑
+> ### 四条会让你损失一小时以上的运维坑
 > 1. **`| tail` 之后取 `$?` 拿到的是 `tail` 的退出码。** 在 `az`（打印"已下发停机"而机器没停）、
 >    `make`（报 `KBUILD_RC=0` 而构建失败）、`gh release upload`（报"uploaded"而什么都没传）上
 >    各栽过一次。判据要看**产物**（时间戳 / 大小 / 服务端列表），不看管道尾巴。
@@ -30,6 +30,11 @@
 > 3. **一行命令里永远不要 `pkill -f <名字>` / `pgrep -f <名字>`** —— 命令行自己就含那个名字，
 >    于是把自己的 shell 杀了，后面什么都没跑。2026-09-14 一天栽了三次。
 >    用 `pkill -x`、`kill $(pidof ...)`，或让长跑脚本自己写 pid 文件。
+> 4. **内核树上的补丁只活在【工作区】里（从未提交）** —— 所以 `git checkout -- <路径>` /
+>    `git restore` / `git stash` 在那棵树上是**破坏性**的，且毫无警告。
+>    2026-09-16 我用它撤一个补丁，一次清空了 `0037`–`0045` 九个。
+>    撤补丁用 `git apply -R`；撤不掉说明正文变了，那时重放整条链
+>    （`scripts/kernel-apply-patches.sh <树>`，幂等）—— 那正是这个脚本存在的理由。
 >
 > ### 四条操作禁忌（每一条都是用一次事故换的）
 > 1. ⚠️★★★ **camss 已经 `runtime_error` 时不要 unbind 它** —— 会拖死整机，只能长按电源键。
@@ -58,7 +63,7 @@
 > ⚠️ **触摸**：本机已现场改到 `track_jump_dist2=0` / `track_smoothing=0` / `track_start_debounce=2`；
 > 开机属性设成 `daily`，所以重启后落到安全值而不是坏配置。镜像里的
 > `/vendor/bin/gaokun3-touch-mode.sh` **还是旧的**（`/vendor` 只读），要下次构建才换掉。#114
-> ⚠️ ESP 上备着内核 **`#22`**（`slot_b/Image-test` + `…-android-b-test.conf`，带
+> ⚠️ ESP 上备着内核 **`#23`**（`slot_b/Image-test` + `…-android-b-test.conf`，带
 > `disable_pressure=0`），**default 没动**。验收手册见 `docs/touch-morning-runbook.md`。
 > ⚠️ ESP 只剩 **35 MB**（OTA postinstall 要 56 MB）—— **验完要删掉那两个文件**。
 

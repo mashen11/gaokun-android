@@ -11,7 +11,7 @@
 | 设备上跑的 | v0.6.1，内核 **`#19`**，槽 `_b` |
 | 触摸参数 | 已现场改到 `track_jump_dist2=0` / `track_smoothing=0` / `track_start_debounce=2` |
 | 开机属性 | `persist.sys.gaokun3.touch_mode=daily` ⇒ **重启后落到安全值，不会退回坏配置**（代价 25 ms 平滑滞后）|
-| ESP 上备好的 | `slot_b/Image-test`（内核 **`#22`**，sha `a99c5ad8…`），条目 `…-android-b-test.conf` |
+| ESP 上备好的 | `slot_b/Image-test`（内核 **`#23`**，sha `b05bcc6e…`），条目 `…-android-b-test.conf` |
 | 回落 | `slot_b/Image`（`89a1d14f…`，内核 `#19`）**没动**；`default` 仍指向它 |
 | 构建机 | 已 `deallocate`（核实过实际电源状态） |
 | 未推送提交 | 见 `git log origin/main..HEAD` —— **推送要你点头** |
