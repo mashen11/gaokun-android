@@ -33,6 +33,7 @@
 #include <libyuv.h>
 #include <log/log.h>
 #include <sys/mman.h>
+#include <system/camera_metadata_tags.h>   /* ANDROID_JPEG_ORIENTATION / _QUALITY */
 #include <system/graphics.h>
 #include <ui/GraphicBufferMapper.h>
 #include <ui/Rect.h>
@@ -65,6 +66,40 @@ namespace {
 ndk::ScopedAStatus err(Status s)
 {
 	return ndk::ScopedAStatus::fromServiceSpecificError(static_cast<int32_t>(s));
+}
+
+/*
+ * Android 的 JPEG 旋转角（顺时针）→ libyuv 的 RotationMode。
+ *
+ * ★★ 这里【不需要取反】，但理由必须写下来，因为它极容易被想当然搞错：
+ *   ANDROID_JPEG_ORIENTATION 与 EXIF Orientation 都用【顺时针】；
+ *   libyuv 的 rotate.h 原文注释也是顺时针 ——
+ *     kRotate90  = 90,  // Rotate 90 degrees clockwise.
+ *     kRotate270 = 270, // Rotate 270 degrees clockwise.
+ *   而且它还留着把方向写死在名字里的历史别名：
+ *     kRotateClockwise = 90 / kRotateCounterClockwise = 270
+ *   ⇒ 直接一对一映射。
+ *   ⚠️ 别拿 OpenCV / PIL 的直觉套过来：那些库的"旋转 90"是逆时针，
+ *      照抄一遍会把前后摄一起转歪 180°。
+ *
+ * 非 0/90/180/270 的取值按"不旋转"处理并记日志 —— Android 只允许这四个值，
+ * 出现别的说明上游算错了；静默接受会得到一个随机的方向。
+ */
+libyuv::RotationMode toLibyuvRotation(int32_t deg)
+{
+	switch (deg) {
+	case 90:
+		return libyuv::kRotate90;
+	case 180:
+		return libyuv::kRotate180;
+	case 270:
+		return libyuv::kRotate270;
+	case 0:
+		return libyuv::kRotate0;
+	default:
+		ALOGW("JPEG_ORIENTATION=%d 不是 0/90/180/270，按不旋转处理", deg);
+		return libyuv::kRotate0;
+	}
 }
 } /* namespace */
 
@@ -693,9 +728,13 @@ bool Session::deliver(const uint8_t *rgb, buffer_handle_t dst,
  * ⚠️ libcamera 给的是 B,G,R 顺序（formats::RGB888 → V4L2_PIX_FMT_BGR24，
  *    见 formats.cpp:185），而 libjpeg 的 JCS_EXT_BGR 正好对应它 ——
  *    用 JCS_RGB 会红蓝互换，而且不报任何错。
+ *
+ * ★★ 2026-09-19：补上 JPEG 旋转（照片方向不对的根因就在这一处）。
+ *   见下面 "旋转" 那一段的说明。
  */
 bool Session::deliverJpeg(const uint8_t *rgb, buffer_handle_t dst,
-			  int32_t dstW, int32_t dstH, int32_t blobSize, int quality)
+			  int32_t dstW, int32_t dstH, int32_t blobSize,
+			  int quality, int32_t jpegOrientation)
 {
 	auto &mapper = android::GraphicBufferMapper::get();
 	void *raw = nullptr;
@@ -707,35 +746,90 @@ bool Session::deliverJpeg(const uint8_t *rgb, buffer_handle_t dst,
 	}
 
 	/*
-	 * 源尺寸与目标不同的话先缩放。
-	 * ⚠️ libyuv **没有** RGBScale（我一开始想当然写了，编译器拦下）。
-	 *    走 RGB24 → ARGB → ARGBScale 这条：libyuv 的 "ARGB" 在内存里是
-	 *    B,G,R,A，正好对上 libjpeg 的 JCS_EXT_BGRA，不用再转回 3 通道。
+	 * ★★ 旋转：必须在【编码之前】把像素真的转过来。
+	 *
+	 *   ANDROID_JPEG_ORIENTATION 是应用按"传感器朝向 + 当前设备旋转"算出来的
+	 *   顺时针校正角。HAL 的合同是把它落到交付物上，两个合法做法二选一：
+	 *     ① 旋转像素，交付物里不要再有方向标记；
+	 *     ② 不转像素，把这个值写进 EXIF 的 Orientation 标记
+	 *        （上游 libcamera 的 Android HAL 走的就是这条：
+	 *         post_processor_jpeg.cpp 里 exif.setOrientation(jpegOrientation)）。
+	 *   本 HAL 选 ①，因为它是更强的保证 —— 不依赖看图程序是否解析 EXIF。
+	 *   ⚠️ 两者只能选一个：又转像素又写 EXIF 的旋转值 = 转两次，反而歪。
+	 *   像素已经转正，所以这里【不需要】libexif；缺 Orientation 标记 ≡ 1（正常），
+	 *   这正是我们想要的结果，别事后又去补一个别样的标记。
+	 *
+	 * ⚠️ 90/270 会把宽高换过来：流的 (dstW, dstH) 是【传感器坐标系】里的尺寸，
+	 *   转完之后 JPEG 的实际尺寸是 (dstH, dstW)。Android 允许这样 —— BLOB 流
+	 *   只声明缓冲字节数，应用自己读 JPEG 头取真实尺寸。不要为了"跟流尺寸对上"
+	 *   把宽高改回去，那就等于转了个寂寞。
 	 */
-	std::vector<uint8_t> scaled;
+	const libyuv::RotationMode rotMode = toLibyuvRotation(jpegOrientation);
+	const bool swapDims = rotMode == libyuv::kRotate90 || rotMode == libyuv::kRotate270;
+	const int32_t outW = swapDims ? dstH : dstW;
+	const int32_t outH = swapDims ? dstW : dstH;
+
+	/*
+	 * 源尺寸与目标不同就得缩放；要旋转就得先有一个 4 通道缓冲。
+	 * ⚠️ libyuv **没有** RGBScale（我一开始想当然写了，编译器拦下），
+	 *    也没有 RGB24 的旋转 —— 两条路都走 ARGB 中间体：libyuv 的 "ARGB"
+	 *    在内存里是 B,G,R,A，正好对上 libjpeg 的 JCS_EXT_BGRA，不用再转回
+	 *    3 通道，也正好对上 ARGBScale / ARGBRotate 的入参。
+	 */
+	const bool needScale = dstW != srcWidth_ || dstH != srcHeight_;
+	const bool needRotate = rotMode != libyuv::kRotate0;
+
+	std::vector<uint8_t> argb;      /* dstW×dstH，已缩放、未旋转（BGRA） */
+	std::vector<uint8_t> rotated;   /* outW×outH，已旋转（BGRA） */
 	const uint8_t *src = rgb;
 	int srcStride = srcWidth_ * 3;
 	int components = 3;
 	J_COLOR_SPACE colorSpace = JCS_EXT_BGR;   /* ★ 字节序见上面的说明 */
 
-	if (dstW != srcWidth_ || dstH != srcHeight_) {
-		std::vector<uint8_t> argbSrc(static_cast<size_t>(srcWidth_) * srcHeight_ * 4);
-		if (libyuv::RGB24ToARGB(rgb, srcStride, argbSrc.data(), srcWidth_ * 4,
-					srcWidth_, srcHeight_) != 0) {
-			ALOGE("deliverJpeg: RGB24ToARGB 失败");
-			mapper.unlock(dst);
-			return false;
+	if (needScale || needRotate) {
+		argb.resize(static_cast<size_t>(dstW) * dstH * 4);
+
+		if (needScale) {
+			std::vector<uint8_t> full(static_cast<size_t>(srcWidth_) *
+						  srcHeight_ * 4);
+			if (libyuv::RGB24ToARGB(rgb, srcWidth_ * 3, full.data(),
+						srcWidth_ * 4, srcWidth_, srcHeight_) != 0) {
+				ALOGE("deliverJpeg: RGB24ToARGB 失败");
+				mapper.unlock(dst);
+				return false;
+			}
+			if (libyuv::ARGBScale(full.data(), srcWidth_ * 4, srcWidth_,
+					      srcHeight_, argb.data(), dstW * 4, dstW, dstH,
+					      libyuv::kFilterBilinear) != 0) {
+				ALOGE("deliverJpeg: ARGBScale 失败");
+				mapper.unlock(dst);
+				return false;
+			}
+		} else {
+			if (libyuv::RGB24ToARGB(rgb, srcWidth_ * 3, argb.data(), dstW * 4,
+						dstW, dstH) != 0) {
+				ALOGE("deliverJpeg: RGB24ToARGB 失败");
+				mapper.unlock(dst);
+				return false;
+			}
 		}
-		scaled.resize(static_cast<size_t>(dstW) * dstH * 4);
-		if (libyuv::ARGBScale(argbSrc.data(), srcWidth_ * 4, srcWidth_, srcHeight_,
-				      scaled.data(), dstW * 4, dstW, dstH,
-				      libyuv::kFilterBilinear) != 0) {
-			ALOGE("deliverJpeg: ARGBScale 失败");
-			mapper.unlock(dst);
-			return false;
+
+		if (needRotate) {
+			rotated.resize(static_cast<size_t>(outW) * outH * 4);
+			/* ★ 目标 stride 用【旋转后】的宽度 outW ——
+			 *   沿用 dstW 会让每一行都错位（画面斜切成条）。 */
+			if (libyuv::ARGBRotate(argb.data(), dstW * 4, rotated.data(),
+					       outW * 4, dstW, dstH, rotMode) != 0) {
+				ALOGE("deliverJpeg: ARGBRotate(%d°) 失败", jpegOrientation);
+				mapper.unlock(dst);
+				return false;
+			}
+			src = rotated.data();
+			srcStride = outW * 4;
+		} else {
+			src = argb.data();
+			srcStride = dstW * 4;
 		}
-		src = scaled.data();
-		srcStride = dstW * 4;
 		components = 4;
 		colorSpace = JCS_EXT_BGRA;
 	}
@@ -751,8 +845,8 @@ bool Session::deliverJpeg(const uint8_t *rgb, buffer_handle_t dst,
 	unsigned long outSize = maxJpeg;
 	jpeg_mem_dest(&cinfo, &out, &outSize);
 
-	cinfo.image_width = dstW;
-	cinfo.image_height = dstH;
+	cinfo.image_width = outW;
+	cinfo.image_height = outH;
 	cinfo.input_components = components;
 	cinfo.in_color_space = colorSpace;
 	jpeg_set_defaults(&cinfo);
@@ -779,7 +873,8 @@ bool Session::deliverJpeg(const uint8_t *rgb, buffer_handle_t dst,
 		memcpy(static_cast<uint8_t *>(raw) + blobSize - sizeof(CameraBlob),
 		       &blob, sizeof(CameraBlob));
 		ok = true;
-		ALOGD("JPEG %dx%d 质量%d → %zu 字节", dstW, dstH, quality, jpegLen);
+		ALOGD("JPEG %dx%d（请求 %dx%d，旋转 %d°）质量%d → %zu 字节",
+		      outW, outH, dstW, dstH, jpegOrientation, quality, jpegLen);
 	} else {
 		ALOGE("deliverJpeg: JPEG 长度异常 %zu（上限 %zu）", jpegLen, maxJpeg);
 	}
@@ -998,11 +1093,28 @@ void Session::onRequestCompleted(libcamera::Request *req)
 	msgs.push_back(std::move(msg));
 	cb_->notify(msgs);
 
+	/*
+	 * ★★ 拍照参数来自【这一帧的请求】，不是静态元数据。
+	 *   ANDROID_JPEG_ORIENTATION = 应用按"传感器朝向 + 当前设备旋转"算好的
+	 *     顺时针校正角；ANDROID_JPEG_QUALITY = 它要的质量。
+	 *   老代码这两个一个都没读（质量恒 90、方向恒 0）—— 这正是"前后摄照片
+	 *   都固定歪一个角度"的直接原因：不管用户怎么拿机器，JPEG 永远是传感器
+	 *   原始朝向。两条请求键都取不到时退回 0 / 90，行为与修前一致。
+	 */
+	const int32_t jpegOrientation =
+		requestEntryInt(pend.settings, ANDROID_JPEG_ORIENTATION, 0);
+	int32_t jpegQuality = requestEntryInt(pend.settings, ANDROID_JPEG_QUALITY, 90);
+	/* libjpeg 只认 1..100；应用给 0 或越界时夹住，别让它产出垃圾。 */
+	if (jpegQuality < 1)
+		jpegQuality = 1;
+	if (jpegQuality > 100)
+		jpegQuality = 100;
+
 	std::vector<bool> okv;
 	for (auto &pb : pend.buffers) {
 		bool ok = rgb && (pb.isBlob
 				  ? deliverJpeg(rgbStill, pb.handle, pb.width, pb.height,
-						pb.blobSize, /*quality=*/90)
+						pb.blobSize, jpegQuality, jpegOrientation)
 				  : deliver(rgb, pb.handle, pb.width, pb.height, chromaBlur));
 		okv.push_back(ok);
 		if (!ok) {

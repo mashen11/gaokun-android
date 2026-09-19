@@ -94,10 +94,15 @@ private:
 	 * 必要时缩放到该路流自己的尺寸。 */
 	bool deliver(const uint8_t *rgb, buffer_handle_t dst,
 		     int32_t dstW, int32_t dstH, int chromaBlur);
-	/* JPEG 流：把 RGB 编码成 JPEG 写进 BLOB 缓冲。 */
+	/*
+	 * JPEG 流：把 RGB 编码成 JPEG 写进 BLOB 缓冲。
+	 * jpegOrientation 是应用给的【顺时针】校正角（ANDROID_JPEG_ORIENTATION）。
+	 * ⚠️ 90/270 时交付的 JPEG 实际宽高与流声明的 (dstW, dstH) 互换 ——
+	 *    BLOB 流只声明缓冲字节数，这是 Android 允许且常见的行为。
+	 */
 	bool deliverJpeg(const uint8_t *rgb, buffer_handle_t dst,
 			 int32_t dstW, int32_t dstH, int32_t blobSize,
-			 int quality);
+			 int quality, int32_t jpegOrientation);
 
 	/*
 	 * ── 闪光灯（#110 / #111）──

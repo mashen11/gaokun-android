@@ -62,6 +62,17 @@ std::vector<uint8_t> buildResult(const std::vector<uint8_t> &requestSettings,
 /* RequestTemplate → 默认请求设置。 */
 std::vector<uint8_t> buildDefaultRequest(int templateId, const SensorFacts &f);
 
+/*
+ * 从【请求设置】里读一个整型条目，读不到就给 def。
+ *
+ * ★ 必要性：JPEG 的旋转角与质量是【应用】在每一帧的请求里给的
+ *   （ANDROID_JPEG_ORIENTATION / ANDROID_JPEG_QUALITY），HAL 必须自己取。
+ *   类型不匹配时返回 def 而不是硬转 —— ANDROID_JPEG_QUALITY 是 byte、
+ *   ANDROID_JPEG_ORIENTATION 是 int32，读错类型会读出垃圾值。
+ */
+int32_t requestEntryInt(const std::vector<uint8_t> &requestSettings,
+			uint32_t tag, int32_t def);
+
 /* 小工具：把 camera_metadata_t 打包成字节。 */
 std::vector<uint8_t> pack(const camera_metadata_t *m);
 

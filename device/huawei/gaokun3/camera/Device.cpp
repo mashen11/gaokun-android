@@ -3,8 +3,11 @@
 #include "Provider.h"
 #include "Session.h"
 
+#include <cstdlib>
 #include <fcntl.h>
 #include <unistd.h>
+
+#include <sys/system_properties.h>   /* __system_property_get：仅用于方向标定的调试覆盖 */
 
 #include <aidl/android/hardware/camera/common/CameraResourceCost.h>
 #include <aidl/android/hardware/camera/common/Status.h>
@@ -108,8 +111,76 @@ bool Device::init()
 	/* ── 朝向 ── */
 	auto loc = props.get(libcamera::properties::Location);
 	facts_.frontFacing = !loc || *loc == libcamera::properties::CameraLocationFront;
+
+	/*
+	 * ⚠️★★ 两个"方向"的约定是【相反的】，直接抄数值会差 180°。
+	 *
+	 *   libcamera properties::Rotation = 传感器相对机身的【物理安装角】，
+	 *     用【逆时针】表达（property_ids 原文："the angular difference in the
+	 *     counter-clockwise direction between the camera reference system 'Rc'
+	 *     and the projected scene reference system 'Rp'"；内核
+	 *     Documentation/devicetree/bindings/media/video-interface-devices.yaml
+	 *     的 rotation 属性是同一套文字，libcamera 从这里继承 ——
+	 *     camera_sensor_legacy.cpp 读的就是 V4L2_CID_CAMERA_SENSOR_ROTATION，
+	 *     而那个控件由驱动 v4l2_ctrl_new_fwnode_properties() 从设备树填）。
+	 *
+	 *   ANDROID_SENSOR_ORIENTATION = 把输出图像转正所需的【顺时针】角。
+	 *
+	 *   ⇒ android = (360 - rotation) % 360。上游 libcamera 自己的 Android HAL
+	 *     就是这么算的（src/android/camera_device.cpp）：
+	 *       "The Android orientation metadata specifies its rotation correction
+	 *        value in clockwise direction whereas libcamera specifies the
+	 *        rotation property in anticlockwise direction."
+	 *
+	 *   ⚠️ 本机目前两个相机的 rotation 都是 0 或 180 —— 这两个值互为反数，
+	 *      所以这条 bug 现在是【隐性】的；但只要设备树里的 rotation 改成
+	 *      90 或 270（后摄那行本来就标着 FIXME 待核），立刻差 180°。
+	 */
 	auto rot = props.get(libcamera::properties::Rotation);
-	facts_.orientation = rot ? *rot : 0;
+	const int32_t rawRotation = rot ? *rot : 0;
+	if (!rot)
+		ALOGW("libcamera 没报 Rotation 属性，按 0° 处理"
+		      "（到 /dev/v4l-subdev* 上查 camera_sensor_rotation 控件）");
+	int32_t ccw = ((rawRotation % 360) + 360) % 360;
+
+	/*
+	 * ★ 调试覆盖：用系统属性顶掉设备树的值，省掉标定时的
+	 *   「改设备树 → 重编内核 → 刷机 → 重启」循环。
+	 *
+	 *   为什么必须留这个口子：设备树里的 rotation 经驱动
+	 *   v4l2_ctrl_new_fwnode_properties() 变成 V4L2_CID_CAMERA_SENSOR_ROTATION，
+	 *   而那个控件 min==max==def，是【只读】的 —— 运行时 v4l2-ctl 改不动它，
+	 *   每次试一个角都要重来一遍内核。而设备树里现存的两个值（前摄 0、
+	 *   后摄 180）本来就都不可信。
+	 *
+	 *   ⚠️ 属性给的数就是【写进设备树的那个数】（同一个约定，不用再换算），
+	 *      免得标定时多做一次 360-x 的心算：
+	 *        setprop debug.gaokun3.camera.orientation.rear 270
+	 *      标定完把属性清空，并把值写进设备树 —— 正确的位置是设备树。
+	 *      步骤见 docs/camera-photo-rotation-2026-09-19.md。
+	 */
+	const char *prop = facts_.frontFacing
+				   ? "debug.gaokun3.camera.orientation.front"
+				   : "debug.gaokun3.camera.orientation.rear";
+	char propVal[PROP_VALUE_MAX] = {};
+	if (__system_property_get(prop, propVal) > 0) {
+		const int32_t v = atoi(propVal);
+		if (v == 0 || v == 90 || v == 180 || v == 270) {
+			ALOGW("%s 方向被属性覆盖：%s=%d（设备树报的是 %d）—— 仅调试用",
+			      name_.c_str(), prop, v, rawRotation);
+			ccw = v;
+		} else {
+			ALOGW("%s 属性 %s=\"%s\" 不是 0/90/180/270，忽略",
+			      name_.c_str(), prop, propVal);
+		}
+	}
+
+	if (ccw % 90 != 0) {
+		ALOGW("Rotation=%d 不是 90 的整数倍，按 0° 处理（Android 只认 0/90/180/270）",
+		      rawRotation);
+		ccw = 0;
+	}
+	facts_.orientation = (360 - ccw) % 360;
 
 	/*
 	 * ── 闪光灯（#110）──
@@ -144,9 +215,9 @@ bool Device::init()
 		return false;
 	}
 
-	ALOGI("%s 就绪：阵列 %dx%d 有效 %dx%d 朝向 %d %s%s",
+	ALOGI("%s 就绪：阵列 %dx%d 有效 %dx%d 朝向 %d（libcamera rotation=%d，逆时针） %s%s",
 	      name_.c_str(), facts_.pixelArrayW, facts_.pixelArrayH,
-	      facts_.activeW, facts_.activeH, facts_.orientation,
+	      facts_.activeW, facts_.activeH, facts_.orientation, rawRotation,
 	      facts_.frontFacing ? "前摄" : "后摄",
 	      facts_.flashLed.empty() ? "" : "（带闪光灯）");
 	return true;

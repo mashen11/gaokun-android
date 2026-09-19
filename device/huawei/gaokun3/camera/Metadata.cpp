@@ -29,6 +29,32 @@ std::vector<uint8_t> pack(const camera_metadata_t *m)
 	return out;
 }
 
+int32_t requestEntryInt(const std::vector<uint8_t> &requestSettings,
+			uint32_t tag, int32_t def)
+{
+	if (requestSettings.empty())
+		return def;
+
+	/* ★ CameraMetadata.aidl 原文：这就是 camera_metadata_t 的序列化 blob，
+	 *   可以就地当成 camera_metadata* 用（与 buildResult() 同一手法）。 */
+	const camera_metadata_t *m =
+		reinterpret_cast<const camera_metadata_t *>(requestSettings.data());
+	camera_metadata_ro_entry_t e;
+	if (find_camera_metadata_ro_entry(m, tag, &e) != 0)
+		return def;
+
+	if (e.count == 0)
+		return def;
+	if (e.type == TYPE_INT32)
+		return e.data.i32[0];
+	if (e.type == TYPE_BYTE)
+		return e.data.u8[0];
+
+	ALOGW("请求里的 tag %u 类型是 %d，不是整数类型 —— 用默认值 %d",
+	      tag, static_cast<int>(e.type), def);
+	return def;
+}
+
 namespace {
 
 /* 我们对外声明支持的像素格式。
