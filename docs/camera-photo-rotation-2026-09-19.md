@@ -343,3 +343,65 @@ docs/camera-photo-rotation-2026-09-19.patch   自包含补丁（含本文与两�
 但 Soong 侧的链接与真机行为尚未验证。
 第一次构建时请留意 `Metadata.h` 的签名、`<system/camera_metadata_tags.h>` 的包含路径，
 以及 `<sys/system_properties.h>` 里的 `PROP_VALUE_MAX`。
+
+---
+
+## 七、2026-09-20 实机验证更新（推翻 6.3 的预测）
+
+HAL 已在本机构建机上**真实编译**（此前只是源码级 + 逻辑级自测），热替换上机后做了端到端实测：
+
+```
+build completed successfully   android.hardware.camera.provider-service.gaokun3
+                               136,704 字节  sha256 4acf8ecc89eac7e8…
+```
+
+### 7.1 修复被证实生效
+
+| 证据 | 数值 |
+|---|---|
+| logcat（新代码独有的诊断串） | `朝向 0（libcamera rotation=0，逆时针）` |
+| HAL 交付日志 | `JPEG 720x1280（请求 1280x720，旋转 90°）质量95` |
+| 旧 HAL 同机同景 | `JPEG 2560x1440`（从不旋转） |
+
+⇒ **HAL 现在真的按请求角转像素了**，且 90° 方向正确。
+
+### 7.2 前摄照片为正 ⇒ 6.3 的"两台都 270"预测**错误**
+
+设备物理横屏（加速度计 `(9.53,-0.03,2.11)`，重力沿 +X），应用请求 90°，交付照片
+（`front-probe-001834.jpg`）**是正的**：置物架物品坐在层板上、书平摞、玩偶架在桌子上方、桌面在下方。
+
+⇒ 前摄 **θ=0 正确** ⇒ 设备树 `rotation = <0>`（ROM 原值就对）。
+**6.3 的"两台都先试 270"作废**；09-19 那次"加速度计+差分"标定把前摄标成 270 是误标
+（被"显示旋转 ≠ 物理朝向"坑带偏，且差分法混入了两台各自的安装角）。
+三处设备树已纠正为 **前摄 0 / 后摄 0**。
+
+### 7.3 后摄尚待一张有结构的照片
+
+后摄当拍到的画面是**完全均匀的亮场**（p1=p99=252，零结构 —— 镜头贴近桌面/墙，失焦成一片白），
+判读不了。后摄两轮分析一致指向 θ=0（⇒ `rotation=0`，已就位），但**以拍到有结构的照片为准**。
+
+### 7.4 热替换的可行解（/vendor 100% 满 + ETXTBSY）
+
+`/vendor` 257 MB **用满（0 可用）**，且 provider 正运行该二进制 ⇒ 直接 push（权限）、
+cp（ETXTBSY）、rename（ENOSPC）**三条路都实测失败**。唯一可行解是 **bind mount 单文件**
+（不占 /vendor 空间、不动运行中的 inode）：
+
+```bash
+adb push <新二进制> /data/local/tmp/hal-new.bin
+adb shell su -c 'chmod 755 /data/local/tmp/hal-new.bin'
+adb shell su -c 'chcon u:object_r:hal_camera_default_exec:s0 /data/local/tmp/hal-new.bin'
+adb shell su -c 'mount --bind /data/local/tmp/hal-new.bin /vendor/bin/hw/android.hardware.camera.provider-service.gaokun3'
+adb shell su -c 'setprop ctl.restart vendor.camera-provider-gaokun3'
+adb shell su -c 'sha256sum /vendor/bin/hw/android.hardware.camera.provider-service.gaokun3'   # ★ 必须核对
+```
+
+⚠️ **bind mount 重启即失效**；要持久化需做 KernelSU 模块（设备上有 meta-overlayfs）或刷 super。
+工具化：`scripts/hal-hotswap.sh`（工作区，已改 bind-mount 法）。
+
+### 7.5 首次真实编译暴露的三处问题（都已修，见 commit c474de6）
+
+1. `<libcamera/libcamera.h>` 上游/AOSP 都没有 —— 当年构建机手工放的，已重建入仓
+   （`patches/libcamera/include/libcamera/libcamera.h`）。
+2. `tracepoints.h` 是 meson `custom_target('tp_header')` 产物，生成清单漏了它
+   （编到 90% 才报 file not found）。
+3. `Session.cpp` 重复包含无 guard 的 `camera_metadata_tags.h` ⇒ 20 个 redefinition。
