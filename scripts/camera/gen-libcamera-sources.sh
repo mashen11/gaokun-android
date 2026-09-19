@@ -111,7 +111,8 @@ ok "configure 成功"
 # ---------------------------------------------------------------- 2. 找出生成目标
 say ""
 say "── 2. 从 meson 的目标表里找出【生成类】目标 ──"
-WANT="control_ids.cpp property_ids.cpp version.cpp ipa_pub_key.cpp softisp_ipa_proxy.cpp"
+# 生成目标的清单在下面那段 python 里（want_exact / want_re）——
+# 别在这里再维护第二份，两处一定会漂移。
 TARGETS_JSON="$BUILD/targets.json"
 meson introspect --targets "$BUILD" > "$TARGETS_JSON" 2>/dev/null || { bad "introspect 失败"; exit 1; }
 
@@ -129,6 +130,11 @@ want_exact = {
     "control_ids.cpp", "property_ids.cpp", "version.cpp",
     "ipa_pub_key.cpp", "softisp_ipa_proxy.cpp",
     "control_ids.h", "property_ids.h", "formats.h", "version.h",
+    # ★ tracepoints.h 走的是 meson 的 custom_target('tp_header')，
+    #   由 utils/tracepoints/gen-tracepoints.py 从 include/libcamera/internal/tracepoints/*.tp
+    #   生成。漏了它 ⇒ request.cpp:24 找不到 "libcamera/internal/tracepoints.h"，
+    #   而且是在【编到 90%】时才报（实测：17 分钟后）。
+    "tracepoints.h",
 }
 want_re = re.compile(r".*(_ipa_interface|_ipa_serializer|_ipa_proxy)\.h$")
 seen = {}
@@ -222,6 +228,33 @@ done
 # softisp 的 IPA 接口头（libcamera_ipa_softisp_gk3 依赖它）
 find "$GEN/include/libcamera" -name '*_ipa_interface.h' 2>/dev/null | grep -q . \
     && ok "include/libcamera/**/*_ipa_interface.h" || bad "IPA 接口头缺失"
+
+# tracepoints.h 在 internal/ 下，单独断言一次（它在 bp 的 include 路径里是裸名 include）
+find "$GEN/include/libcamera" -name 'tracepoints.h' 2>/dev/null | grep -q . \
+    && ok "include/libcamera/internal/tracepoints.h" \
+    || bad "include/libcamera/internal/tracepoints.h 缺失（meson 目标 tp_header）"
+
+# ── 合同检查：libcamera-Android.bp 引用的每个 generated/** 路径都必须存在 ──
+# 为什么要这道：生成产物不全时，失败点离原因很远（15 分钟的构建 + 一句
+# "file not found"）。这里把"生成物是否齐"在 1 秒内判掉。
+# 只检查 generated/ 开头的路径 —— 那些是我们【必须】产出的；bp 里还有 ipu3 等
+# AOSP 专有路径，在【上游】libcamera 树上本来就不存在，检查它们会全是假阳性。
+BP="$TREE/Android.bp"
+if [ -f "$BP" ]; then
+    miss=""
+    while read -r rel; do
+        [ -n "$rel" ] || continue
+        [ -e "$TREE/$rel" ] || miss="$miss $rel"
+    done < <(grep -oE '"generated/[A-Za-z0-9_./-]+"' "$BP" | tr -d '"' | sort -u)
+    n_ref="$(grep -oE '"generated/[A-Za-z0-9_./-]+"' "$BP" | tr -d '"' | sort -u | wc -l)"
+    if [ -z "$miss" ]; then
+        ok "合同检查：bp 引用的 $n_ref 个 generated/** 路径全部存在"
+    else
+        bad "合同检查：bp 引用了不存在的生成物 ——$miss"
+    fi
+else
+    warn "找不到 $BP，跳过合同检查"
+fi
 
 say ""
 if [ "$fail" = 0 ]; then

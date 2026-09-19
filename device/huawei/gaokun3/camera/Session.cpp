@@ -33,7 +33,12 @@
 #include <libyuv.h>
 #include <log/log.h>
 #include <sys/mman.h>
-#include <system/camera_metadata_tags.h>   /* ANDROID_JPEG_ORIENTATION / _QUALITY */
+/* ⚠️ 不要在这里直接 #include <system/camera_metadata_tags.h>！
+ * 该文件【没有 include guard】也没有 #pragma once（system/media/camera/include/system/），
+ * 而 <system/camera_metadata.h> 内部本来就 include 了它 ⇒ 再写一次就是二次包含，
+ * 立刻 20 个 "redefinition of 'camera_metadata_enum_android_control_*'"（实测：
+ * 编到 HAL 那一步才炸）。
+ * ANDROID_JPEG_ORIENTATION / ANDROID_JPEG_QUALITY 由 Metadata.h → camera_metadata.h 传递可见。 */
 #include <system/graphics.h>
 #include <ui/GraphicBufferMapper.h>
 #include <ui/Rect.h>
