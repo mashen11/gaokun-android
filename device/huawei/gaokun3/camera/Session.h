@@ -16,6 +16,8 @@
 #include <fmq/AidlMessageQueue.h>
 #include <libcamera/libcamera.h>
 
+#include "AutoFocus.h"
+#include "Lens.h"
 #include "Metadata.h"
 
 namespace gaokun3 {
@@ -149,11 +151,27 @@ private:
 	int chromaBlurRadius() const;   /* 0 = 不模糊 */
 	std::function<void()> onClosed_;
 
+	/*
+	 * ── 自动对焦（后摄 only）──
+	 * lens_ 是本会话独有的马达句柄：open() 时才 streamon 上电，close() 时放掉。
+	 * af_ 只在这两条线程上被访问：processCaptureRequest（解析模式/触发）与
+	 * onRequestCompleted（喂帧、写位置）—— 内部自带锁，所以不必碰 mutex_。
+	 * ⚠️ af_.attach()/Lens::close() 的顺序：先把 af_ 摘掉再关 fd，
+	 *    否则完成回调可能对着已关闭的 fd 写（写失败无害，但会刷日志）。
+	 */
+	AutoFocus af_;
+	std::unique_ptr<Lens> lens_;
+
 	std::shared_ptr<libcamera::Camera> cam_;
 	SensorFacts facts_;
 	std::shared_ptr<aidl::android::hardware::camera::device::ICameraDeviceCallback> cb_;
 
 	std::mutex mutex_;
+	std::condition_variable drainCv_;
+	/* freeRequests_ 有空位时通知 processCaptureRequest（生产者/消费者），
+	 * 这样池子瞬间枯竭时不会拒绝框架的请求（拒绝→框架永远等不到结果
+	 * → waitUntilIdle 超时 → ERROR_CAMERA_DEVICE）。 */
+	std::condition_variable freeCv_;
 	bool streaming_ = false;
 	bool closed_ = false;
 

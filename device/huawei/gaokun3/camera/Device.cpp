@@ -193,6 +193,19 @@ bool Device::init()
 		facts_.flashLed = kRearFlashLed;
 
 	/*
+	 * ── 对焦马达 ──
+	 * 只有后摄有 VCM（i2c 1-000c 的 dw9714，内核把它暴露成独立 v4l2 子设备）。
+	 * 这里【只找节点】、不开设备：给 /dev/v4l-subdevN 做 streamon 会动马达的
+	 * pm_runtime，相机还没开的时候不该占着它。真正的 open/streamon 在
+	 * Session::init()（有会话才有必要）。
+	 * 前摄 hi846 无马达 ⇒ hasAf 保持 false，元数据如实按定焦声明。
+	 */
+	if (!facts_.frontFacing && !Lens::findNode().empty()) {
+		facts_.hasAf = true;
+		ALOGI("%s 检测到对焦马达（VCM），将声明 AF", name_.c_str());
+	}
+
+	/*
 	 * ── 对外声明的输出尺寸 ──
 	 * ⚠️★ 不要把传感器满分辨率一股脑报上去：软件去拜耳 8 MP 单帧就要几十毫秒
 	 *    （[#95] 实测 AGC 收敛后帧间隔约 130 ms），预览用满分辨率会卡死。
@@ -215,11 +228,12 @@ bool Device::init()
 		return false;
 	}
 
-	ALOGI("%s 就绪：阵列 %dx%d 有效 %dx%d 朝向 %d（libcamera rotation=%d，逆时针） %s%s",
+	ALOGI("%s 就绪：阵列 %dx%d 有效 %dx%d 朝向 %d（libcamera rotation=%d，逆时针） %s%s%s",
 	      name_.c_str(), facts_.pixelArrayW, facts_.pixelArrayH,
 	      facts_.activeW, facts_.activeH, facts_.orientation, rawRotation,
 	      facts_.frontFacing ? "前摄" : "后摄",
-	      facts_.flashLed.empty() ? "" : "（带闪光灯）");
+	      facts_.flashLed.empty() ? "" : "（带闪光灯）",
+	      facts_.hasAf ? "（带自动对焦）" : "");
 	return true;
 }
 
@@ -248,7 +262,7 @@ ndk::ScopedAStatus Device::isStreamCombinationSupported(const StreamConfiguratio
 							bool *out)
 {
 	/* 软件 ISP 一次只喂得起一路。 */
-	*out = cfg.streams.size() <= 1;
+	*out = cfg.streams.size() <= 2;
 	return ndk::ScopedAStatus::ok();
 }
 
