@@ -116,6 +116,16 @@ PRODUCT_COPY_FILES += \
 PRODUCT_PACKAGES += \
     libgaokunhisteneffect
 
+# ⚠ 下面这份 libhw_histen_processing.so 是**华为专有二进制**（iMedia Audio 8.0 /
+#   Histen 6.1.9，从麒麟 V10 SP1 的音频栈提取，未获再分发授权）—— 这是本仓库里
+#   唯一一个【没有】按 firmware/ 、hexagonrpcd-root/ 、prebuilt-boot/ 那套
+#   「整目录忽略 + 只放行 README.md」约定处理的专有 blob，属于有意偏离。
+#   来源、限制与替代做法见 device/huawei/gaokun3/effects/README.md 第七节。
+#   不想要它：删掉下面那行 PRODUCT_COPY_FILES 与 effects/prebuilt/ 整个目录即可，
+#   其余部分照常工作 —— effect 会在引擎缺失时自动降级为逐比特直通，不会哑。
+PRODUCT_COPY_FILES += \
+    $(LOCAL_PATH)/effects/prebuilt/lib64/soundfx/libhw_histen_processing.so:$(TARGET_COPY_OUT_VENDOR)/lib64/soundfx/libhw_histen_processing.so
+
 # 音频 policy 配置 —— example HAL 的 IModule 实例清单【完全来自】
 # audio_policy_configuration.xml 解析结果（main.cpp:93-99 实名核实），
 # 没有它 HAL 只注册 IConfig，audioserver 等 IModule/default 永阻塞。
