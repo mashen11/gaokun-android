@@ -64,7 +64,8 @@ numbers (#NN) are in [`docs/stage4-findings.md`](docs/stage4-findings.md).
 | Camera | ✅ | **Both cameras work** (since v0.6.1). Front is a Hynix hi846, rear an **OmniVision OV13B10** — identified by recovering the power sequence from Huawei’s Windows driver package ([#106](docs/stage4-findings.md#106)). Path: mainline `camss` → libcamera *simple* pipeline with the software ISP → libyuv → an AIDL HAL written for this port. Flash works; the rear camera has **autofocus** (v0.7.0, thanks @mashen11); photos are rotated the way the app asks. The power-domain defect that made every second capture fail is fixed ([`patches/0031`](patches/), [#105](docs/stage4-findings.md#105)). ⚠️ At most 15 fps, no zoom, no exposure compensation. Image quality is not tuned: no colour matrix, dim scenes are noisy, flash shots overexpose; autofocus in the dark is slow. **Video recording has not been verified** on hardware |
 | USB-C | ⚠️ | UCSI comes up and both connectors register ([#112](docs/stage4-findings.md#112)). The data role follows what is on the other end — a computer gets us as a device; a hub or flash drive should get us as the host, which is designed for but not yet tried with real hardware ([`patches/0048`](patches/), v0.7.0) — and since v0.7.1 Android's USB service runs, so apps can use USB devices ([#13](https://github.com/vahiru/gaokun-android/issues/13)). ⚠️ **After replugging (seen after standby) the port can stop working until a reboot** — and, going by the code, the machine then also stays out of standby until that reboot. ⚠️ **No file transfer** to a computer (no MTP/PTP), and **USB flash drives are not mounted** (Android has no removable-storage configuration yet). DisplayPort alt-mode is untested |
 | Fingerprint | ❌ | In progress: Huawei's signed fingerprint app loads into the secure world on this machine ([#125](docs/stage4-findings.md#125)); there is no driver or HAL yet |
-| Stylus (M-Pencil), TPM | ❌ | No support |
+| Stylus (Huawei M-Pencil) | ⚠️ | **The pen works** ([`patches/0078`–`0082`](patches/), [docs/stylus.md](docs/stylus.md)): it draws, and apps see `TOOL_TYPE_STYLUS`, so pen-only brushes work. ⚠️ **No pressure and no hover** — this generation of pen does not report them at the HID level, so it is not something the driver can fix |
+| TPM | ❌ | No support |
 | Root | ⚠️ | KernelSU (the ReSukiSU fork) is **built into every kernel** and cannot be switched off. It stays dormant until you install the ReSukiSU manager app; then only apps you approve there get root. Apps that look for root or an unlocked boot chain may refuse to run ([details](docs/known-limitations.md#root-is-built-in-kernelsu--resukisu)) |
 | DRM (Widevine) | ❌ | No DRM module at all: Netflix, Disney+, Prime Video and the like do not play their shows ([details](docs/known-limitations.md#no-drm-protected-video-no-widevine)) |
 | SELinux | ⚠️ | `permissive`. Seven rounds of policy work towards enforcing; in enforcing trial runs the main functions work, the camera included ([#129](docs/stage4-findings.md#129)) |
@@ -167,7 +168,7 @@ notes ([v0.7.1-alpha](docs/relnotes/v0.7.1-alpha.md)) list what changed. In shor
   and Play Integrity fails. No Widevine, so Netflix-style paid streaming does
   not play. No GPS, and network location comes from Google services. No
   Chinese input method is preinstalled.
-* **Not supported:** fingerprint (in progress), stylus, TPM, USB file transfer
+* **Not supported:** fingerprint (in progress), TPM, USB file transfer
   (MTP), USB flash drives, USB audio, hardware video encoding, the Bluetooth
   headset microphone, the wired headset microphone, auto-brightness.
 * **Known bugs:** audio and Bluetooth can deadlock after long uptime (a watchdog

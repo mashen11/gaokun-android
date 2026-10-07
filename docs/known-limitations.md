@@ -185,12 +185,18 @@ yourself, you should know that they contain these components.
 * **What to do**: unlock with a PIN or password. Even once fingerprint works, fingerprint payments in payment apps will
   most likely still be unavailable.
 
-### Stylus (Huawei M-Pencil) is not supported
-<!-- DISP-13. Postponed past 1.0 (needs reverse-engineering of raw frames). -->
-* **What you see**: the pen does nothing at all: no pressure, no hover.
-* **Why**: the touch points are computed by the kernel driver itself from raw capacitance data, and that algorithm only
-  knows fingers. Nobody has reverse-engineered the pen's signal format yet.
-* **What to do**: nothing.
+### The stylus (Huawei M-Pencil) works — but there is no pressure or hover
+<!-- DISP-13. Fixed by patches/0078-0082; see docs/stylus.md. -->
+* **What you see**: the pen draws, and apps see it as a stylus (`TOOL_TYPE_STYLUS`), so
+  pen-only brushes work. What you do *not* get is **pressure** and **hover**: this generation of
+  pen does not report them at the HID level (pressure is a single bit), so no driver change can
+  bring them back.
+* **Why it used to do nothing at all**: the touch points are computed by the kernel driver itself
+  from the raw capacitance grid, and that pipeline is amplitude-driven — it is tuned for a
+  fingertip (4x5 cells, peak ~3800), and a pen tip (2x2 cells, peak 492) never clears its gates.
+  The pen now runs on its own path off the raw grid instead of going through the finger pipeline.
+* **What to do**: nothing; it works. If a drawing app feels "dotty", that is this panel's 120 Hz
+  sampling and whether the app interpolates, not the driver.
 
 ### No automatic brightness
 <!-- DISP-8 / HW-4 / A3 (#121). -->

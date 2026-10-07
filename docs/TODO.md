@@ -109,7 +109,7 @@ D17 充电上限保持现状、**不做写 EC 的上机实测**（2026-10-06）�
 ### ④ 1.0 之后（v1.0-plan §7 + 本文件的长期项）
 
 指纹 T6（③ client driver、④ Android HAL；APP-18 支付指纹）· 自动亮度 A3 · 硬件视频编码 A2 · MTP / USB 用途 · BT SCO 通话 · WoW 待机联网 ·
-A6 根因（dwc3 / QMP 的 resume 路径）与 B14 息屏 USB adb 原生化 · GPU SMMU 中断根治 B6 · 手掌碎块 T1 · 手写笔 · 相机 30 fps / 变焦 / EV / 画质（T3、A7 余项）·
+A6 根因（dwc3 / QMP 的 resume 路径）与 B14 息屏 USB adb 原生化 · GPU SMMU 中断根治 B6 · 手掌碎块 T1 · 相机 30 fps / 变焦 / EV / 画质（T3、A7 余项）·
 游戏音频基础延迟（B25 尾巴 / AV-7）· NET-4 按网络的随机 MAC（连同一次性迁移）· Power HAL 真实现与 RT uclamp · 120 Hz 无缝降频 ·
 quota / projid / casefold · FUSE passthrough · zram · Wi-Fi Direct · 海外 regdomain · B0 构建机的树换成本仓 checkout ·
 B3 余项（退役 ESP 派生文件、AVB）· tinymix 的 vendor 变体 · #12 的 39 位地址空间测试内核起不来（搁置）· iris 零碎（`venus_compat_gfmt=N` 复测、HAL 的 POLLPRI 空转、SYS_ERROR 后 `invalid uc_region`）·

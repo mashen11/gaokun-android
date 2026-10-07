@@ -65,6 +65,7 @@
 | 构建机 | `docs/build-machine.md` + `scripts/cicd.sh` |
 | 图形安装器 | `docs/stage7-flutter-debian.md`；`scripts/live/installer-lib.sh`、`scripts/live/README.md` |
 | 指纹 | `docs/fingerprint-driver-design.md`；案卷 #120/#123/#124/#125；`tools/fingerprint-bringup/` |
+| 手写笔（M-Pencil） | `docs/stylus.md`；补丁 `patches/0078`–`0082`（须登记进 `scripts/kernel-apply-patches.sh` 的 KPATCHES）；工具 `scripts/touch/`（`check-pen-android.sh`、`pen-ghost-ab.sh`、`pen-*-analyze.py`） |
 
 ⚠️ **冲突时**：实机实测 > 案卷 > 本文件 > `project-log.md`。历史里大量结论已被实测推翻（推翻过程故意留着），别当现状。
 
