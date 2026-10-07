@@ -1,0 +1,792 @@
+From: mashen11 <39056084+mashen11@users.noreply.github.com>
+Subject: [PATCH] Input: himax-spi: 给手写笔一条独立的数据通路（raw 网格 + 格内质心，默认关）
+
+**问题不是"笔信号太弱"，是"这条流水线只认幅度"。**
+
+`hx-algo.c` 整条链是幅度驱动的：像素要过 `macro_threshold` 才能种下一个连通域，
+峰要过 `peak_threshold` 才能成为峰。这对指腹成立（4×5 格、峰值 ~3800），
+对手写笔**不可能**成立。2026-09-30 四阶段实测：
+
+    笔尖接触     核心 2×2 格，峰值 492，裙边只有 40~80
+    静息噪声     σ ≈ 34，单帧最大 120（>150 的像素数：**0**）
+    指腹对照     4×5 格，峰值 3836（>150 的像素数：4399）
+
+出厂 `peak_threshold = 800 > 492` ⇒ 连通域根本起不来，"笔阶段算法零事件"的成因就在这。
+
+把闸门放宽的路线已用实测否掉（把驱动流水线逐行搬成 Python 扫参数：
+放宽到能收下笔尖的同时，噪声也进了连通域）。所以给笔**另开一条通路**：
+
+* 直接从 `raw_frame` 上按半格步长滑窗，取局部峰值当候选（不依赖 `macro_threshold`）；
+* 候选过一道独立的笔阈值，喂进一条**与手指分离**的轨迹；
+
+  轨迹闸门仍建在 argmax 上 —— 那个量的连续性是被实测过的。
+
+* 位置细化为**格内加权质心**（`pen_centroid_win`，默认 2；0 = 逐字复现 argmax-only），
+  把 argmax 的 ±0.5 格量化偏置换成格内插值。质心钳在 argmax 所在格内（细化，不是搬家），
+  否则面板别处一个宽的矮包能把质心拖离笔尖。
+
+* `debugfs/stack_raw` 的导出上限做成可调，便于整帧取证（上一版是死代码 `dump_frame()`）。
+
+**默认关**，要 `echo 1 > algo/pen_enabled` 才生效 —— 这是之后的提交里改成默认开的。
+
+案卷：`docs/stylus/pen-run-2026-09-30.md`。
+---
+--- a/drivers/input/touchscreen/himax-spi-core.c
++++ b/drivers/input/touchscreen/himax-spi-core.c
+@@ -18,6 +18,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/limits.h>
+ #include <linux/mutex.h>
++#include <linux/seq_file.h>
+ #include <linux/module.h>
+ #include <linux/slab.h>
+ 
+@@ -94,6 +95,13 @@ HIMAX_MAX_TX + HIMAX_MAX_RX) * 2)
+ /* hx83121a-specific register/dsram flags/data */
+ #define HIMAX_HX83121A_DSRAM_ADDR_RAW_OUT_SEL		0x100072ec
+ #define HIMAX_HX83121A_FLASH_SIZE			(255 * 1024)
++/*
++ * Ceiling for the debugfs stack_raw dump.  Past the stack the IC just keeps
++ * clocking out SRAM, so over-reading is harmless but pointless -- this is
++ * sized to comfortably cover the grid plus anything a second domain could
++ * append.
++ */
++#define HIMAX_DBG_STACK_MAX				16384U
+ 
+ /* hardware register addresses */
+ #define HIMAX_REG_ADDR_RELOAD_STATUS			0x80050000
+@@ -152,6 +160,12 @@ struct himax_ts_data {
+ 	struct delayed_work panel_reinit_work;
+ 	struct hx_algo *algo;
+ 	struct dentry *dbg_dir;
++
++	/* Pen estimator capture -- see struct hx_pen_cap_rec. */
++	struct hx_pen_cap_rec *pen_cap;
++	u32 pen_cap_head;
++	u32 pen_cap_count;
++	u32 pen_cap_frame;	/* per-frame counter; gaps split strokes */
+ };
+ 
+ static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on);
+@@ -1049,6 +1063,87 @@ static ssize_t _name##_store(struct device *dev,			\
+ }									\
+ static DEVICE_ATTR_RW(_name)
+ 
++/*
++ * Pen estimator capture.
++ *
++ * Every frame in which the pen path emits, store the argmax cell together with
++ * the sub-cell position computed for four different pen_centroid_win values --
++ * all from the *same* frame.  Reading debugfs/himax-hx83121a/pen_cap then gives
++ * a comparison no on-panel A/B can match: the four estimators see
++ * byte-identical input, so the hand's curvature and tremor cancel *exactly*
++ * between the arms.
++ *
++ * Why it exists: in the 2026-09-30 on-panel runs each arm got its own stroke,
++ * and how straight the user happened to draw varied by 6x (fitted-out curvature
++ * 0.99..6.29 mm) against a 1.5x spread in the estimator-relevant part -- the
++ * ranking was measuring the hand, not the algorithm (report sections 12.7/12.8).
++ * Giving all four arms one stroke removes that term by construction.
++ *
++ * Record is 24 bytes; the ring holds 16384 -> about two minutes of pen contact
++ * at 120 Hz.  There is no enable switch: capture only runs while the pen path
++ * is emitting, and one more knob is one more thing to get wrong.
++ */
++#define HX_PEN_CAP_N	16384
++#define HX_PEN_CAP_WINS	4	/* covers pen_centroid_win = 0 .. 3 */
++
++struct hx_pen_cap_rec {
++	u32 frame;		/* per-frame counter at capture time */
++	u8  br, bc;		/* argmax cell */
++	s16 best;		/* argmax value */
++	s16 x[HX_PEN_CAP_WINS];	/* Q8.8, same units the driver reports */
++	s16 y[HX_PEN_CAP_WINS];
++};
++
++static void himax_pen_cap_record(struct himax_ts_data *ts)
++{
++	struct hx_algo *algo = ts->algo;
++	struct hx_pen_cap_rec *rec;
++	int w;
++
++	if (!ts->pen_cap || !algo)
++		return;
++
++	rec = &ts->pen_cap[ts->pen_cap_head];
++	rec->frame = ts->pen_cap_frame;
++	rec->br = algo->pen.last_r;
++	rec->bc = algo->pen.last_c;
++	rec->best = algo->pen.z;
++	for (w = 0; w < HX_PEN_CAP_WINS; w++) {
++		s32 px, py;
++
++		hx_pen_positions(algo, rec->br, rec->bc, w, &px, &py);
++		rec->x[w] = (s16)px;
++		rec->y[w] = (s16)py;
++	}
++	ts->pen_cap_head = (ts->pen_cap_head + 1) % HX_PEN_CAP_N;
++	ts->pen_cap_count++;
++}
++
++/* Read = how many frames are captured; write 0 = clear the ring. */
++static ssize_t pen_cap_show(struct device *dev, struct device_attribute *attr,
++			    char *buf)
++{
++	struct himax_ts_data *ts = dev_get_drvdata(dev);
++
++	return sysfs_emit(buf, "%u\n", ts->pen_cap_count);
++}
++
++static ssize_t pen_cap_store(struct device *dev, struct device_attribute *attr,
++			     const char *buf, size_t count)
++{
++	struct himax_ts_data *ts = dev_get_drvdata(dev);
++	unsigned long val;
++
++	if (kstrtoul(buf, 0, &val))
++		return -EINVAL;
++	if (val == 0) {
++		ts->pen_cap_head = 0;
++		ts->pen_cap_count = 0;
++	}
++	return count;
++}
++static DEVICE_ATTR_RW(pen_cap);
++
+ #define HX_ALGO_ATTR_S16_RW(_name)					\
+ static ssize_t _name##_show(struct device *dev,				\
+ 			    struct device_attribute *attr, char *buf)	\
+@@ -1169,6 +1264,13 @@ HX_ALGO_ATTR_BOOL_RW(track_smoothing);
+ HX_ALGO_ATTR_BOOL_RW(track_active_guard);
+ HX_ALGO_ATTR_U8_RW(track_start_debounce);
+ HX_ALGO_ATTR_S32_RW(track_jump_dist2);
++/* Pen path -- see struct hx_pen_path.  Off by default. */
++HX_ALGO_ATTR_BOOL_RW(pen_enabled);
++HX_ALGO_ATTR_S16_RW(pen_threshold);
++HX_ALGO_ATTR_S16_RW(pen_jump_max);
++HX_ALGO_ATTR_S16_RW(pen_confirm_frames);
++HX_ALGO_ATTR_U16_RW(pen_lost_frames);
++HX_ALGO_ATTR_U8_RW(pen_centroid_win);
+ 
+ /*
+  * Per-stage counters.  Read unlocked on purpose: the only writer is the
+@@ -1205,6 +1307,16 @@ static ssize_t stats_show(struct device *dev, struct device_attribute *attr,
+ 	n += sysfs_emit_at(buf, n, "tracks_guard_kill %u\n", st->tracks_guard_kill);
+ 	n += sysfs_emit_at(buf, n, "tracks_lost       %u\n", st->tracks_lost);
+ 	n += sysfs_emit_at(buf, n, "max_contacts      %u\n", st->max_contacts);
++	/*
++	 * Pen path.  pen_frame_cand counts frames where the raw grid had a
++	 * pixel over pen_threshold; pen_frame_emit counts frames the path was
++	 * latched.  Read together with frames they answer "is a pen being
++	 * seen, and is the trajectory gate letting it through".
++	 */
++	n += sysfs_emit_at(buf, n, "pen_frame_cand    %u\n",
++			   ts->algo->pen.frames_cand);
++	n += sysfs_emit_at(buf, n, "pen_frame_emit    %u\n",
++			   ts->algo->pen.frames_emit);
+ 	return n;
+ }
+ 
+@@ -1276,6 +1388,13 @@ static struct attribute *hx_algo_attrs[] = {
+ 	&dev_attr_track_active_guard.attr,
+ 	&dev_attr_track_start_debounce.attr,
+ 	&dev_attr_track_jump_dist2.attr,
++	&dev_attr_pen_enabled.attr,
++	&dev_attr_pen_threshold.attr,
++	&dev_attr_pen_jump_max.attr,
++	&dev_attr_pen_confirm_frames.attr,
++	&dev_attr_pen_lost_frames.attr,
++	&dev_attr_pen_centroid_win.attr,
++	&dev_attr_pen_cap.attr,
+ 	&dev_attr_stats.attr,
+ 	&dev_attr_contacts_log.attr,
+ 	NULL,
+@@ -1344,6 +1463,53 @@ static const struct file_operations himax_dbg_raw_fops = {
+ 	.llseek = default_llseek,
+ };
+ 
++/*
++ * Capture dump, oldest first, one line per frame:
++ *
++ *	frame br bc best x0 y0 x1 y1 x2 y2 x3 y3
++ *
++ * x/y are Q8.8 in the units the driver reports, i.e. one grid cell is 256, so
++ * an offline tool can fit a line to each arm and compare them with none of the
++ * driver's later post-processing in the way.  Sequential (seq_file) because a
++ * full ring is far more than one page.
++ */
++static int himax_dbg_pencap_show(struct seq_file *s, void *unused)
++{
++	struct himax_ts_data *ts = s->private;
++	u32 n, start, i;
++	int w;
++
++	if (!ts->pen_cap)
++		return 0;
++
++	n = min_t(u32, ts->pen_cap_count, HX_PEN_CAP_N);
++	start = (ts->pen_cap_head + HX_PEN_CAP_N - n) % HX_PEN_CAP_N;
++
++	for (i = 0; i < n; i++) {
++		struct hx_pen_cap_rec *r =
++			&ts->pen_cap[(start + i) % HX_PEN_CAP_N];
++
++		seq_printf(s, "%u %u %u %d", r->frame, r->br, r->bc, r->best);
++		for (w = 0; w < HX_PEN_CAP_WINS; w++)
++			seq_printf(s, " %d %d", r->x[w], r->y[w]);
++		seq_putc(s, '\n');
++	}
++	return 0;
++}
++
++static int himax_dbg_pencap_open(struct inode *inode, struct file *f)
++{
++	return single_open(f, himax_dbg_pencap_show, inode->i_private);
++}
++
++static const struct file_operations himax_dbg_pencap_fops = {
++	.owner   = THIS_MODULE,
++	.open    = himax_dbg_pencap_open,
++	.read    = seq_read,
++	.llseek  = seq_lseek,
++	.release = single_release,
++};
++
+ static void himax_debugfs_release(void *dir)
+ {
+ 	debugfs_remove_recursive(dir);
+@@ -1356,6 +1522,141 @@ static const struct file_operations himax_dbg_out_fops = {
+ 	.llseek = default_llseek,
+ };
+ 
++/*
++ * Bytes of the raw AHB event stack exposed by debugfs "stack_raw".  The
++ * default is exactly what the touch pipeline consumes; raise it (up to
++ * HIMAX_DBG_STACK_MAX) to look for a pen/hover domain past the grid.
++ */
++static uint stack_raw_len __read_mostly = HIMAX_HX83121A_FULL_STACK_SZ;
++module_param(stack_raw_len, uint, 0644);
++MODULE_PARM_DESC(stack_raw_len,
++		 "bytes of the raw AHB event stack exposed via debugfs stack_raw");
++
++/*
++ * Raw full-stack dump.
++ *
++ * frame_raw is the 40x60 capacitance grid the algorithm consumed, and it says
++ * nothing about what else the firmware streams out of the AHB event stack.
++ * Huawei's HAL reads a hand domain *and* a separate pen domain from this same
++ * IC, and our bring-up has never established where that pen domain lands in
++ * the SPI stream -- or whether the IC emits it at all before the host asks for
++ * it.  This file returns the event stack verbatim, N bytes long, with N
++ * adjustable at runtime through the stack_raw_len module parameter, so the
++ * region past the grid can be differenced between "no pen" and "pen on the
++ * panel" without touching the touch path.
++ *
++ * One SPI transfer is issued per open() and cached for the life of the file
++ * descriptor.  Serving a fresh transfer from every read() would splice
++ * fragments of different frames together for any reader whose buffer is
++ * smaller than the dump, and would keep the IC busy for as long as the reader
++ * loops -- neither is acceptable for a diagnostic that is differenced
++ * byte-for-byte.
++ *
++ * The transfer is built by hand rather than through himax_spi_read() because
++ * that helper bounces off ts->xfer_buf, which is sized for exactly one stack.
++ */
++struct himax_dbg_stack {
++	u8 *data;
++	size_t len;
++};
++
++static int himax_dbg_stack_open(struct inode *inode, struct file *f)
++{
++	struct himax_ts_data *ts = inode->i_private;
++	struct himax_dbg_stack *snap;
++	struct spi_transfer xfer = { .cs_change = 0 };
++	struct spi_message msg;
++	size_t cap, payload, total;
++	int retry;
++
++	if (!ts)
++		return -ENODEV;
++
++	/* The 3-byte read header rides in the same transfer. */
++	cap = min_t(size_t, spi_max_transfer_size(ts->spi),
++		    HIMAX_DBG_STACK_MAX + HIMAX_BUS_R_HLEN);
++	if (cap <= HIMAX_BUS_R_HLEN)
++		return -EINVAL;
++	payload = min_t(size_t, (size_t)READ_ONCE(stack_raw_len),
++			cap - HIMAX_BUS_R_HLEN);
++	if (payload < 2)
++		return -EINVAL;
++	total = payload + HIMAX_BUS_R_HLEN;
++
++	snap = kzalloc(sizeof(*snap), GFP_KERNEL);
++	if (!snap)
++		return -ENOMEM;
++	snap->data = kzalloc(total, GFP_KERNEL);
++	if (!snap->data) {
++		kfree(snap);
++		return -ENOMEM;
++	}
++	snap->len = payload;
++
++	xfer.len = total;
++	xfer.tx_buf = snap->data;
++	xfer.rx_buf = snap->data;
++	spi_message_init(&msg);
++	spi_message_add_tail(&xfer, &msg);
++
++	mutex_lock(&ts->op_lock);
++	/*
++	 * Retries must lay the header down again: tx_buf and rx_buf are the same
++	 * buffer, so a failed attempt has already overwritten the command bytes.
++	 */
++	for (retry = 0; retry < HIMAX_BUS_RETRY; retry++) {
++		memset(snap->data, 0, total);
++		snap->data[0] = HIMAX_SPI_FUNCTION_READ;
++		snap->data[1] = HIMAX_AHB_ADDR_EVENT_STACK;
++		snap->data[2] = 0x00;
++		if (!spi_sync(ts->spi, &msg))
++			break;
++	}
++	mutex_unlock(&ts->op_lock);
++
++	if (retry == HIMAX_BUS_RETRY) {
++		kfree(snap->data);
++		kfree(snap);
++		return -EIO;
++	}
++
++	/* tx_buf aliases rx_buf: drop the echoed header in place. */
++	memmove(snap->data, snap->data + HIMAX_BUS_R_HLEN, payload);
++	f->private_data = snap;
++	return 0;
++}
++
++static ssize_t himax_dbg_stack_read(struct file *f, char __user *ubuf,
++				    size_t count, loff_t *ppos)
++{
++	struct himax_dbg_stack *snap = f->private_data;
++
++	if (!snap)
++		return -ENODEV;
++
++	return simple_read_from_buffer(ubuf, count, ppos, snap->data, snap->len);
++}
++
++static int himax_dbg_stack_release(struct inode *inode, struct file *f)
++{
++	struct himax_dbg_stack *snap = f->private_data;
++
++	if (snap) {
++		kfree(snap->data);
++		kfree(snap);
++		f->private_data = NULL;
++	}
++	return 0;
++}
++
++static const struct file_operations himax_dbg_stack_fops = {
++	.owner   = THIS_MODULE,
++	.open    = himax_dbg_stack_open,
++	.read    = himax_dbg_stack_read,
++	.release = himax_dbg_stack_release,
++	.llseek  = default_llseek,
++};
++
+ static const struct drm_panel_follower_funcs himax_panel_follower_funcs = {
+ 	.panel_prepared = himax_panel_prepared,
+ 	.panel_unpreparing = himax_panel_unpreparing,
+@@ -1459,6 +1760,7 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
+ 
+ 	// dump_frame((void *)ptr - OFST, true);
+ 
++	ts->pen_cap_frame++;
+ 	hx_preprocess_frame(algo, ptr);
+ 	/* dump_frame(algo); */
+ 
+@@ -1466,6 +1768,52 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
+ 	hx_reject_palms(algo);
+ 	hx_detect_peaks(algo);
+ 	hx_expand_and_resolve(algo, pos, &cnt);
++
++	/*
++	 * Pen path.  It is asked only when the amplitude pipeline found nothing
++	 * this frame -- which is precisely the situation while a pen is being
++	 * written with.  Over the 2026-09-30 four-phase recording the amplitude
++	 * path reported 0 contacts across all 424 written frames while the pen
++	 * path fires on 313 of them, and across all 426 fingertip frames the
++	 * amplitude path reported 403 while the pen path would have added
++	 * nothing.  The two are mutually exclusive by construction, so no
++	 * pen-versus-finger classifier is needed anywhere.
++	 *
++	 * The result is reported through the ordinary touchscreen input device:
++	 * it draws, but it carries no pressure, no tilt and no hover distance.
++	 * That is the deliberate first step -- a pen that works, before a pen
++	 * that is good.  A separate input device (BTN_TOOL_PEN, ABS_PRESSURE,
++	 * ABS_DISTANCE) is the follow-up once the IC side reports the real pen
++	 * domain, which is what the channel-B work is for.
++	 */
++	if (cnt == 0 && cnt < HIMAX_MAX_TOUCH && hx_pen_scan(algo)) {
++		himax_pen_cap_record(ts);
++		/*
++		 * Fill contacts[]/contact_count too, not just pos[].  The tracker
++		 * reads contacts[det].signal_sum for trk->signal_sum and the
++		 * contacts_log prints contacts[j] verbatim, so a contact that
++		 * exists only in pos[] shows up in both places as zeros -- which
++		 * reads exactly like a broken detection when it is not.  The pen
++		 * path has no zone, so area and zone_area are honestly 1.
++		 */
++		struct hx_contact *pct = &algo->contacts[cnt];
++
++		pct->x = algo->pen.x;
++		pct->y = algo->pen.y;
++		pct->area = 1;
++		pct->signal_sum = algo->pen.z;
++		pct->is_edge = (algo->pen.last_r == 0 ||
++				algo->pen.last_r == HX_ROWS - 1 ||
++				algo->pen.last_c == 0 ||
++				algo->pen.last_c == HX_COLS - 1);
++		pct->zone_area = 1;
++		algo->contact_count = cnt + 1;
++
++		pos[cnt].x = clamp_val((s32)(algo->pen.x / 6), 0, SZ_64K - 1);
++		pos[cnt].y = clamp_val((s32)(5 * algo->pen.y / 32), 0, SZ_64K - 1);
++		cnt++;
++	}
++
+ 	hx_track_contacts(algo, pos, cnt);
+ 	stable_cnt = hx_count_stable_tracks(algo);
+ 	if (stable_cnt > 0) {
+@@ -1793,6 +2141,15 @@ static int himax_spi_probe(struct spi_device *spi)
+ 			    &himax_dbg_raw_fops);
+ 	debugfs_create_file("frame", 0400, ts->dbg_dir, ts,
+ 			    &himax_dbg_out_fops);
++	debugfs_create_file("pen_cap", 0400, ts->dbg_dir, ts,
++			    &himax_dbg_pencap_fops);
++	ts->pen_cap = devm_kcalloc(ts->dev, HX_PEN_CAP_N,
++				   sizeof(*ts->pen_cap), GFP_KERNEL);
++	if (!ts->pen_cap)
++		return dev_err_probe(ts->dev, -ENOMEM,
++				     "failed to allocate pen capture ring\n");
++	debugfs_create_file("stack_raw", 0400, ts->dbg_dir, ts,
++			    &himax_dbg_stack_fops);
+ 
+ 	ts->panel_follower.funcs = &himax_panel_follower_funcs;
+ 	ret = devm_drm_panel_add_follower(ts->dev, &ts->panel_follower);
+--- a/drivers/input/touchscreen/hx-algo.c
++++ b/drivers/input/touchscreen/hx-algo.c
+@@ -65,6 +65,47 @@ void hx_algo_init_defaults(struct hx_algo *algo)
+ 	algo->track_active_guard   = true;
+ 	algo->track_start_debounce = 2;
+ 	algo->track_jump_dist2     = 0;  /* disabled by default */
++
++	/*
++	 * Pen path.  Disabled by default: it is additive, but turning a gate
++	 * off-by-default keeps this patch behaviour-neutral until a panel is
++	 * actually driven with a pen.  Numbers below come from replaying the
++	 * 2026-09-30 four-phase recording (docs/stylus/re-tools/hx-algo-replay.py):
++	 * threshold 150 sits 30 counts above the largest resting-panel pixel
++	 * (120) and still sees 74% of the written frames; confirm 3 costs 25 ms
++	 * at 120 Hz; 4 cells covers the measured 4.2-cell worst-case step.
++	 */
++	algo->pen_enabled        = false;
++	algo->pen_threshold      = 150;
++	algo->pen_jump_max       = 4;
++	algo->pen_confirm_frames = 3;
++	algo->pen_lost_frames    = 10;
++	/*
++	 * Sub-cell centroid, 2 cells (5x5 window).
++	 *
++	 * Why: the argmax estimate is quantised to whichever cell it sits in, so it
++	 * carries a *bias* of up to half a cell -- 42.67/2 output units = 2.13 mm --
++	 * that depends on where the stroke happens to fall on the grid.  A weighted
++	 * centroid over the surrounding cells interpolates inside the cell and
++	 * removes most of that bias.
++	 *
++	 * Honest status: **mechanism-based, not measured**.  All three on-panel A/B
++	 * sessions so far (19 strokes) ended up with lines within 1..5 deg of an
++	 * axis, because the tooling asked for "horizontal" ones.  On such a line the
++	 * perpendicular deviation is measured along the axis that barely moves, and
++	 * it is blind to exactly the bias above: pure argmax can report a perfectly
++	 * motionless value (deviation 0.00 mm -- seen twice), while the centroid
++	 * trades that bias for a little jitter and therefore *looks* worse.  The
++	 * earlier "-54% for win=2" reading is therefore RETRACTED: the metric was
++	 * not measuring the quantity it was ranking.  pen-ab-midpoint.py now
++	 * rejects near-axis lines, and this default stays at 2 pending a valid
++	 * diagonal A/B; 0 still reproduces the argmax-only behaviour byte for byte.
++	 *
++	 * A resting hand would drag the centroid if it were not clamped; it is
++	 * (within one cell of the argmax), which is also why a broad low bump
++	 * elsewhere on the panel cannot move the reported tip.
++	 */
++	algo->pen_centroid_win   = 2;
+ }
+ 
+ /* ======================================================================== */
+@@ -1296,3 +1337,156 @@ int hx_count_stable_tracks(struct hx_algo *algo)
+ 	}
+ 	return cnt;
+ }
++
++/* ======================================================================== */
++/* Phase 3B — pen path: raw grid + trajectory continuity                    */
++/*                                                                           */
++/* The amplitude pipeline in phases 2A..2D keys on how *strong* a bump is.   */
++/* A conductive pen tip on this panel is 2x2 cells at ~490 with a skirt of   */
++/* 40..80; a fingertip is 4x5 cells at ~3800.  Lowering the gates far enough */
++/* to admit the pen lets the resting panel's own noise through as well       */
++/* (measured: 0.59 contacts/frame resting vs 1.22 with the pen written),     */
++/* so amplitude alone cannot separate them at any setting.                   */
++/*                                                                           */
++/* What does separate them is shape in time.  The recorded stroke advanced   */
++/* 1.4 cells per frame (median), max 4.2, for 313 consecutive frames inside  */
++/* a 7x8-cell patch.  Impulse noise moves at random, so it cannot build the  */
++/* streak; a finger is already handled by phases 2A..2D and never has to     */
++/* reach here.                                                               */
++/*                                                                           */
++/* Read from raw_frame rather than frame[]: raw_frame is the grid as it       */
++/* came off the panel with only the baseline subtracted.  frame[] has been    */
++/* through the CMF, the edge boost and the IIR, and the IIR subtracts         */
++/* decay_step/(1 - weight/256) ~= 102 from every pixel below its dynamic      */
++/* gate -- that is what reduces the pen to a single cell and leaves the       */
++/* isolated-spike gate rejecting it.                                          */
++/* ======================================================================== */
++
++void hx_pen_positions(struct hx_algo *algo, int br, int bc, int win,
++		      s32 *px, s32 *py)
++{
++	s64 wc = 0, wr = 0, wt = 0;
++	int r, c;
++
++	if (win > 0) {
++		for (r = br - win; r <= br + win; r++) {
++			for (c = bc - win; c <= bc + win; c++) {
++				s16 v;
++
++				if (r < 0 || r >= HX_ROWS || c < 0 || c >= HX_COLS)
++					continue;
++				v = algo->raw_frame[r][c];
++				if (v <= 0)
++					continue;
++				wc += (s64)c * 128 * v;
++				wr += (s64)r * 128 * v;
++				wt += v;
++			}
++		}
++	}
++
++	if (wt > 0) {
++		*px = clamp_t(s32, (s32)(wc * 2 / wt) + 0x80,
++			      bc * 256, bc * 256 + 255);
++		*py = clamp_t(s32, (s32)(wr * 2 / wt) + 0x80,
++			      br * 256, br * 256 + 255);
++	} else {
++		*px = bc * 256 + 128;
++		*py = br * 256 + 128;
++	}
++}
++
++bool hx_pen_scan(struct hx_algo *algo)
++{
++	struct hx_pen_path *pen = &algo->pen;
++	s16 best = SHRT_MIN;
++	int br = 0, bc = 0;
++	int r, c;
++
++	if (!algo->pen_enabled)
++		return false;
++
++	for (r = 0; r < HX_ROWS; r++) {
++		for (c = 0; c < HX_COLS; c++) {
++			s16 v = algo->raw_frame[r][c];
++
++			if (v > best) {
++				best = v;
++				br = r;
++				bc = c;
++			}
++		}
++	}
++
++	if (best < algo->pen_threshold) {
++		/*
++		 * No candidate.  Tolerate a gap: one dropped frame in the middle
++		 * of a stroke must not cost a re-confirmation.
++		 */
++		if (pen->miss < U16_MAX)
++			pen->miss++;
++		if (pen->miss > algo->pen_lost_frames) {
++			pen->active = false;
++			pen->conf = 0;
++			pen->has = false;
++		}
++		return false;
++	}
++
++	pen->frames_cand++;
++
++	if (!pen->has) {
++		pen->conf = 1;
++	} else if (abs(br - (int)pen->last_r) <= algo->pen_jump_max &&
++		   abs(bc - (int)pen->last_c) <= algo->pen_jump_max) {
++		if (pen->conf < S16_MAX)
++			pen->conf++;
++	} else {
++		/* Jumped: a different object, or noise.  Restart the streak. */
++		pen->conf = 1;
++	}
++
++	pen->last_r = br;
++	pen->last_c = bc;
++	pen->has = true;
++	pen->miss = 0;
++
++	if (pen->conf >= algo->pen_confirm_frames)
++		pen->active = true;
++
++	if (!pen->active)
++		return false;
++
++	/*
++	 * Sub-cell refinement.
++	 *
++	 * Up to here the position is the integer grid cell of the largest pixel,
++	 * which quantises to +/-0.5 cell -- measured on the panel as a median
++	 * deviation of 0.6..1.3 mm on a 20 cm straight line, with occasional
++	 * single-cell excursions of 3..5 mm.  Those excursions are the argmax
++	 * hopping between two nearly equal cells; averaging the neighbourhood
++	 * keeps the answer between them instead of jumping.
++	 *
++	 * Weight is the clamped raw value, same convention as hx_frame_at():
++	 * the pen's skirt is only 40..80 against a peak of ~490, so a
++	 * peak-relative gate would admit the peak alone and interpolate nothing.
++	 * A plain positive weighting lets the (slightly asymmetric) skirt move
++	 * the answer off the cell centre, which is the sub-cell information
++	 * that exists.
++	 *
++	 * The result is clamped to within one cell of the argmax: this is a
++	 * refinement, not a relocation.  Without that guard a broad low bump
++	 * somewhere else on the panel -- a resting hand, charger coupling --
++	 * could drag the centroid away from the pen tip.
++	 *
++	 * The trajectory gate above stays on the argmax on purpose: that is the
++	 * quantity whose continuity was measured, and mixing a smoothed position
++	 * into the gate would change what the thresholds mean.
++	 */
++	hx_pen_positions(algo, br, bc, algo->pen_centroid_win,
++			 &pen->x, &pen->y);
++
++	pen->z = best;
++	pen->frames_emit++;
++	return true;
++}
+--- a/drivers/input/touchscreen/hx-algo.h
++++ b/drivers/input/touchscreen/hx-algo.h
+@@ -149,6 +149,54 @@ struct hx_newlog {
+ 	u16  zone_area;
+ };
+ 
++/**
++ * struct hx_pen_path - state of the independent pen detector.
++ *
++ * The tunables live flat in struct hx_algo (pen_enabled, pen_threshold,
++ * pen_jump_max, pen_confirm_frames, pen_lost_frames) because that is what
++ * the HX_ALGO_ATTR_*_RW() macros address: they expand to ts->algo->_name.
++ * Only the state lives here.
++ *
++ * Why the path exists at all:
++ *
++ * The amplitude pipeline (phases 2A..2D) requires a candidate to clear
++ * macro_threshold to seed a zone and peak_threshold to become a peak.  That
++ * suits a fingertip -- 4x5 cells, peak ~3800 -- and cannot suit a conductive
++ * pen tip on this panel, which measures 2x2 cells, peak ~490, skirt 40..80,
++ * against a resting noise floor of sigma ~34 and max 120.  Replayed over the
++ * 2026-09-30 recording, dropping the pair to 60/150 makes the resting panel
++ * emit 0.59 contacts per frame against 1.22 while the pen was writing -- no
++ * separation at any setting, because amplitude alone cannot tell them apart.
++ *
++ * Shape in time can.  The recorded stroke advanced 1.4 cells per frame
++ * (median), worst case 4.2, for 313 consecutive frames inside one 7x8-cell
++ * patch.  Noise jumps at random.  Replayed over the same recording this path
++ * reported 313 of 424 pen frames, 0 with the panel at rest and 0 with the pen
++ * hovering 5 mm above it.
++ *
++ * @has, @last_r, @last_c: last accepted candidate
++ * @conf:        current streak length
++ * @miss:        consecutive frames without a candidate
++ * @active:      latched; a contact is emitted
++ * @x, @y:       last emitted position in Q8.8 grid coordinates
++ * @z:           raw-grid value at the last accepted candidate
++ * @frames_cand: frames with a candidate above pen_threshold
++ * @frames_emit: frames the path was latched and emitted
++ */
++struct hx_pen_path {
++	bool has;
++	u8   last_r;
++	u8   last_c;
++	s16  conf;
++	u16  miss;
++	bool active;
++	s32  x;
++	s32  y;
++	s32  z;
++	u32  frames_cand;
++	u32  frames_emit;
++};
++
+ /**
+  * struct hx_algo - all algorithm state, allocated once in probe.
+  *
+@@ -228,6 +276,20 @@ struct hx_algo {
+ 	u8   track_start_debounce; /* frames to confirm touch_active       */
+ 	s32  track_jump_dist2;     /* position jump → force lift+repress   */
+ 
++	/* ---- Pen path (raw grid + trajectory continuity) ----
++	 *
++	 * Tunables first, flat, so the HX_ALGO_ATTR_*_RW() macros in
++	 * himax-spi-core.c can address them as ts->algo->pen_threshold etc.
++	 */
++	bool pen_enabled;          /* master switch (default: false)       */
++	s16  pen_threshold;        /* raw-grid candidate gate              */
++	s16  pen_jump_max;         /* per-axis move allowed between frames */
++	s16  pen_confirm_frames;   /* streak length that latches the path  */
++	u16  pen_lost_frames;      /* candidate-less frames before release */
++	u8   pen_centroid_win;     /* sub-cell centroid radius in cells;
++	                            * 0 = report the argmax cell itself      */
++	struct hx_pen_path pen;
++
+ 	/* ---- Diagnostics ---- */
+ 	struct hx_stats  stats;
+ 	struct hx_newlog newlog[HX_NEWLOG];
+@@ -262,4 +324,30 @@ void hx_track_contacts(struct hx_algo *algo,
+ /* Count slots that have passed debounce */
+ int hx_count_stable_tracks(struct hx_algo *algo);
+ 
++/*
++ * Phase 3B: independent pen path over the raw grid.
++ * Returns true when the path is latched and @algo->pen holds the position to
++ * report (Q8.8 grid coordinates, same convention as struct hx_contact).
++ */
++bool hx_pen_scan(struct hx_algo *algo);
++
++/**
++ * hx_pen_positions - sub-cell position for one frame at a chosen window.
++ * @algo: algorithm state
++ * @br:   argmax row of that frame
++ * @bc:   argmax column of that frame
++ * @win:  0 = report the argmax cell itself; N = weighted centroid over the
++ *        (2N+1)^2 window, clamped to stay inside that cell
++ * @px:   out, Q8.8 x (same units the driver reports)
++ * @py:   out, Q8.8 y
++ *
++ * Split out of hx_pen_scan() so a capture path can compute **several windows
++ * from the same frame**.  That is the whole point: the four settings then see
++ * byte-identical input and the hand's own curvature and tremor -- which in the
++ * 2026-09-30 on-panel A/B differed by 6x between arms and drowned the effect --
++ * cancel between them exactly.
++ */
++void hx_pen_positions(struct hx_algo *algo, int br, int bc, int win,
++		      s32 *px, s32 *py);
++
+ #endif /* HX_ALGO_H */

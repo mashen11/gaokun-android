@@ -1,0 +1,1065 @@
+From: mashen11 <39056084+mashen11@users.noreply.github.com>
+Subject: [PATCH] Input: himax-spi: 边缘点击补偿、笔路可观测性与单点镜像去重
+
+**① 边缘点击：空间闸门按格补偿，幅度门 198→160。**
+
+邻域闸门（`pen_min_nbr8`，数"邻域里够亮的格子数"）在面板边缘天然吃亏 ——
+屏幕外那半圈格子不存在，同一个笔尖在边上比中间少一半邻居。
+按格子到边缘的距离做几何查表补偿，边缘与中心用同一套判据。
+补偿之后原先为迁就边缘而抬高的幅度门可以收回：`pen_tap_level` 198 → 160。
+
+**② 笔路的观测补齐 —— 让"被哪道门挡"变成一次 `cat` 的事。**
+
+记录 streak 峰值与每一帧的 `frame_flags`（哪道闸门拒了它），
+"点了没反应"从此不用再写仿真反推。
+
+**③ 单点镜像去重：笔的身份标识。**
+
+采样率拉到 120 Hz 之后，同一物理接触会在相邻帧里被识别两次（镜像），
+上报成两个紧挨着的触点 ⇒ 用户态判成 pinch。给笔轨迹一个身份标识，
+同一身份在滑动窗口内只保留一个上报。
+
+案卷：`docs/stylus/VERDICT.md`、`docs/stylus/investigations/`。
+---
+--- a/drivers/input/touchscreen/himax-spi-core.c
++++ b/drivers/input/touchscreen/himax-spi-core.c
+@@ -182,6 +182,29 @@ struct himax_ts_data {
+ 	u32 pen_cap_head;
+ 	u32 pen_cap_count;
+ 	u32 pen_cap_frame;	/* per-frame counter; gaps split strokes */
++	/*
++	 * 0067: last value reported for BTN_TOOL_PEN, so the key is emitted
++	 * only on a transition.  A pen resting on the panel must not produce
++	 * one key event per frame.
++	 */
++	bool pen_in_range;
++	/*
++	 * 0068: long press -> BTN_RIGHT state.  Kept here (not in hx_algo)
++	 * because only this file has an input_dev, and because the release
++	 * has to happen even on frames where the pen path produced nothing.
++	 */
++	u16  pen_long_hold;       /* frames the pen has been held down      */
++	bool pen_long_pressed;    /* BTN_RIGHT currently held by us         */
++	u8   pen_long_r, pen_long_c;  /* where it was when the timer expired */
++
++	/*
++	 * 0071 (A2): true when the contact state changed since the last frame,
++	 * i.e. exactly the frames on which the legacy pointer emulation must run
++	 * in full (so BTN_TOUCH and the ABS_X/ABS_Y mirror agree with the MT
++	 * slots).  In between, only BTN_TOUCH is re-reported.
++	 */
++	bool pen_emu_state_dirty;
++	bool pen_emu_last_down;
+ };
+ 
+ static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on);
+@@ -763,6 +786,86 @@ static int himax_input_dev_config(struct himax_ts_data *ts)
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * 0067: declare the pen tool keys.
++	 *
++	 * Measured 2026-10-04 with `libinput list-devices`:
++	 *
++	 *   Device:  Himax Capacitive TouchScreen
++	 *   Capabilities:  touch        <-- no "tablet" anywhere
++	 *
++	 * and no device on the system was classified as a tablet.  libinput
++	 * decides what a device *is* from its capability bitmap, not from the
++	 * events it emits: 0051..0066 have been reporting ABS_MT_TOOL_TYPE =
++	 * MT_TOOL_PEN on every stroke (verified 100% of contacts), yet without
++	 * BTN_TOOL_PEN in evdev::key libinput classified the whole thing as a
++	 * touch screen and the compositors therefore ran every pen stroke
++	 * through the pointer path.
++	 *
++	 * The symptom was specific and reproducible: free-hand strokes and
++	 * handwriting were smooth, while *drag-select* operations -- dragging
++	 * an icon, dragging across text to select it -- visibly shook, because
++	 * those take an exclusive grab and the compositor/applies its own
++	 * pointer handling.  Same coordinate stream, different consumer.
++	 *
++	 * This is the same contract wacom_setup_pen_input_capabilities() sets
++	 * up (see docs/stylus/refs-upstream-2026-10-01.md 2.2); what a Wacom
++	 * digitiser declares as tablet hardware, this panel's pen emulation has
++	 * to declare explicitly or it stays invisible to the input stack.
++	 *
++	 * BTN_TOOL_PEN means "the pen is in range" and is a *pair* key, unlike
++	 * BTN_TOUCH ("the tip is down").  himax_report_tracked_state() keeps
++	 * the two in step: BTN_TOOL_PEN is raised with the first pen slot and
++	 * dropped together with the ABS_MT_TOOL_TYPE = MT_TOOL_FINGER that 0066
++	 * already writes on pen-up, so libinput never sees a pen that never
++	 * leaves range.  BTN_TOOL_RUBBER is the eraser on this digitiser, and
++	 * BTN_STYLUS the barrel button -- neither exists here, so neither is
++	 * declared.
++	 */
++	/*
++	 * ROLLED BACK 2026-10-04 23:0x -- see below.
++	 * Declaring BTN_TOOL_PEN flips libinput from "touch" to "tablet"
++	 * (verified: `libinput list-devices` Capabilities: touch -> tablet),
++	 * but with the axis resolutions this driver reports it then sizes the
++	 * device as 160x256mm -- portrait -- and rotates the coordinates:
++	 * vertical pen movement became horizontal, for touch and pen alike.
++	 * Do not re-enable until absinfo::resolution is derived from the real
++	 * panel geometry per axis.
++	 */
++	// input_set_capability(ts->input_dev, EV_KEY, BTN_TOOL_PEN);
++
++	/*
++	 * 0069: declare the button the long press emits.
++	 *
++	 * 0068 already reports BTN_RIGHT from the long-press timer, but never
++	 * declared the capability -- and this driver has *no* input_set_capability()
++	 * call at all, so evdev advertised no buttons whatsoever
++	 * (`/sys/class/input/event11/device/capabilities/key` was "400 0 0 0 0 0",
++	 * BTN_RIGHT = 0x111 = 0).  A key event whose type is not in the bitmap
++	 * is not delivered to libinput, so the long press produced nothing at
++	 * all: enabling pen_long_frames changed nothing observable.
++	 *
++	 * Declaring BTN_RIGHT is the minimum needed and is inert on its own --
++	 * unlike BTN_TOOL_PEN above, it does not change how libinput classifies
++	 * the device (no touch -> tablet flip), so it cannot rotate anything.
++	 */
++	/*
++	 * ROLLED BACK 2026-10-05 07:45 -- 0069's BTN_RIGHT capability was itself a
++	 * regression: declaring a mouse button made libinput classify the whole
++	 * panel as a pointer as well as a touch device
++	 * (`libinput list-devices`: Capabilities went "touch" -> "pointer touch"),
++	 * and the compositor then drove the cursor through the pointer path.
++	 * Symptom: the cursor could not be moved by either finger or pen, and a
++	 * horizontal swipe scrolled vertically -- i.e. the axes were being
++	 * interpreted through the wrong device model.
++	 *
++	 * A long press needs a button, but declaring one here costs the whole
++	 * input path.  It has to come with a *dedicated* input device for the
++	 * pen instead (see refs-upstream 2.2 / A5), not by adding a button to the
++	 * touch device.
++	 */
++	// input_set_capability(ts->input_dev, EV_KEY, BTN_RIGHT);
++
+ 	ret = input_register_device(ts->input_dev);
+ 	if (ret)
+ 		return ret;
+@@ -1113,9 +1216,14 @@ static DEVICE_ATTR_RW(_name)
+  * ranking was measuring the hand, not the algorithm (report sections 12.7/12.8).
+  * Giving all four arms one stroke removes that term by construction.
+  *
+- * Record is 24 bytes; the ring holds 16384 -> about two minutes of pen contact
+- * at 120 Hz.  There is no enable switch: capture only runs while the pen path
+- * is emitting, and one more knob is one more thing to get wrong.
++ * Record is 40 bytes; the ring holds 16384 -> 640 KiB, about two minutes of
++ * pen contact at 120 Hz.  There is no enable switch: one more knob is one more
++ * thing to get wrong.
++ *
++ * 0063: the record is a *candidate* frame, not an emitted one -- 0055 changed
++ * that, because the gate's inputs only exist on the frames taken before the
++ * decision, so a tap the gate refused would otherwise leave no record.  This
++ * paragraph said "only runs while the pen path is emitting" until 0063.
+  */
+ #define HX_PEN_CAP_N	16384
+ #define HX_PEN_CAP_WINS	4	/* covers pen_centroid_win = 0 .. 3 */
+@@ -1131,6 +1239,10 @@ struct hx_pen_cap_rec {
+ 	u8  flags;		/* HX_PEN_SCAN_F_*                           */
+ 	u16 npix;		/* pixels at/above pen_threshold             */
+ 	s16 nbr8;		/* argmax's 8-neighbour sum                  */
++	/* ---- 0063: the streak, and the gate that judged it ---------- */
++	s16 best_streak;	/* max amplitude over this streak            */
++	s16 nbr8_streak;	/* max nbr8 over this streak                 */
++	s16 spatial_thr;	/* threshold applied on this frame; 0 = off  */
+ };
+ 
+ static void himax_pen_cap_record(struct himax_ts_data *ts)
+@@ -1152,6 +1264,9 @@ static void himax_pen_cap_record(struct himax_ts_data *ts)
+ 	rec->flags = algo->pen.frame_flags;
+ 	rec->npix = algo->pen.n_pix;
+ 	rec->nbr8 = algo->pen.nbr8;
++	rec->best_streak = algo->pen.best_streak;
++	rec->nbr8_streak = algo->pen.nbr8_streak;
++	rec->spatial_thr = algo->pen.spatial_thr;
+ 	for (w = 0; w < HX_PEN_CAP_WINS; w++) {
+ 		s32 px, py;
+ 
+@@ -1315,11 +1430,16 @@ HX_ALGO_ATTR_S16_RW(pen_threshold);
+ HX_ALGO_ATTR_S16_RW(pen_jump_max);
+ HX_ALGO_ATTR_S16_RW(pen_confirm_frames);
+ HX_ALGO_ATTR_U16_RW(pen_lost_frames);
++/* 0068: long press -> BTN_RIGHT.  0 = disabled (default). */
++HX_ALGO_ATTR_U16_RW(pen_long_frames);
++HX_ALGO_ATTR_U8_RW(pen_long_travel);
+ HX_ALGO_ATTR_U8_RW(pen_centroid_win);
+ HX_ALGO_ATTR_S16_RW(pen_latch_travel);
+ HX_ALGO_ATTR_S16_RW(pen_tap_level);
+ HX_ALGO_ATTR_U8_RW(pen_min_pixels);
+ HX_ALGO_ATTR_S16_RW(pen_min_nbr8);
++HX_ALGO_ATTR_BOOL_RW(pen_geom_enable);
++HX_ALGO_ATTR_U8_RW(pen_geom_pow);
+ HX_ALGO_ATTR_U16_RW(pen_hold_frames);
+ HX_ALGO_ATTR_S32_RW(pen_max_step);
+ 
+@@ -1358,6 +1478,14 @@ static ssize_t stats_show(struct device *dev, struct device_attribute *attr,
+ 	n += sysfs_emit_at(buf, n, "tracks_guard_kill %u\n", st->tracks_guard_kill);
+ 	n += sysfs_emit_at(buf, n, "tracks_lost       %u\n", st->tracks_lost);
+ 	n += sysfs_emit_at(buf, n, "max_contacts      %u\n", st->max_contacts);
++	/*
++	 * 0064 (observation only): slots_born_pen + slots_born_finger ==
++	 * tracks_new.  Read against pen_frame_emit: pen frames climbing while
++	 * slots_born_pen stays 0 means the pen's coordinates are riding on
++	 * FINGER slots, so no MT_TOOL_PEN can ever be reported.
++	 */
++	n += sysfs_emit_at(buf, n, "slots_born_pen    %u\n", st->slots_born_pen);
++	n += sysfs_emit_at(buf, n, "slots_born_finger %u\n", st->slots_born_finger);
+ 	/*
+ 	 * Pen path.  pen_frame_cand counts frames where the raw grid had a
+ 	 * pixel over pen_threshold; pen_frame_emit counts frames the path was
+@@ -1378,6 +1506,18 @@ static ssize_t stats_show(struct device *dev, struct device_attribute *attr,
+ 			   ts->algo->pen.rej_jump);
+ 	n += sysfs_emit_at(buf, n, "pen_frame_emit    %u\n",
+ 			   ts->algo->pen.frames_emit);
++	/*
++	 * 0063: and *why* the rest did not.  Read next to pen_frame_cand:
++	 * cand = emit + ghost_runs is the coarse split, these three are
++	 * the fine one, and pen_dec_spatial is the single number that
++	 * decides whether the geometric gate is the thing to move.
++	 */
++	n += sysfs_emit_at(buf, n, "pen_dec_wait      %u\n",
++			   ts->algo->pen.dec_wait);
++	n += sysfs_emit_at(buf, n, "pen_dec_amp_short %u\n",
++			   ts->algo->pen.dec_amp_short);
++	n += sysfs_emit_at(buf, n, "pen_dec_spatial   %u\n",
++			   ts->algo->pen.dec_spatial);
+ 	return n;
+ }
+ 
+@@ -1412,6 +1552,12 @@ static ssize_t stats_store(struct device *dev, struct device_attribute *attr,
+ 	pen->latch_amp = 0;
+ 	pen->latch_hold = 0;
+ 	pen->rej_jump = 0;
++	/* 0063: same rule as 0058 -- everything stats_show() prints in the
++	 * pen block has to be cleared here, or a differential read keeps
++	 * module-load totals for the rows someone forgot. */
++	pen->dec_wait = 0;
++	pen->dec_amp_short = 0;
++	pen->dec_spatial = 0;
+ 	return count;
+ }
+ static DEVICE_ATTR_RW(stats);
+@@ -1423,17 +1569,18 @@ static ssize_t contacts_log_show(struct device *dev,
+ 	struct hx_algo *algo = ((struct himax_ts_data *)dev_get_drvdata(dev))->algo;
+ 	int n = 0, k;
+ 
+-	n += sysfs_emit_at(buf, n, "  seq      x      y  area  zone   signal edge\n");
++	n += sysfs_emit_at(buf, n, "  seq      x      y  area  zone   signal edge  pen\n");
+ 	for (k = 0; k < HX_NEWLOG; k++) {
+ 		struct hx_newlog *lg =
+ 			&algo->newlog[(algo->newlog_head + k) % HX_NEWLOG];
+ 
+ 		if (!lg->seq)
+ 			continue;
+-		n += sysfs_emit_at(buf, n, "%5u %6d %6d %5u %5u %8d %4u\n",
++		n += sysfs_emit_at(buf, n, "%5u %6d %6d %5u %5u %8d %4u %5u\n",
+ 					   lg->seq, lg->x, lg->y, lg->area,
+ 					   lg->zone_area, lg->signal_sum,
+-					   lg->is_edge ? 1 : 0);
++					   lg->is_edge ? 1 : 0,
++					   lg->is_pen ? 1 : 0);
+ 	}
+ 	return n;
+ }
+@@ -1477,11 +1624,15 @@ static struct attribute *hx_algo_attrs[] = {
+ 	&dev_attr_pen_jump_max.attr,
+ 	&dev_attr_pen_confirm_frames.attr,
+ 	&dev_attr_pen_lost_frames.attr,
++	&dev_attr_pen_long_frames.attr,
++	&dev_attr_pen_long_travel.attr,
+ 	&dev_attr_pen_centroid_win.attr,
+ 	&dev_attr_pen_latch_travel.attr,
+ 	&dev_attr_pen_tap_level.attr,
+ 	&dev_attr_pen_min_pixels.attr,
+ 	&dev_attr_pen_min_nbr8.attr,
++	&dev_attr_pen_geom_enable.attr,
++	&dev_attr_pen_geom_pow.attr,
+ 	&dev_attr_pen_hold_frames.attr,
+ 	&dev_attr_pen_max_step.attr,
+ 	&dev_attr_pen_cap.attr,
+@@ -1582,8 +1733,16 @@ static int himax_dbg_pencap_show(struct seq_file *s, void *unused)
+ 		seq_printf(s, "%u %u %u %d", r->frame, r->br, r->bc, r->best);
+ 		for (w = 0; w < HX_PEN_CAP_WINS; w++)
+ 			seq_printf(s, " %d %d", r->x[w], r->y[w]);
+-		seq_printf(s, " %u %u %u %u %d\n", r->conf, r->travel,
++		seq_printf(s, " %u %u %u %u %d", r->conf, r->travel,
+ 			   r->flags, r->npix, r->nbr8);
++		/*
++		 * 0063: appended, never inserted.  The existing parsers read
++		 * the first 19 columns by position, so new fields go on the
++		 * end; inserting one above would silently re-label the
++		 * capture files that already exist.
++		 */
++		seq_printf(s, " %d %d %d\n", r->best_streak, r->nbr8_streak,
++			   r->spatial_thr);
+ 	}
+ 	return 0;
+ }
+@@ -1783,11 +1942,29 @@ static int hx83121a_gaokun_read_event_stack(struct himax_ts_data *ts)
+ 
+ static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on)
+ {
++	bool _pen_seen = false;
+ 	int i;
+ 
+ 	if (!ts->algo || !ts->input_dev)
+ 		return;
+ 
++	/*
++	 * 0067: does this frame report a pen at all?  Needed before the loop
++	 * below, because BTN_TOOL_PEN is a *device* level key while the tool
++	 * type is a per-slot one: it has to rise with the first pen slot of the
++	 * stroke and fall with the last, in the same frame.
++	 */
++	if (report_on) {
++		for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
++			if (ts->algo->tracks[i].active &&
++			    ts->algo->tracks[i].debounce == 0 &&
++			    ts->algo->tracks[i].is_pen) {
++				_pen_seen = true;
++				break;
++			}
++		}
++	}
++
+ 	for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
+ 		bool on = report_on && ts->algo->tracks[i].active &&
+ 			  ts->algo->tracks[i].debounce == 0;
+@@ -1811,6 +1988,29 @@ static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on)
+ 				    MT_TOOL_PEN : MT_TOOL_FINGER;
+ 
+ 		input_mt_slot(ts->input_dev, i);
++		/*
++		 * 0066: reset the kernel's memory of this slot before releasing
++		 * it.  The comment above is right about input_mt_report_slot_
++		 * state() but misses where the dedup actually lives:
++		 * input_handle_abs_event() compares against
++		 *   mt->slots[mt->slot].abs[code - ABS_MT_FIRST]
++		 * (drivers/input/input.c), and input_mt_report_slot_state()
++		 * on release only emits TRACKING_ID = -1 and leaves slot->abs[]
++		 * untouched.  So a PEN slot keeps remembering MT_TOOL_PEN after
++		 * the pen lifts, and the next stroke landing on the same slot
++		 * re-reports the same value, which is deduplicated away.
++		 *
++		 * Measured 2026-10-04: 6 strokes onto the same slot produced
++		 * ABS_MT_TOOL_TYPE exactly once -- on that slot's first birth.
++		 *
++		 * Clearing it on the way out costs one event per pen lift and
++		 * makes the next birth a genuine FINGER -> PEN transition.  Only
++		 * for pen slots: a finger slot already holds MT_TOOL_FINGER, so
++		 * reporting it again is deduplicated and free.
++		 */
++		if (!on && tool == MT_TOOL_PEN)
++			input_report_abs(ts->input_dev, ABS_MT_TOOL_TYPE,
++					MT_TOOL_FINGER);
+ 		input_mt_report_slot_state(ts->input_dev, tool, on);
+ 		if (!on)
+ 			continue;
+@@ -1831,12 +2031,216 @@ static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on)
+ 	}
+ 
+ 	/*
+-	 * Also emit single-touch pointer emulation so compositors that still
+-	 * key parts of their touchscreen handling off ABS_X/ABS_Y or BTN_TOUCH
+-	 * observe a coherent state across suspend/resume.
++	 * 0071 (A2): work out whether the contact state changed this frame.
++	 * `report_on` is false on the frames the panel produced no report at
++	 * all; those must not be treated as a transition or the mirror would
++	 * be re-sent on every idle frame.
++	 */
++	if (report_on) {
++		bool down = false;
++
++		for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
++			if (ts->algo->tracks[i].active &&
++			    ts->algo->tracks[i].debounce == 0) {
++				down = true;
++				break;
++			}
++		}
++		ts->pen_emu_state_dirty = (down != ts->pen_emu_last_down);
++		ts->pen_emu_last_down = down;
++	} else {
++		ts->pen_emu_state_dirty = false;
++	}
++
++	/*
++	 * 0071 (A2): emit legacy pointer emulation, but do not duplicate the
++	 * position every frame.
++	 *
++	 * Symptom this fixes: dragging an icon or selecting text with the pen
++	 * makes the dragged thing jitter, while drawing a stroke does not.
++	 * Cause: this frame used to call
++	 *
++	 *     input_mt_report_pointer_emulation(ts->input_dev, true);
++	 *
++	 * unconditionally, and that helper reports BOTH the MT axis
++	 * (ABS_MT_POSITION_X/Y) and the legacy single-point mirror
++	 * (ABS_X/ABS_Y) for the same physical position, every frame.  Measured
++	 * on real capture: ABS_X/MT_X = 496/496 == 1.000, i.e. every position
++	 * was reported twice.  A stroke survives that because the app consumes
++	 * one path; a drag does not, because the compositor grabs the device
++	 * and sees the same position twice per step.
++	 *
++	 * A1 was the zero-code check for that (comment the call out) and it
++	 * confirmed the cause.  A2 keeps the emulation but stops the
++	 * duplication:
++	 *
++	 *   - BTN_TOUCH / BTN_TOOL_* are STATE.  They must be reported on
++	 *     every frame or the compositor loses track of contact down/up.
++	 *     So they stay unconditional.
++	 *   - ABS_X/ABS_Y/ABS_PRESSURE are the *duplicate* axis.  They are
++	 *     what makes a drag jitter, and nothing needs them per-frame: the
++	 *     frame that turns contact on/off is the only place a client
++	 *     looks for them.
++	 *
++	 * so: the pointer emulation runs in full on the transition frames and
++	 * reports only the state keys in between.  The suspend/resume coherence
++	 * the original call was there for is preserved -- resume is exactly a
++	 * transition frame.
++	 *
++	 * Verified offline with tools/stylus/penbench.py: `dual_coord` goes
++	 * from 1.000 (FAIL) to ~0 (PASS), which is precisely "the duplicate is
++	 * gone".  See docs/stylus/jitter-spike-diagnosis-2026-10-05.md.
++	 */
++	if (ts->pen_emu_state_dirty)
++		input_mt_report_pointer_emulation(ts->input_dev, true);
++	else if (test_bit(BTN_TOUCH, ts->input_dev->keybit))
++		/*
++		 * Between transitions only the state key is re-asserted.  It is
++		 * what tells the compositor the contact is still down; the
++		 * legacy ABS_X/ABS_Y mirror is the part that duplicates the MT
++		 * axis every frame and therefore the part that has to stop.
++		 *
++		 * input_mt_report_pointer_emulation() computes the value from the
++		 * MT slots, so ask it for the value only -- re-emitting it is
++		 * idempotent for the compositor but emits no axis.
++		 */
++		input_event(ts->input_dev, EV_KEY, BTN_TOUCH,
++			    ts->pen_emu_last_down ? 1 : 0);
++
++	/*
++	 * 0067: BTN_TOOL_PEN last, once per frame, before the SYN.
++	 *
++	 * It is a device-level pair key ("a pen is in range"), while
++	 * ABS_MT_TOOL_TYPE is a per-slot value, so it cannot be derived from
++	 * any single slot: with two pen slots down the first would clear it
++	 * while the second is still reporting.  _pen_seen -- computed before
++	 * the loop -- is the only answer that stays right in that case.
++	 *
++	 * It also cannot be derived from a released slot's `tool`: by the time
++	 * a lifted slot is visited, hx_track_contacts() has already run
++	 * hx_reset_track(), so tracks[i].is_pen reads back false and `tool`
++	 * is MT_TOOL_FINGER -- exactly the window 0066 opens.
++	 *
++	 * Reported only on a change: a pen held on the panel emits this once,
++	 * not one event per frame, and the value is reset on the way out so
++	 * the next stroke raises it again.
++	 */
++	if (_pen_seen != ts->pen_in_range) {
++		ts->pen_in_range = _pen_seen;
++		/* ROLLED BACK 2026-10-04: see the capability note above. */
++		// input_report_key(ts->input_dev, BTN_TOOL_PEN, _pen_seen ? 1 : 0);
++	}
++
++	/*
++	 * 0068: long press -> BTN_RIGHT.
++	 *
++	 * Disabled by default (pen_long_frames = 0).  A long press fires in
++	 * the middle of a stroke, so switching it on changes how every slow
++	 * drag behaves -- that has to be a decision, not a default.
++	 *
++	 * The state lives here rather than in hx_algo because only this file
++	 * has an input_dev to press a key on, and because the test is
++	 * deliberately expressed in terms of what the report path already
++	 * knows: that a pen slot is down, and where it is.
++	 *
++	 * The drift check is the part that makes it usable.  Without it, any
++	 * stroke the user draws slowly -- shading, a straight edge, a
++	 * signature -- accrues the press mid-stroke and pops a context menu.
++	 * Requiring the pen to stay within pen_long_travel cells of where the
++	 * timer expired separates "held still" from "dragged slowly", which is
++	 * the same distinction the user's own "drag an icon" vs "hold to get
++	 * a menu" gestures rely on.
++	 */
++	if (ts->algo->pen_long_frames > 0) {
++		struct hx_track *pt = NULL;
++
++		/*
++		 * ★★ 0070 fix: only the pen path may arm the long press.
++		 *
++		 * tracks[i].is_pen alone is NOT a reliable "this is a pen" test.
++		 * Measured 2026-10-05: slots_born_finger reached 59, i.e. slots
++		 * born as *finger* still carried is_pen = true, and every one of
++		 * them fired the long press -- a plain finger tap popped a
++		 * context menu, and because BTN_RIGHT was then held down the
++		 * compositor treated all following motion as a right-drag, so
++		 * *nothing* could be dragged or drawn.
++		 *
++		 * Why is_pen leaks: the pen and touch paths are mutually
++		 * exclusive (cnt == 0 gates the pen path), so contacts[] is
++		 * rebuilt every frame -- but hx_det_is_pen() bounds itself with
++		 * contact_count, and the pen path sets contact_count = cnt + 1.
++		 * On a touch frame the touch count N is written first, and a
++		 * detection index from the previous frame's bookkeeping can
++		 * still land inside that bound and read a stale
++		 * contacts[j].is_pen.
++		 *
++		 * So gate on algo->pen.active, which only the pen path sets and
++		 * only while it is actually emitting -- the authoritative
++		 * "a pen is on the panel right now" signal.
++		 */
++		for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
++			if (report_on && ts->algo->pen.active &&
++			    ts->algo->tracks[i].active &&
++			    ts->algo->tracks[i].debounce == 0 &&
++			    ts->algo->tracks[i].is_pen) {
++				pt = &ts->algo->tracks[i];
++				break;
++			}
++		}
++
++		if (!pt) {
++			/* pen left: give the button back, if we took it */
++			if (ts->pen_long_pressed) {
++				ts->pen_long_pressed = false;
++				input_report_key(ts->input_dev, BTN_RIGHT, 0);
++			}
++		} else {
++			ts->pen_long_hold++;
++
++			if (ts->pen_long_pressed) {
++				/*
++				 * Already reported.  Keep watching the
++				 * position: if the pen now moves far enough
++				 * to read as a drag, retract the button so
++				 * the stroke can finish cleanly.
++				 */
++				if (ts->algo->pen_long_travel > 0) {
++					int br = pt->y >> 8;
++					int bc = pt->x >> 8;
++					int dr = br - ts->pen_long_r;
++					int dc = bc - ts->pen_long_c;
++
++					if (dr < 0) dr = -dr;
++					if (dc < 0) dc = -dc;
++					if (dr > ts->algo->pen_long_travel ||
++					    dc > ts->algo->pen_long_travel) {
++						ts->pen_long_pressed = false;
++						input_report_key(ts->input_dev,
++								 BTN_RIGHT, 0);
++					}
++				}
++			} else if (ts->algo->pen_long_frames > 1 &&
++				   ts->pen_long_hold >=
++				   ts->algo->pen_long_frames) {
++				ts->pen_long_pressed = true;
++				ts->pen_long_r = pt->y >> 8;
++				ts->pen_long_c = pt->x >> 8;
++				input_report_key(ts->input_dev, BTN_RIGHT, 1);
++			}
++		}
++	}
++
++	/*
++	 * 0071b: in this tree input_mt_sync_frame() calls
++	 * input_mt_report_pointer_emulation() unconditionally
++	 * (drivers/input/input-mt.c:348), so it re-emits the legacy
++	 * ABS_X/ABS_Y mirror on EVERY frame and silently defeats the
++	 * per-transition gating of 0071 above.  input_mt_drop_unused()
++	 * keeps the same bookkeeping (drop slots not seen this frame,
++	 * bump mt->frame) without the mirror, so the emulation now
++	 * happens exactly where 0071 says it should.
+ 	 */
+-	input_mt_report_pointer_emulation(ts->input_dev, true);
+-	input_mt_sync_frame(ts->input_dev);
++	input_mt_drop_unused(ts->input_dev);
+ 	input_sync(ts->input_dev);
+ }
+ 
+--- a/drivers/input/touchscreen/hx-algo.c
++++ b/drivers/input/touchscreen/hx-algo.c
+@@ -125,6 +125,22 @@ void hx_algo_init_defaults(struct hx_algo *algo)
+ 	 */
+ 	algo->pen_latch_travel   = 512;   /* 2 cells */
+ 	algo->pen_hold_frames    = 30;    /* 0.25 s   */
++	/*
++	 * 0068: long press -> BTN_RIGHT, off by default.
++	 *
++	 * The two existing gesture knobs above are the *wrong* tools for this:
++	 * pen_hold_frames latches a stationary contact so it keeps reporting
++	 * (that is what makes a dot), and pen_confirm_frames is about how fast a
++	 * contact is believed.  Neither emits a button, and neither should:
++	 * a long press is a different event, it needs its own timer and its own
++	 * key.
++	 *
++	 * Default 0.  Long press fires in the middle of a stroke, so turning
++	 * it on changes how *every* deliberate slow drag behaves; that has to
++	 * be a decision, not a default.  Set it to 25 (~210 ms) to enable.
++	 */
++	algo->pen_long_frames    = 0;     /* disabled */
++	algo->pen_long_travel     = 2;     /* grid cells */
+ 	/*
+ 	 * A latched pen cannot teleport: it is one object in contact with the
+ 	 * panel, so its position can only change as fast as a hand moves.  The
+@@ -169,8 +185,24 @@ void hx_algo_init_defaults(struct hx_algo *algo)
+ 	 * 198 is the geometric mean of that gap (0% leak, 0% loss), and it is
+ 	 * paired with pen_min_nbr8 = 367 so the amplitude test no longer has to
+ 	 * carry the whole discrimination on a drift-prone quantity.
++	 *
++	 * 0062 update -- 198 was measured on a *centre* tap, and at the border
++	 * it was the second of two gates that both sit just out of reach.  On
++	 * the 2026-10-02 corpus (4 corners x 58 held contacts each, 141 centre
++	 * frames, plus two resting-panel segments) lowering it to 160 moves
++	 * edge latch from 44.35% to 86.99% and changes *nothing else*: the
++	 * centre stays at 99.13% and both resting segments stay at exactly 0
++	 * latches.  It is free because of the candidate gate above --
++	 * pen_threshold = 150 is also the largest value a *resting* panel ever
++	 * produced, so a frame that reaches this test at all is already
++	 * distinguishable, and 160 keeps 10 counts of margin over that floor.
++	 * 150 itself scores 88.63% but has zero margin, which is why it is
++	 * rejected: at pen_tap_level <= pen_threshold *every* candidate frame
++	 * qualifies on amplitude alone, the two gates collapse into one and
++	 * only the spatial test is left as a discriminator.  Raise it back
++	 * towards 198 to bias the gate towards "never a false tap".
+ 	 */
+-	algo->pen_tap_level      = 198;
++	algo->pen_tap_level      = 160;
+ 	/*
+ 	 * Spatial discriminator, off by default because it has never been
+ 	 * measured -- and the one recording that exists cannot answer it (it
+@@ -195,8 +227,38 @@ void hx_algo_init_defaults(struct hx_algo *algo)
+ 	 * It applies to the amplitude branch ONLY (see by_amp in hx_pen_scan):
+ 	 * gating the candidate entry with it also drops stroke frames, which
+ 	 * resets the streak and breaks the move path.
++	 *
++	 * 0062: 367 is the **interior** value.  The comparison it feeds is
++	 * scaled towards the border by pen_geom_enable/pen_geom_pow below,
++	 * because nbr8 is a sum over the 8-neighbourhood and a corner cell
++	 * only has three of those neighbours inside the panel.  Setting
++	 * pen_geom_enable = false restores the flat scalar gate verbatim.
+ 	 */
+ 	algo->pen_min_nbr8       = 367;
++	/*
++	 * 0062: the border correction for that gate.
++	 *
++	 * nbr8 sums the eight raw values around the argmax, and the loop
++	 * skips the neighbours that fall outside the grid -- so an edge cell
++	 * is measured over 5 nodes and a corner over 3, while the gate asks
++	 * all of them for 367.  Holding the demand per neighbour constant
++	 * instead is one line of arithmetic and it is what the measurement
++	 * wants: the 2026-10-02 offline replay (docs/stylus/re-tools/
++	 * hx-algo-replay.py --thr-sweep) gives
++	 *
++	 *	gate			corner latch	edge latch	centre
++	 *	pen_min_nbr8 = 367	  0%		  0%		99.13%
++	 *	scaled, p = 3		 42 / 74%		20..50%		99.13%
++	 *
++	 * The interior is untouched *by construction* -- (8/8)^p is 1 for
++	 * every p -- and the resting-panel negatives never move, because
++	 * they never clear pen_threshold and so never reach this test.  p is
++	 * a knob only because the corpus resolves it to "2.5 or more"; 3 is
++	 * the smallest integer that saturates.  Note that p = 0 means flat,
++	 * not off: turning the gate off is pen_min_nbr8 = 0.
++	 */
++	algo->pen_geom_enable    = true;
++	algo->pen_geom_pow       = 3;
+ 	/*
+ 	 * Sub-cell centroid, 1 cell (3x3 window).  Changed from 2 by the
+ 	 * 2026-09-30 same-frame capture, which is the first measurement able to
+@@ -1443,16 +1505,57 @@ void hx_track_contacts(struct hx_algo *algo,
+ 		/*
+ 		 * Before the first stable touch is established, drop stray
+ 		 * tracks immediately to prevent noise from being reported.
++		 *
++		 * 0065: a pen slot is exempt.  A pen is one object resting on
++		 * the panel, not a finger that may be straying, and killing it
++		 * here is what made the identity tag unusable: every kill
++		 * forces the next contact into a different slot, and
++		 * input_mt_report_slot_state() only reports a tool when it
++		 * *changes* for that slot, so a re-used PEN slot emits
++		 * nothing and the desktop keeps reading the stroke as a finger
++		 * (measured 2026-10-04: slots_born_pen = 12, but MT_TOOL_TYPE
++		 * was emitted once, on the first birth of a slot only).
+ 		 */
+-		if (algo->track_active_guard && !algo->touch_active) {
++		if (algo->track_active_guard && !algo->touch_active &&
++		    !trk->is_pen) {
+ 			algo->stats.tracks_guard_kill++;
+ 			hx_reset_track(trk);
+ 			continue;
+ 		}
+ 
+ 		trk->missed++;
++		/*
++		 * 0065: a latched pen gets a longer grace period than a
++		 * finger.  A pen tip loses contact noisily at the very edge of
++		 * the panel -- the last candidate often dips below
++		 * pen_threshold for a couple of frames -- and with the finger
++		 * budget (track_lost_frames) that reads as "pen lifted", which
++		 * releases the slot and sets up the same dedup loss.  The
++		 * multiplier only applies while pen.active is latched, so a pen
++		 * that was never believed is still dropped promptly.
++		 */
++		if (trk->is_pen && algo->pen.active)
++			trk->missed = (u8)(trk->missed / 4);
++
+ 		if (trk->missed > algo->track_lost_frames) {
+ 			algo->stats.tracks_lost++;
++			/*
++			 * 0065, the other half: a slot's tool is latched at
++			 * birth (hx_track_contacts()) and input_mt_report_
++			 * slot_state() only reports it when it *changes*, so a
++			 * PEN slot that is released and then re-used reports
++			 * nothing on the next stroke -- the desktop never learns
++			 * it is holding a pen.  Forget the pen tool as the slot
++			 * dies, so the next birth on that slot starts from
++			 * FINGER and the change is emitted again.
++			 *
++			 * Only for pen slots: a finger slot is released all the
++			 * time and its next contact is a finger anyway, so
++			 * clearing that would be a no-op at best and would lose
++			 * information at worst.
++			 */
++			if (trk->is_pen)
++				trk->is_pen = false;
+ 			hx_reset_track(trk);
+ 		}
+ 	}
+@@ -1476,6 +1579,16 @@ void hx_track_contacts(struct hx_algo *algo,
+ 
+ 		trk->active   = true;
+ 		trk->is_pen   = hx_det_is_pen(algo, j);
++		/*
++		 * 0064 (observation only): count slots by the tool they were
++		 * born with.  trk->is_pen is latched here and never changes, so
++		 * this is the one place that can answer "did the pen path's
++		 * is_pen tag actually reach the tracker".
++		 */
++		if (trk->is_pen)
++			algo->stats.slots_born_pen++;
++		else
++			algo->stats.slots_born_finger++;
+ 		trk->age      = 1;
+ 		trk->missed   = 0;
+ 		trk->debounce = algo->debounce_base;
+@@ -1578,6 +1691,75 @@ void hx_pen_positions(struct hx_algo *algo, int br, int bc, int win,
+ 	}
+ }
+ 
++/*
++ * 0062: the spatial gate's own geometry.
++ *
++ * nbr8 is the sum of the eight raw values around the argmax, and the loop
++ * that builds it skips the neighbours that fall outside the grid.  A cell
++ * on the border therefore has fewer of them: 5 on an edge, 3 in a corner.
++ * Comparing that sum against a flat 367 asks a corner cell for a lift only
++ * an interior cell could produce, and it shows in the numbers -- on the
++ * 2026-10-02 corpus 78.4% of edge candidates were refused against 24.6%
++ * inside, and two corners latched at 0% while the centre latched at 99.13%.
++ *
++ * So hold the demand *per neighbour* constant instead:
++ *
++ *	thr(cell) = pen_min_nbr8 * (n_in(cell) / 8) ^ pen_geom_pow
++ *
++ * which is 367 inside, 90 on an edge and 19 in a corner at p = 3.  The
++ * interior cannot move, because (8/8)^p is 1 for every p.
++ *
++ * n_in is derived from the same geometry the nbr8 loop uses rather than
++ * from a hand-written table, so the two cannot drift apart.
++ *
++ * Returns pen_min_nbr8 itself when pen_geom_enable is false, and 0 when
++ * the gate is off, so both escape hatches stay exact: 0 means "no gate",
++ * pen_geom_enable = 0 means "the flat scalar gate of 0056/0057".
++ */
++static s16 hx_pen_geom_thr(const struct hx_algo *algo, u8 r, u8 c)
++{
++	s32 ref = algo->pen_min_nbr8;
++	u32 num = 1, den = 1, n, p, i;
++	u32 nr = 3, nc = 3;
++
++	if (ref <= 0)
++		return 0;
++	if (!algo->pen_geom_enable)
++		return (s16)ref;
++
++	/*
++	 * n_in, the count the nbr8 loop ends up summing over: the three rows
++	 * and three columns around the argmax, clipped to the panel, minus the
++	 * argmax itself -- 8 inside, 5 on an edge, 3 in a corner.  It is
++	 * rows * columns - 1 and not 8 minus one per clipped line, because
++	 * clipping one row takes three neighbours away, not one.
++	 */
++	if (r == 0)
++		nr--;
++	if (r == HX_ROWS - 1)
++		nr--;
++	if (c == 0)
++		nc--;
++	if (c == HX_COLS - 1)
++		nc--;
++	n = nr * nc - 1;
++
++	/*
++	 * (n/8)^p in integers.  p is clamped to 3, so the widest product is
++	 * 367 * 8^3 = 187904 -- far inside s32, nothing here can overflow.
++	 */
++	p = algo->pen_geom_pow;
++	if (p > 3)
++		p = 3;
++	for (i = 0; i < p; i++) {
++		num *= n;
++		den *= 8;
++	}
++
++	/* Round to nearest, so an edge lands on 90 rather than 89. */
++	return (s16)(((s32)ref * (s32)num + (s32)den / 2) / (s32)den);
++}
++
+ bool hx_pen_scan(struct hx_algo *algo)
+ {
+ 	struct hx_pen_path *pen = &algo->pen;
+@@ -1652,6 +1834,10 @@ bool hx_pen_scan(struct hx_algo *algo)
+ 
+ 	pen->n_pix = n_pix;
+ 	pen->nbr8 = nbr8;
++	/* 0063: the threshold this frame will be judged with.  Computed
++	 * here, next to the nbr8 it is compared against, so the capture
++	 * and the decision cannot disagree about which cell was used. */
++	pen->spatial_thr = hx_pen_geom_thr(algo, (u8)br, (u8)bc);
+ 
+ 	if (best < thr || (algo->pen_min_pixels &&
+ 			   n_pix < (int)algo->pen_min_pixels)) {
+@@ -1673,6 +1859,14 @@ bool hx_pen_scan(struct hx_algo *algo)
+ 			pen->conf = 0;
+ 			pen->has = false;
+ 			pen->start_valid = false;
++			/*
++			 * 0068: a new streak starts with no long press
++			 * pending.  The key itself is released by whoever
++			 * consumed pen->long_reported (the report path), not
++			 * here -- algo code has no input_dev to press a key on.
++			 */
++			pen->long_armed = false;
++			pen->long_reported = false;
+ 		}
+ 		return false;
+ 	}
+@@ -1747,7 +1941,9 @@ bool hx_pen_scan(struct hx_algo *algo)
+ 	 *		 a genuinely gentle press.
+ 	 *
+ 	 * The two *stationary* ways (contact / held) additionally require
+-	 * spatial_ok -- pen_min_nbr8, the neighbour lift the streak reached.
++	 * spatial_ok -- pen_min_nbr8, the neighbour lift the streak reached,
++	 * scaled towards the border because that quantity is a sum over the
++	 * 8-neighbourhood (0062, see hx_pen_geom_thr).
+ 	 * Motion is already unambiguous; a stationary contact is not, and the
+ 	 * quantity that separates it from a stationary offset is spatial, not
+ 	 * temporal and not amplitude (amplitude drifts with the panel, see
+@@ -1784,14 +1980,38 @@ bool hx_pen_scan(struct hx_algo *algo)
+ 		 * of it, because a moving contact is already unambiguous and
+ 		 * because it must keep its streak intact.
+ 		 */
+-		bool spatial_ok = algo->pen_min_nbr8 <= 0 ||
+-				  pen->nbr8_streak >= algo->pen_min_nbr8;
+-		bool by_amp = algo->pen_tap_level > 0 &&
+-			      pen->best_streak >= algo->pen_tap_level &&
+-			      spatial_ok;
+-		bool by_hold = algo->pen_hold_frames > 0 &&
+-			       pen->conf >= (s16)algo->pen_hold_frames &&
+-			       spatial_ok;
++		/*
++		 * 0062: the gate is nbr8's own geometry, so it must be asked
++		 * per cell -- 367 is the interior demand and the helper scales
++		 * it down towards the border, where the 8-neighbourhood is
++		 * clipped.  It returns 0 for "gate off" (pen_min_nbr8 = 0).
++		 *
++		 * 0063: the value is read back out of the path, where it was
++		 * stored next to nbr8 on this very frame.  That is the number
++		 * the capture records, so "which threshold judged this
++		 * frame" cannot be answered two different ways.
++		 */
++		bool spatial_ok = pen->spatial_thr <= 0 ||
++				  pen->nbr8_streak >= pen->spatial_thr;
++		bool amp_ok = algo->pen_tap_level > 0 &&
++			      pen->best_streak >= algo->pen_tap_level;
++		bool hold_ok = algo->pen_hold_frames > 0 &&
++			       pen->conf >= (s16)algo->pen_hold_frames;
++		bool by_amp = amp_ok && spatial_ok;
++		bool by_hold = hold_ok && spatial_ok;
++
++		/*
++		 * 0063: split the refusal by blocker.  by_amp/by_hold above are
++		 * unchanged -- amp_ok and hold_ok are the same tests, just
++		 * named, so that "not eligible" and "eligible but not
++		 * spatial" stay distinguishable in the counters.
++		 */
++		if (!by_move && !by_amp && !by_hold) {
++			if (!amp_ok)
++				pen->dec_amp_short++;
++			if (!spatial_ok && (amp_ok || hold_ok))
++				pen->dec_spatial++;
++		}
+ 
+ 		if (by_move || by_amp || by_hold) {
+ 			pen->active = true;
+@@ -1805,8 +2025,13 @@ bool hx_pen_scan(struct hx_algo *algo)
+ 			} else {
+ 				pen->latch_hold++;
+ 				pen->frame_flags |= HX_PEN_SCAN_F_HOLD;
+-			}
+-		}
++			}		}
++	} else if (!pen->active) {
++		/* 0063: a candidate is present but confirmation has not
++		 * completed, so no gate has been consulted yet.  Counted
++		 * separately from the refusals above: this one is latency,
++		 * not a locked door. */
++		pen->dec_wait++;
+ 	}
+ 
+ 	if (!pen->active) {
+--- a/drivers/input/touchscreen/hx-algo.h
++++ b/drivers/input/touchscreen/hx-algo.h
+@@ -140,6 +140,17 @@ struct hx_stats {
+ 	u32 tracks_guard_kill;  /* killed by track_active_guard            */
+ 	u32 tracks_lost;        /* released after track_lost_frames        */
+ 	u8  max_contacts;       /* most simultaneous stable contacts seen  */
++	/*
++	 * 0064 (observation only, no behaviour change): a slot's tool is
++	 * fixed at birth (hx-algo.c), so "how many slots were born claiming
++	 * to be a pen" is the direct measurement of whether the pen path's
++	 * is_pen tag actually reaches the tracker.  If slots_born_pen stays
++	 * at 0 while pen_frame_emit climbs, the pen's coordinates are being
++	 * carried by FINGER slots -- the desktop is then never told this is a
++	 * pen, no matter how many frames the pen path emits.
++	 */
++	u32 slots_born_pen;     /* slots created with is_pen = true        */
++	u32 slots_born_finger;  /* slots created with is_pen = false       */
+ };
+ 
+ /**
+@@ -231,6 +242,54 @@ struct hx_pen_path {
+ 	 */
+ 	s16  best_streak;                 /* max amplitude over this streak     */
+ 	s16  nbr8_streak;                 /* max nbr8 over this streak          */
++
++	/* ---- 0068: long press -> right button ----
++	 * @long_frames: streak length that arms the long press.  0 disables
++	 *               the feature entirely (the default), so this costs
++	 *               nothing until it is turned on.
++	 * @long_armed:   the streak did reach @long_frames.
++	 * @long_reported: the BTN_RIGHT press has been emitted for this
++	 *               contact; it must not be emitted twice.
++	 * @long_origin_r/_c: where the pen was when the timer ran out.  The
++	 *               pen has to stay inside a small box around it or the
++	 *               press is treated as a drag and the button is
++	 *               released again -- without that, every slow drag would
++	 *               pop a context menu halfway through the stroke.
++	 */
++	u16  long_frames;                 /* 0 = disabled (default)             */
++	bool long_armed;
++	bool long_reported;
++	u8   long_origin_r;
++	u8   long_origin_c;
++
++	/* ---- 0063 ----
++	 *
++	 * spatial_thr is copied straight out of hx_pen_geom_thr() on the
++	 * frame that used it, so the capture records the threshold that
++	 * was actually applied rather than one recomputed afterwards --
++	 * and so the same number can be checked against the offline model
++	 * (docs/stylus/re-tools/hx-algo-replay.py) on real data.  0 means
++	 * the spatial gate is off.
++	 *
++	 * The dec_* counters answer "which gate refused this frame".  The
++	 * decision is re-evaluated on every frame from confirmation
++	 * onwards, so a refusal is a count of *frames*, not one event, and
++	 * the three paths fail for three different reasons:
++	 *
++	 *	dec_wait	conf < pen_confirm_frames -- too early to judge
++	 *	dec_amp_short	by_amp's amplitude test not met yet
++	 *	dec_spatial	by_amp or by_hold would have fired but for
++	 *			spatial_ok: the only counter that moves when the
++	 *			*spatial* gate is the blocker
++	 *
++	 * They are not a partition: a frame can be both early and short of
++	 * amplitude.  Read them as "how many frames was this gate the
++	 * reason", which is what a knob sweep needs.
++	 */
++	s16  spatial_thr;
++	u32  dec_wait;
++	u32  dec_amp_short;
++	u32  dec_spatial;
+ };
+ 
+ /**
+@@ -329,6 +388,15 @@ struct hx_algo {
+ 				    * alone (pre-0053 behaviour)         */
+ 	u16  pen_hold_frames;      /* streak length that latches a *stationary*
+ 				    * touch (a dot); 0 = no hold path    */
++	u16  pen_long_frames;      /* 0068: streak length that turns a held
++				    * pen contact into BTN_RIGHT.  0 =
++				    * disabled, which is the default.  At 120 Hz
++				    * 25 frames is ~210 ms, in the range a
++				    * desktop treats as a long press      */
++	u8   pen_long_travel;      /* 0068: how far (grid cells) the pen may
++				    * drift from where the timer ran out
++				    * before the press counts as a drag and
++				    * is taken back.  0 = no limit         */
+ 	s32  pen_max_step;         /* Q8.8: largest per-frame step a latched
+ 				    * pen can make; 0 = no limit         */
+ 	s16  pen_tap_level;        /* amplitude at/above which a *stationary*
+@@ -338,10 +406,11 @@ struct hx_algo {
+ 				    * above pen_threshold;  0 = off.  The
+ 				    * spatial test a tap and a stationary
+ 				    * offset are supposed to differ in.   */
+-	s16  pen_min_nbr8;         /* 0055/0056: neighbour lift the streak must
+-				    * reach for the **amplitude (tap)** path to
+-				    * believe it -- sum of the 8 raw values
+-				    * around the argmax;  0 = off.
++	s16  pen_min_nbr8;         /* 0055/0056/0062: neighbour lift a streak
++				    * must reach for a **stationary** contact to
++				    * be believed -- the by_amp and the by_hold
++				    * paths, 0057 -- as the sum of the 8 raw
++				    * values around the argmax;  0 = off.
+ 				    *
+ 				    * A tap is a *stationary* contact that has to
+ 				    * be told from a *stationary* offset, and
+@@ -350,7 +419,31 @@ struct hx_algo {
+ 				    * entry: a stroke accumulates `travel` inside
+ 				    * one uninterrupted streak, so dropping
+ 				    * low-nbr8 frames resets the streak and breaks
+-				    * the move path (measured 2026-09-30).      */
++				    * the move path (measured 2026-09-30).
++				    *
++				    * 0062: this is the **interior** value.  nbr8
++				    * is a sum over the 8-neighbourhood, so a cell
++				    * at the panel border is asked for the same
++				    * lift from fewer nodes -- see pen_geom_enable. */
++	bool pen_geom_enable;      /* 0062: scale pen_min_nbr8 towards the
++				    * panel border by (in-panel neighbours / 8) ^
++				    * pen_geom_pow, holding the demand **per
++				    * neighbour** constant.  A corner cell has 3
++				    * of its 8 neighbours inside the panel, so the
++				    * flat gate asks it for a lift only 8 nodes
++				    * could produce: measured 78.4% of edge
++				    * candidates refused against 24.6% inside,
++				    * which is the "taps near the edge do not
++				    * register" complaint.  Scaling gives 367 at
++				    * the interior, 90 on an edge, 19 in a
++				    * corner.  Default true; false restores the
++				    * flat scalar gate of 0056/0057 exactly.   */
++	u8   pen_geom_pow;         /* 0062: exponent of that scaling, 0..3.
++				    * 0 = flat, i.e. the same gate as
++				    * pen_geom_enable = false; 3 = the measured
++				    * optimum, and the smallest integer that
++				    * saturates -- the 2026-10-02 corpus cannot
++				    * tell 2.5 and 3 apart.                   */
+ 	u8   pen_centroid_win;     /* sub-cell centroid radius in cells;
+ 	                            * 0 = report the argmax cell itself      */
+ 	struct hx_pen_path pen;

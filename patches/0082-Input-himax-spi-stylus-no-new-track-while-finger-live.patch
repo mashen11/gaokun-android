@@ -1,0 +1,169 @@
+From: mashen11 <39056084+mashen11@users.noreply.github.com>
+Subject: [PATCH] Input: himax-spi: 手指轨道还活着时不许新建笔轨道（修「一指变两指」）
+
+**症状**：单指操作偶尔被判成两指（画线断、页面莫名缩放）。
+
+**根因是出生条件的 bug，不是阈值。** 笔的通路只在一帧里"振幅通路本帧没有任何连通域"
+（`cnt == 0`）时才被问一次。可 **"0 contact" ≠ "没手指"**：一个匹配失败的 finger
+轨道仍在 `track_lost_frames` 的宽限期里 `active`，坐标冻结、继续上报。
+而笔的出生判据比"手指还在"更松 ⇒ 它把**同一个 finger blob** 收编成了笔
+⇒ 同一帧里出现两个指针（`FINGER` + `PEN`）⇒ 用户态判成 pinch。
+
+**证据**：把 evdev 流逐帧摊开，取所有「同帧 ≥2 个 live slot 且几何距离 < 60px」的帧，
+组合**清一色是 `{finger, pen}`，从没出现过 `{finger, finger}`**。
+
+**修法**：`hx_pen_scan()` 在 latch 之前先看 `tracks[]` ——
+只要还有 `active && !is_pen` 的轨道，就拒绝新建笔轨道。新增观测 `pen_dec_finger`
+记录"因为手指还活着被拒"的次数。
+
+与 `pen_min_nbr8` 无关（把 nbr8 提到 150 该出的照样出）——
+它修的是**出生条件**，不是**出生阈值**。
+
+案卷：`docs/stylus/investigations/ghost-touch/`、`docs/stylus/decisions/`。
+---
+--- a/drivers/input/touchscreen/himax-spi-core.c
++++ b/drivers/input/touchscreen/himax-spi-core.c
+@@ -1508,9 +1508,14 @@ static ssize_t stats_show(struct device *dev, struct device_attribute *attr,
+ 			   ts->algo->pen.frames_emit);
+ 	/*
+ 	 * 0063: and *why* the rest did not.  Read next to pen_frame_cand:
+-	 * cand = emit + ghost_runs is the coarse split, these three are
+-	 * the fine one, and pen_dec_spatial is the single number that
+-	 * decides whether the geometric gate is the thing to move.
++	 * cand = emit + ghost_runs is the coarse split, these are the fine
++	 * one, and pen_dec_spatial is the single number that decides
++	 * whether the geometric gate is the thing to move.
++	 *
++	 * 0073 adds pen_dec_finger: a latch refused because a finger track
++	 * is still live.  It is the one refusal that no knob can move --
++	 * if it is large in a pure-finger run, the ghost exists and the
++	 * fix belongs in the birth condition, not in a threshold.
+ 	 */
+ 	n += sysfs_emit_at(buf, n, "pen_dec_wait      %u\n",
+ 			   ts->algo->pen.dec_wait);
+@@ -1518,6 +1523,8 @@ static ssize_t stats_show(struct device *dev, struct device_attribute *attr,
+ 			   ts->algo->pen.dec_amp_short);
+ 	n += sysfs_emit_at(buf, n, "pen_dec_spatial   %u\n",
+ 			   ts->algo->pen.dec_spatial);
++	n += sysfs_emit_at(buf, n, "pen_dec_finger    %u\n",
++			   ts->algo->pen.dec_finger);
+ 	return n;
+ }
+ 
+@@ -1558,6 +1565,7 @@ static ssize_t stats_store(struct device *dev, struct device_attribute *attr,
+ 	pen->dec_wait = 0;
+ 	pen->dec_amp_short = 0;
+ 	pen->dec_spatial = 0;
++	pen->dec_finger = 0;
+ 	return count;
+ }
+ static DEVICE_ATTR_RW(stats);
+--- a/drivers/input/touchscreen/hx-algo.c
++++ b/drivers/input/touchscreen/hx-algo.c
+@@ -1769,6 +1769,7 @@ bool hx_pen_scan(struct hx_algo *algo)
+ 	s32 sum;
+ 	int br = 0, bc = 0;
+ 	int r, c;
++	int i;
+ 	int n_pix = 0;
+ 	s16 nbr8 = 0;
+ 	bool latched = false;
+@@ -1951,6 +1952,66 @@ bool hx_pen_scan(struct hx_algo *algo)
+ 	 *
+ 	 * pen_latch_travel = 0 restores the old "confirmed is enough" rule.
+ 	 */
++
++	/*
++	 * 0073: ghost gate -- never *birth* a pen track while a non-pen
++	 * (finger) track is still live.
++	 *
++	 * The caller asks us only when the amplitude pipeline resolved 0
++	 * contacts this frame.  That is *not* the same as "no finger is
++	 * down": a finger track that just lost its match keeps `active`
++	 * true -- and keeps being reported, coordinate frozen -- for
++	 * track_lost_frames.  So we are asked on exactly the frames where a
++	 * moving finger was momentarily dropped by the amplitude path, and
++	 * if we latch we re-admit the *same blob* as a pen, because this
++	 * gate is looser than the amplitude path's own contact rules.
++	 * The panel then reports two pointers for one finger, slot A
++	 * MT_TOOL_FINGER and slot B MT_TOOL_PEN, which Android reads as a
++	 * pinch.  Reported symptoms, all with a single finger:
++	 *
++	 *   - an image app zooming while one finger drags,
++	 *   - the recents swipe-up from the bottom edge not taking,
++	 *   - a full-screen video's volume swipe turning into a zoom.
++	 *
++	 * Measured on Android, 2026-10-07 (getevent, 4 captures): every
++	 * two-slot frame whose points were < 60 px apart carried the tool
++	 * multiset {finger, pen} -- never {finger, finger} -- and a new pen
++	 * track opened 11 px from a live finger track on the frame right
++	 * after that finger's coordinates stopped updating.  The
++	 * slots_born_pen / slots_born_finger pair (0064) reads ~1:1 in a
++	 * pure-finger run, where it should be 0:N.
++	 *
++	 * This is NOT the same bug as the is_pen leak 0070 worked around:
++	 * there a *finger* slot was mis-tagged (fixed by clearing
++	 * contacts[]); here a *pen* slot is genuinely born, and the
++	 * tracker's is_pen is correct.  Only the birth is wrong.
++	 *
++	 * A real pen never trips this.  Over the 2026-09-30 four-phase
++	 * recording the amplitude path reported 0 contacts across all 424
++	 * written frames, i.e. no finger track is live while a pen is being
++	 * written with; the pen's own opening TOOL_TYPE-only frame carries
++	 * no TRACKING_ID and so is not a track.  Cost, stated honestly: a
++	 * finger lifting and a pen landing within track_lost_frames
++	 * (~25 ms at 120 Hz) and within the 420 px match radius delays the
++	 * pen by that much -- less than the confirm the pen path already
++	 * pays.
++	 *
++	 * Deliberately a condition, not a threshold: it holds at
++	 * pen_min_nbr8 = 150 (v1's "no dead zones" value) as well as at
++	 * 367, so the pen keeps its sensitivity.  Raising pen_min_nbr8
++	 * misses the by_move branch, and by_move is exactly what a *moving*
++	 * finger trips.
++	 */
++	if (!pen->active) {
++		for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
++			if (algo->tracks[i].active && !algo->tracks[i].is_pen) {
++				pen->dec_finger++;
++				pen->frame_flags |= HX_PEN_SCAN_F_NOLATCH;
++				return false;
++			}
++		}
++	}
++
+ 	if (!pen->active && pen->conf >= algo->pen_confirm_frames) {
+ 		bool by_move = algo->pen_latch_travel <= 0 ||
+ 			       (s32)pen->travel * 256 >= algo->pen_latch_travel;
+--- a/drivers/input/touchscreen/hx-algo.h
++++ b/drivers/input/touchscreen/hx-algo.h
+@@ -274,13 +274,20 @@ struct hx_pen_path {
+ 	 * The dec_* counters answer "which gate refused this frame".  The
+ 	 * decision is re-evaluated on every frame from confirmation
+ 	 * onwards, so a refusal is a count of *frames*, not one event, and
+-	 * the three paths fail for three different reasons:
++	 * the paths fail for different reasons:
+ 	 *
+ 	 *	dec_wait	conf < pen_confirm_frames -- too early to judge
+ 	 *	dec_amp_short	by_amp's amplitude test not met yet
+ 	 *	dec_spatial	by_amp or by_hold would have fired but for
+ 	 *			spatial_ok: the only counter that moves when the
+ 	 *			*spatial* gate is the blocker
++	 *	dec_finger	a latch refused because a non-pen (finger) track
++	 *			is still live (0073).  Unlike the three above this
++	 *			is not a judgement about this frame's data: the
++	 *			frame has no free owner, because the blob the
++	 *			amplitude path dropped is already being reported
++	 *			as a finger, and re-admitting it would emit two
++	 *			pointers for one finger.
+ 	 *
+ 	 * They are not a partition: a frame can be both early and short of
+ 	 * amplitude.  Read them as "how many frames was this gate the
+@@ -290,6 +297,7 @@ struct hx_pen_path {
+ 	u32  dec_wait;
+ 	u32  dec_amp_short;
+ 	u32  dec_spatial;
++	u32  dec_finger;
+ };
+ 
+ /**

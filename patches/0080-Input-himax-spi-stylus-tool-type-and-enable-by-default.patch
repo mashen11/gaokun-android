@@ -1,0 +1,404 @@
+From: mashen11 <39056084+mashen11@users.noreply.github.com>
+Subject: [PATCH] Input: himax-spi: 让系统知道「这是笔」—— TOOL_TYPE 轴、轨迹隔离与默认开
+
+**① 系统得知道这是笔，而不是一根奇怪的粗手指。**
+
+用户态画线应用靠 `ABS_MT_TOOL_TYPE` 区分手指与笔，据此切换压感/倾斜/笔刷。
+此前驱动一个 `MT_TOOL_*` 都没报，笔在应用眼里就是手指。申报 `ABS_MT_TOOL_TYPE`
+并在笔轨迹上逐帧报 `MT_TOOL_PEN`。
+
+**② 轨迹按工具隔离。**
+
+笔与手指同时在这块面板上时，共用一套轨迹索引会**互相顶掉** ——
+落笔瞬间手指轨迹被笔挤掉、抬笔又被抢回来，表现为"笔一动手指就断"。
+按 `is_pen` 把两种工具的轨迹分开记账，各自独立分配 slot。
+
+**③ 笔通路改默认开。**
+
+补丁 0051 里笔通路默认关（要手动 `algo/pen_enabled` 闸门），这是当时为了能安全上机
+做灰度留的。判据到这里都齐了，改成默认开 —— 「拿起笔」不该需要先写一个 sysfs 文件。
+`algo/pen_enabled` 旋钮保留，仍可运行时关。
+
+**④ 顺带修一处计数卫生**：`stats_store` 清零时漏掉了 pen 的那几个计数，
+于是"清空统计"后笔的旧计数还在，读数的可信度打折。
+
+案卷：`docs/stylus/android/`（安卓侧笔通路的落地与验证）。
+---
+--- a/drivers/input/touchscreen/himax-spi-core.c
++++ b/drivers/input/touchscreen/himax-spi-core.c
+@@ -26,6 +26,22 @@ static bool disable_pressure = true;
+ module_param(disable_pressure, bool, 0444);
+ MODULE_PARM_DESC(disable_pressure, "Disable ABS_MT_TOUCH_MAJOR and ABS_MT_PRESSURE axes (default: true)");
+ 
++/*
++ * Pen detector master switch.  OFF BY DEFAULT IN NAME ONLY: the pen path
++ * itself is ON by default (pen_enabled = !disable_pen), because a pen that
++ * is merely picked up and put on the panel has to be recognised without any
++ * manual sysfs step.  The path is additive -- it can only ever add pen
++ * slots, it never disturbs finger tracking -- and the latch gate in
++ * hx-algo.c keeps a resting panel quiet, so an always-on default costs
++ * nothing measurable.  Kept as a *disable* knob so that both ways of
++ * turning it off stay explicit: disable_pen=1 at boot, or
++ * algo/pen_enabled=0 at runtime (read-only here on purpose, so the sysfs
++ * attribute remains the single runtime switch).
++ */
++static bool disable_pen;
++module_param(disable_pen, bool, 0444);
++MODULE_PARM_DESC(disable_pen, "Disable the independent pen detector (default: false; the pen path is ON by default)");
++
+ /*
+  * The panel driver already power-cycles and re-initialises the TDDI
+  * during its own prepare() sequence. Toggling the touch reset line
+@@ -701,6 +717,24 @@ static int himax_input_dev_config(struct himax_ts_data *ts)
+ 	input_set_abs_params(ts->input_dev, ABS_MT_POSITION_Y,
+ 			     0, SZ_64K - 1, himax_fuzz, 0);
+ 
++	/*
++	 * Declare the tool axis so a slot can say what is touching it.  Without
++	 * it the driver reports every contact as MT_TOOL_FINGER and the system
++	 * has no way to learn that one of them came from a pen: Android's
++	 * MotionEvent.getToolType() returns TOOL_TYPE_FINGER, so drawing and
++	 * note-taking apps never switch to their pen brush, never enable stylus
++	 * palm rejection and never deliver onStylusButtonPress.
++	 *
++	 * Declaring the axis is not optional.  Android's TouchInputMapper only
++	 * arms its per-pointer tool type when the device advertises an
++	 * ABS_MT_TOOL_TYPE axis; without it every pointer stays on the FINGER
++	 * default no matter what input_mt_report_slot_state() was handed.
++	 * Range is the two tools this driver can produce -- the pen path never
++	 * claims a palm, and a fingertip is never a pen.
++	 */
++	input_set_abs_params(ts->input_dev, ABS_MT_TOOL_TYPE,
++			     MT_TOOL_FINGER, MT_TOOL_PEN, 0, 0);
++
+ 	/*
+ 	 * Report the axis resolution in units per millimetre.  Leaving it at
+ 	 * zero -- which is what a driver that never calls this gets -- tells
+@@ -1271,6 +1305,7 @@ HX_ALGO_ATTR_S32_RW(track_dist2_max);
+ HX_ALGO_ATTR_U8_RW(track_lost_frames);
+ HX_ALGO_ATTR_U8_RW(debounce_base);
+ HX_ALGO_ATTR_BOOL_RW(track_smoothing);
++HX_ALGO_ATTR_BOOL_RW(pen_smoothing);
+ HX_ALGO_ATTR_BOOL_RW(track_active_guard);
+ HX_ALGO_ATTR_U8_RW(track_start_debounce);
+ HX_ALGO_ATTR_S32_RW(track_jump_dist2);
+@@ -1350,11 +1385,33 @@ static ssize_t stats_store(struct device *dev, struct device_attribute *attr,
+ 			   const char *buf, size_t count)
+ {
+ 	struct himax_ts_data *ts = dev_get_drvdata(dev);
++	struct hx_pen_path *pen = &ts->algo->pen;
+ 
+ 	memset(&ts->algo->stats, 0, sizeof(ts->algo->stats));
+ 	memset(ts->algo->newlog, 0, sizeof(ts->algo->newlog));
+ 	ts->algo->newlog_head = 0;
+ 	ts->algo->newlog_seq = 0;
++
++	/*
++	 * 0058: the pen counters live in algo->pen, not in algo->stats, but
++	 * stats_show() prints both in the *same* table.  "Clear the counters"
++	 * therefore used to clear only half of what it displays: a differential
++	 * read silently kept everything since module load for the pen rows.
++	 *
++	 * That is not hypothetical -- on 2026-09-30 it produced a 3.5x
++	 * mismatch (pen_frame_cand 2041 vs 580 records in pen_cap) which was
++	 * first read as "the capture is dropping records", and a latch count of
++	 * 28 where the capture held 2.  Both were explained only by reading
++	 * this function.  Counters only -- never the path's live state
++	 * (has/active/conf/last_r/...), which must survive a counter reset.
++	 */
++	pen->frames_cand = 0;
++	pen->frames_emit = 0;
++	pen->ghost_runs = 0;
++	pen->latch_move = 0;
++	pen->latch_amp = 0;
++	pen->latch_hold = 0;
++	pen->rej_jump = 0;
+ 	return count;
+ }
+ static DEVICE_ATTR_RW(stats);
+@@ -1411,6 +1468,7 @@ static struct attribute *hx_algo_attrs[] = {
+ 	&dev_attr_track_lost_frames.attr,
+ 	&dev_attr_debounce_base.attr,
+ 	&dev_attr_track_smoothing.attr,
++	&dev_attr_pen_smoothing.attr,
+ 	&dev_attr_track_active_guard.attr,
+ 	&dev_attr_track_start_debounce.attr,
+ 	&dev_attr_track_jump_dist2.attr,
+@@ -1733,9 +1791,27 @@ static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on)
+ 	for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
+ 		bool on = report_on && ts->algo->tracks[i].active &&
+ 			  ts->algo->tracks[i].debounce == 0;
++		/*
++		 * ABS_MT_TOOL_TYPE is a valued multi-touch code: input_is_mt_value()
++		 * (include/linux/input/mt.h) is a plain ABS_MT_FIRST..ABS_MT_LAST
++		 * range test, and 0x37 sits inside it.  So input_handle_abs_event()
++		 * deduplicates it against *this slot's* last value, never a global
++		 * one -- two slots asking for the same tool in one frame both get
++		 * through.
++		 *
++		 * A release cannot leave a stale tool behind either:
++		 * input_mt_report_slot_state() emits ABS_MT_TRACKING_ID = -1 and
++		 * returns without touching slot->abs[], so the value it keeps is the
++		 * tool the slot was last reported with.  The only event that can be
++		 * dropped is one repeating that value, which is exactly the case
++		 * where dropping it is correct.  A tool change (FINGER <-> PEN)
++		 * always differs from the stored value, so it is always emitted.
++		 */
++		unsigned int tool = ts->algo->tracks[i].is_pen ?
++				    MT_TOOL_PEN : MT_TOOL_FINGER;
+ 
+ 		input_mt_slot(ts->input_dev, i);
+-		input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER, on);
++		input_mt_report_slot_state(ts->input_dev, tool, on);
+ 		if (!on)
+ 			continue;
+ 
+@@ -1812,12 +1888,18 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
+ 	 * nothing.  The two are mutually exclusive by construction, so no
+ 	 * pen-versus-finger classifier is needed anywhere.
+ 	 *
+-	 * The result is reported through the ordinary touchscreen input device:
+-	 * it draws, but it carries no pressure, no tilt and no hover distance.
+-	 * That is the deliberate first step -- a pen that works, before a pen
+-	 * that is good.  A separate input device (BTN_TOOL_PEN, ABS_PRESSURE,
+-	 * ABS_DISTANCE) is the follow-up once the IC side reports the real pen
+-	 * domain, which is what the channel-B work is for.
++	 * The result is reported through the ordinary touchscreen input device,
++	 * but tagged MT_TOOL_PEN so the system knows it is a pen.  It still
++	 * carries no pressure, no tilt and no hover distance: those three need
++	 * data a passive tip cannot produce, and they are the follow-up once the
++	 * IC side reports the real pen domain.
++	 *
++	 * A second input device (BTN_TOOL_PEN, ABS_PRESSURE, ABS_DISTANCE) is
++	 * deliberately not created yet.  It would need its own absinfo set, its
++	 * own calibration and its own Android IDC, and the pen path is not yet
++	 * trustworthy enough to justify a second device -- the MT_TOOL_PEN tag
++	 * gets the system to recognise the pen with none of that, and it is the
++	 * standard encoding for a pen on a multitouch panel.
+ 	 */
+ 	if (cnt == 0 && cnt < HIMAX_MAX_TOUCH) {
+ 		int pen_emit = hx_pen_scan(algo);
+@@ -1856,6 +1938,14 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
+ 					algo->pen.last_c == 0 ||
+ 					algo->pen.last_c == HX_COLS - 1);
+ 			pct->zone_area = 1;
++			/*
++			 * Tag it as a pen.  This is the whole point of the
++			 * change: the contact still travels the ordinary
++			 * tracker and the ordinary input device, but the slot
++			 * it lands in is reported as MT_TOOL_PEN, so the
++			 * system stops treating the pen as a finger.
++			 */
++			pct->is_pen = true;
+ 			algo->contact_count = cnt + 1;
+ 
+ 			pos[cnt].x = clamp_val((s32)(algo->pen.x / 6), 0,
+@@ -2138,6 +2228,15 @@ static int himax_spi_probe(struct spi_device *spi)
+ 	 */
+ 	ts->algo->pressure_enabled = !disable_pressure;
+ 
++	/*
++	 * Pen path: ON by default.  "Pick the pen up and write" has to work
++	 * without a manual sysfs step, and the path is purely additive (see
++	 * the disable_pen comment above), so there is nothing to gain from
++	 * leaving it off.  Two explicit ways to turn it off: disable_pen=1
++	 * at boot, algo/pen_enabled=0 at runtime.
++	 */
++	ts->algo->pen_enabled = !disable_pen;
++
+ 	spin_lock_init(&ts->irq_lock);
+ 	mutex_init(&ts->op_lock);
+ 	INIT_DELAYED_WORK(&ts->panel_reinit_work, himax_panel_reinit_work);
+--- a/drivers/input/touchscreen/hx-algo.c
++++ b/drivers/input/touchscreen/hx-algo.c
+@@ -62,20 +62,36 @@ void hx_algo_init_defaults(struct hx_algo *algo)
+ 	algo->track_lost_frames = HIMAX_TRACK_LOST_FRAMES;
+ 	algo->debounce_base     = HIMAX_NEW_TOUCH_DEBOUNCE;
+ 	algo->track_smoothing   = true;
++	/*
++	 * A pen wants the opposite of a fingertip: a finger is smoothed to
++	 * stop jitter, but for writing the smoothing is pure added latency and
++	 * the pen's own coordinates are already a 3x3 centroid, which is
++	 * smoother than the input it is built from.  Off by default, and only
++	 * ever consulted for slots a pen detection created, so flipping it
++	 * cannot change how a finger behaves.
++	 */
++	algo->pen_smoothing     = false;
+ 	algo->track_active_guard   = true;
+ 	algo->track_start_debounce = 2;
+ 	algo->track_jump_dist2     = 0;  /* disabled by default */
+ 
+ 	/*
+-	 * Pen path.  Disabled by default: it is additive, but turning a gate
+-	 * off-by-default keeps this patch behaviour-neutral until a panel is
+-	 * actually driven with a pen.  Numbers below come from replaying the
++	 * Pen path.  ON by default since 0060: a pen that is merely picked up
++	 * and put on the panel has to be recognised without a manual sysfs
++	 * step.  The old off-by-default only kept the 0051 patch
++	 * behaviour-neutral until a panel was actually driven with a pen --
++	 * 0055..0059 finished that work, so the neutral default no longer
++	 * buys anything.  The path is additive: it can only add pen slots and
++	 * never disturbs finger tracking, and the latch gate below keeps a
++	 * resting panel quiet.  Turn it off with disable_pen=1 (boot) or
++	 * algo/pen_enabled=0 (runtime).
++	 * Numbers below come from replaying the
+ 	 * 2026-09-30 four-phase recording (docs/stylus/re-tools/hx-algo-replay.py):
+ 	 * threshold 150 sits 30 counts above the largest resting-panel pixel
+ 	 * (120) and still sees 74% of the written frames; confirm 3 costs 25 ms
+ 	 * at 120 Hz; 4 cells covers the measured 4.2-cell worst-case step.
+ 	 */
+-	algo->pen_enabled        = false;
++	algo->pen_enabled        = true;
+ 	algo->pen_threshold      = 150;
+ 	algo->pen_jump_max       = 4;
+ 	algo->pen_confirm_frames = 3;
+@@ -1162,6 +1178,14 @@ void hx_expand_and_resolve(struct hx_algo *algo,
+ 	int i, n;
+ 
+ 	memset(algo->zone_map, 0, sizeof(algo->zone_map));
++	/*
++	 * Clear the whole contact array, not just the count.  The expand and
++	 * centroid helpers fill in the fields they know about and leave the
++	 * rest alone, so a field only the pen path sets -- is_pen -- would
++	 * otherwise survive from the previous frame and mis-tag a fingertip
++	 * as a pen as soon as one pen frame had ever been through here.
++	 */
++	memset(algo->contacts, 0, sizeof(algo->contacts));
+ 	algo->contact_count = 0;
+ 
+ 	n = min_t(int, algo->peak_count, HIMAX_MAX_TOUCH);
+@@ -1267,6 +1291,20 @@ static void hx_reset_track(struct hx_track *trk)
+ 	memset(trk, 0, sizeof(*trk));
+ }
+ 
++/*
++ * Was detection @det_idx produced by the pen path?
++ *
++ * The pen path appends its contact to contacts[]/pos[] exactly as the
++ * amplitude path does, so downstream the only thing separating them is this
++ * flag.  struct input_mt_pos carries no pen bit of its own, so it is looked
++ * up by index: himax_ts_thread() writes pos[j] and contacts[j] in lockstep,
++ * and contact_count is set to cover both.
++ */
++static bool hx_det_is_pen(const struct hx_algo *algo, int det_idx)
++{
++	return det_idx < algo->contact_count && algo->contacts[det_idx].is_pen;
++}
++
+ void hx_track_contacts(struct hx_algo *algo,
+ 		       struct input_mt_pos *det, int det_cnt)
+ {
+@@ -1288,7 +1326,22 @@ void hx_track_contacts(struct hx_algo *algo,
+ 			continue;
+ 
+ 		for (j = 0; j < det_cnt; j++) {
+-			s64 d2 = hx_dist2_predicted(&det[j], trk);
++			s64 d2;
++
++			/*
++			 * A pen slot and a finger slot are not interchangeable.
++			 * The pen path only runs on frames where the amplitude
++			 * path found nothing, so its detection usually arrives
++			 * while a finger slot is still inside its lost-frame
++			 * grace window -- and without this test that slot would
++			 * adopt the pen's coordinates and report them as a
++			 * finger.  A slot's tool is fixed at birth, so neither
++			 * kind can ever take over the other's detections.
++			 */
++			if (trk->is_pen != hx_det_is_pen(algo, j))
++				continue;
++
++			d2 = hx_dist2_predicted(&det[j], trk);
+ 
+ 			if (d2 > algo->track_dist2_max)
+ 				continue;
+@@ -1358,10 +1411,10 @@ void hx_track_contacts(struct hx_algo *algo,
+ 			continue;
+ 		}
+ 
+-		/* Update position: smooth or direct. */
++		/* Update position: smooth or direct, per tool. */
+ 		trk->vx = det[m->det_idx].x - trk->x;
+ 		trk->vy = det[m->det_idx].y - trk->y;
+-		if (algo->track_smoothing) {
++		if (trk->is_pen ? algo->pen_smoothing : algo->track_smoothing) {
+ 			trk->x = (trk->x * 3 + det[m->det_idx].x) / 4;
+ 			trk->y = (trk->y * 3 + det[m->det_idx].y) / 4;
+ 		} else {
+@@ -1422,6 +1475,7 @@ void hx_track_contacts(struct hx_algo *algo,
+ 			continue;
+ 
+ 		trk->active   = true;
++		trk->is_pen   = hx_det_is_pen(algo, j);
+ 		trk->age      = 1;
+ 		trk->missed   = 0;
+ 		trk->debounce = algo->debounce_base;
+@@ -1447,6 +1501,7 @@ void hx_track_contacts(struct hx_algo *algo,
+ 					     algo->contacts[j].zone_area : 0;
+ 			lg->is_edge    = j < algo->contact_count &&
+ 					     algo->contacts[j].is_edge;
++			lg->is_pen     = hx_det_is_pen(algo, j);
+ 			if (lg->is_edge)
+ 				algo->stats.tracks_new_edge++;
+ 			algo->newlog_head = (algo->newlog_head + 1) % HX_NEWLOG;
+--- a/drivers/input/touchscreen/hx-algo.h
++++ b/drivers/input/touchscreen/hx-algo.h
+@@ -47,6 +47,10 @@ struct hx_peak {
+  * @area:       number of pixels contributing to this contact
+  * @signal_sum: integrated signal over the contact area
+  * @is_edge:    true when the centroid is within one cell of the grid boundary
++ * @is_pen:     true when the pen path, not the amplitude path, produced this
++ *              contact.  Carried through the tracker and out to
++ *              input_mt_report_slot_state() so the slot is tagged MT_TOOL_PEN
++ *              and userspace stops seeing the pen as a finger.
+  */
+ struct hx_contact {
+ 	s32  x;
+@@ -54,6 +58,7 @@ struct hx_contact {
+ 	u16  area;
+ 	s32  signal_sum;
+ 	bool is_edge;
++	bool is_pen;
+ 	u16  zone_area;   /* area of the macro-zone this contact came from */
+ };
+ 
+@@ -66,9 +71,14 @@ struct hx_contact {
+  * @age:        frames the slot has been active
+  * @missed:     consecutive frames the slot had no matching detection
+  * @debounce:   remaining debounce frames before the slot is reported
++ * @is_pen:     slot is held by a pen contact.  Fixed at birth and never
++ *              changes: a pen detection may only match a pen slot and a
++ *              fingertip only a fingertip slot, so a stray finger slot can
++ *              never steal the pen's coordinates (or vice versa).
+  */
+ struct hx_track {
+ 	bool active;
++	bool is_pen;
+ 	s32  x;
+ 	s32  y;
+ 	s32  vx;
+@@ -146,6 +156,7 @@ struct hx_newlog {
+ 	u16  area;
+ 	s32  signal_sum;
+ 	bool is_edge;
++	bool is_pen;
+ 	u16  zone_area;
+ };
+ 
+@@ -297,6 +308,7 @@ struct hx_algo {
+ 	u8   track_lost_frames;    /* missed frames before slot release    */
+ 	u8   debounce_base;        /* new-slot debounce count              */
+ 	bool track_smoothing;      /* position smoothing on/off            */
++	bool pen_smoothing;        /* ... same, for pen slots (default off) */
+ 	bool track_active_guard;   /* kill stray tracks before 1st stable  */
+ 	u8   track_start_debounce; /* frames to confirm touch_active       */
+ 	s32  track_jump_dist2;     /* position jump → force lift+repress   */
+@@ -306,7 +318,7 @@ struct hx_algo {
+ 	 * Tunables first, flat, so the HX_ALGO_ATTR_*_RW() macros in
+ 	 * himax-spi-core.c can address them as ts->algo->pen_threshold etc.
+ 	 */
+-	bool pen_enabled;          /* master switch (default: false)       */
++	bool pen_enabled;          /* master switch (default: true)        */
+ 	s16  pen_threshold;        /* raw-grid candidate gate              */
+ 	s16  pen_jump_max;         /* per-axis move allowed between frames */
+ 	s16  pen_confirm_frames;   /* streak length that latches the path  */

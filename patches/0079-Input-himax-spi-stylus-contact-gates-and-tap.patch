@@ -1,0 +1,782 @@
+From: mashen11 <39056084+mashen11@users.noreply.github.com>
+Subject: [PATCH] Input: himax-spi: 笔触点的判据 —— 幽灵剔除与点击响应
+
+有了笔的独立通路之后，接下来三件事一起做：**别把不是笔的收进来、真的点一下要立刻响应、
+删掉靠特例堆出来的补丁**。它们动的是同一段 latch 逻辑，拆不开。
+
+**① 幽灵剔除：凡是不靠"动了"证明自己的 latch，都必须过空间判据。**
+
+`by_hold`（连续 30 帧就认）是三条路里唯一没有空间判据的一条。实测画 2 条线 + 快点 5 下：
+14 个 latch 段里 12 段是真动作（AMP 路、`nbr8` 高），2 段是 `by_hold` 收的静止偏移
+（`travel=0`、`nbr8` 只有 ~300、贴底边），而被拒的 9 段里有 7 段也在同一格。
+另一个方向：**行程**也能认出幽灵 —— 出生后位移不涨却一直报的候选不是笔。
+
+写规则，不写特例：
+
+```c
+	bool spatial_ok = algo->pen_min_nbr8 <= 0 ||
+			  pen->nbr8_streak >= algo->pen_min_nbr8;
+	bool by_amp  = ... && spatial_ok;
+	bool by_hold = ... && spatial_ok;
+```
+
+**② "点一下"立刻响应：时间维用尽后换幅度维。**
+
+时间维的 latch（`by_hold`）最快也要 30 帧才响应一次点击，手感必然黏。
+给点击单开一道**幅度闸门**：一笔内同格候选的峰值一整段取最大，过 `pen_tap_level`
+即认。并把空间判据（邻域闸门 `nbr8`）**只归点击那条路** ——
+划动本来就靠"动"自证，再叠邻域门只会把快速笔划切碎。
+
+**③ 删特例：四个质心窗口吃同一帧。**
+
+原先四个方向的窗口各自取帧，于是"手"在一次读数里变成了变量。统一到同一帧。
+
+**默认值按实测定**：`pen_tap_level` 由 198 收窄到 160（原始盘上重量的），
+`pen_min_nbr8` 取实测边界。这些默认值**是惰性的** —— 笔通路默认关，打开才生效。
+
+案卷：`docs/stylus/pen-run-2026-09-30.md` §9–§12。
+---
+--- a/drivers/input/touchscreen/himax-spi-core.c
++++ b/drivers/input/touchscreen/himax-spi-core.c
+@@ -1092,6 +1092,11 @@ struct hx_pen_cap_rec {
+ 	s16 best;		/* argmax value */
+ 	s16 x[HX_PEN_CAP_WINS];	/* Q8.8, same units the driver reports */
+ 	s16 y[HX_PEN_CAP_WINS];
++	u8  conf;		/* streak length when this frame was captured */
++	u8  travel;		/* its in-streak travel, in cells            */
++	u8  flags;		/* HX_PEN_SCAN_F_*                           */
++	u16 npix;		/* pixels at/above pen_threshold             */
++	s16 nbr8;		/* argmax's 8-neighbour sum                  */
+ };
+ 
+ static void himax_pen_cap_record(struct himax_ts_data *ts)
+@@ -1108,6 +1113,11 @@ static void himax_pen_cap_record(struct himax_ts_data *ts)
+ 	rec->br = algo->pen.last_r;
+ 	rec->bc = algo->pen.last_c;
+ 	rec->best = algo->pen.z;
++	rec->conf = algo->pen.conf > 255 ? 255 : (u8)algo->pen.conf;
++	rec->travel = algo->pen.travel;
++	rec->flags = algo->pen.frame_flags;
++	rec->npix = algo->pen.n_pix;
++	rec->nbr8 = algo->pen.nbr8;
+ 	for (w = 0; w < HX_PEN_CAP_WINS; w++) {
+ 		s32 px, py;
+ 
+@@ -1271,6 +1281,12 @@ HX_ALGO_ATTR_S16_RW(pen_jump_max);
+ HX_ALGO_ATTR_S16_RW(pen_confirm_frames);
+ HX_ALGO_ATTR_U16_RW(pen_lost_frames);
+ HX_ALGO_ATTR_U8_RW(pen_centroid_win);
++HX_ALGO_ATTR_S16_RW(pen_latch_travel);
++HX_ALGO_ATTR_S16_RW(pen_tap_level);
++HX_ALGO_ATTR_U8_RW(pen_min_pixels);
++HX_ALGO_ATTR_S16_RW(pen_min_nbr8);
++HX_ALGO_ATTR_U16_RW(pen_hold_frames);
++HX_ALGO_ATTR_S32_RW(pen_max_step);
+ 
+ /*
+  * Per-stage counters.  Read unlocked on purpose: the only writer is the
+@@ -1315,6 +1331,16 @@ static ssize_t stats_show(struct device *dev, struct device_attribute *attr,
+ 	 */
+ 	n += sysfs_emit_at(buf, n, "pen_frame_cand    %u\n",
+ 			   ts->algo->pen.frames_cand);
++	n += sysfs_emit_at(buf, n, "pen_ghost_runs    %u\n",
++			   ts->algo->pen.ghost_runs);
++	n += sysfs_emit_at(buf, n, "pen_latch_move    %u\n",
++			   ts->algo->pen.latch_move);
++	n += sysfs_emit_at(buf, n, "pen_latch_amp     %u\n",
++			   ts->algo->pen.latch_amp);
++	n += sysfs_emit_at(buf, n, "pen_latch_hold    %u\n",
++			   ts->algo->pen.latch_hold);
++	n += sysfs_emit_at(buf, n, "pen_rej_jump      %u\n",
++			   ts->algo->pen.rej_jump);
+ 	n += sysfs_emit_at(buf, n, "pen_frame_emit    %u\n",
+ 			   ts->algo->pen.frames_emit);
+ 	return n;
+@@ -1394,6 +1420,12 @@ static struct attribute *hx_algo_attrs[] = {
+ 	&dev_attr_pen_confirm_frames.attr,
+ 	&dev_attr_pen_lost_frames.attr,
+ 	&dev_attr_pen_centroid_win.attr,
++	&dev_attr_pen_latch_travel.attr,
++	&dev_attr_pen_tap_level.attr,
++	&dev_attr_pen_min_pixels.attr,
++	&dev_attr_pen_min_nbr8.attr,
++	&dev_attr_pen_hold_frames.attr,
++	&dev_attr_pen_max_step.attr,
+ 	&dev_attr_pen_cap.attr,
+ 	&dev_attr_stats.attr,
+ 	&dev_attr_contacts_log.attr,
+@@ -1466,7 +1498,7 @@ static const struct file_operations himax_dbg_raw_fops = {
+ /*
+  * Capture dump, oldest first, one line per frame:
+  *
+- *	frame br bc best x0 y0 x1 y1 x2 y2 x3 y3
++ *	frame br bc best x0 y0 x1 y1 x2 y2 x3 y3 conf travel flags npix nbr8
+  *
+  * x/y are Q8.8 in the units the driver reports, i.e. one grid cell is 256, so
+  * an offline tool can fit a line to each arm and compare them with none of the
+@@ -1492,7 +1524,8 @@ static int himax_dbg_pencap_show(struct seq_file *s, void *unused)
+ 		seq_printf(s, "%u %u %u %d", r->frame, r->br, r->bc, r->best);
+ 		for (w = 0; w < HX_PEN_CAP_WINS; w++)
+ 			seq_printf(s, " %d %d", r->x[w], r->y[w]);
+-		seq_putc(s, '\n');
++		seq_printf(s, " %u %u %u %u %d\n", r->conf, r->travel,
++			   r->flags, r->npix, r->nbr8);
+ 	}
+ 	return 0;
+ }
+@@ -1786,32 +1819,51 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
+ 	 * ABS_DISTANCE) is the follow-up once the IC side reports the real pen
+ 	 * domain, which is what the channel-B work is for.
+ 	 */
+-	if (cnt == 0 && cnt < HIMAX_MAX_TOUCH && hx_pen_scan(algo)) {
+-		himax_pen_cap_record(ts);
++	if (cnt == 0 && cnt < HIMAX_MAX_TOUCH) {
++		int pen_emit = hx_pen_scan(algo);
++
+ 		/*
+-		 * Fill contacts[]/contact_count too, not just pos[].  The tracker
+-		 * reads contacts[det].signal_sum for trk->signal_sum and the
+-		 * contacts_log prints contacts[j] verbatim, so a contact that
+-		 * exists only in pos[] shows up in both places as zeros -- which
+-		 * reads exactly like a broken detection when it is not.  The pen
+-		 * path has no zone, so area and zone_area are honestly 1.
++		 * 0055: capture every *candidate* frame, not only the emitted
++		 * ones.  The latch gate's inputs (amplitude, neighbour lift)
++		 * only exist on the frames taken *before* the decision, so a tap
++		 * the gate refused left no record anywhere -- and the question
++		 * "was it a weak contact or a drift?" is answered by exactly
++		 * those frames.  Refused frames carry HX_PEN_SCAN_F_NOLATCH, so
++		 * they can never be mistaken for a stroke.
+ 		 */
+-		struct hx_contact *pct = &algo->contacts[cnt];
+-
+-		pct->x = algo->pen.x;
+-		pct->y = algo->pen.y;
+-		pct->area = 1;
+-		pct->signal_sum = algo->pen.z;
+-		pct->is_edge = (algo->pen.last_r == 0 ||
+-				algo->pen.last_r == HX_ROWS - 1 ||
+-				algo->pen.last_c == 0 ||
+-				algo->pen.last_c == HX_COLS - 1);
+-		pct->zone_area = 1;
+-		algo->contact_count = cnt + 1;
+-
+-		pos[cnt].x = clamp_val((s32)(algo->pen.x / 6), 0, SZ_64K - 1);
+-		pos[cnt].y = clamp_val((s32)(5 * algo->pen.y / 32), 0, SZ_64K - 1);
+-		cnt++;
++		if (pen_emit ||
++		    (algo->pen.frame_flags & HX_PEN_SCAN_F_CAND))
++			himax_pen_cap_record(ts);
++
++		if (pen_emit) {
++			/*
++			 * Fill contacts[]/contact_count too, not just pos[].  The
++			 * tracker reads contacts[det].signal_sum for
++			 * trk->signal_sum and the contacts_log prints contacts[j]
++			 * verbatim, so a contact that exists only in pos[] shows up
++			 * in both places as zeros -- which reads exactly like a
++			 * broken detection when it is not.  The pen path has no
++			 * zone, so area and zone_area are honestly 1.
++			 */
++			struct hx_contact *pct = &algo->contacts[cnt];
++
++			pct->x = algo->pen.x;
++			pct->y = algo->pen.y;
++			pct->area = 1;
++			pct->signal_sum = algo->pen.z;
++			pct->is_edge = (algo->pen.last_r == 0 ||
++					algo->pen.last_r == HX_ROWS - 1 ||
++					algo->pen.last_c == 0 ||
++					algo->pen.last_c == HX_COLS - 1);
++			pct->zone_area = 1;
++			algo->contact_count = cnt + 1;
++
++			pos[cnt].x = clamp_val((s32)(algo->pen.x / 6), 0,
++					       SZ_64K - 1);
++			pos[cnt].y = clamp_val((s32)(5 * algo->pen.y / 32), 0,
++					       SZ_64K - 1);
++			cnt++;
++		}
+ 	}
+ 
+ 	hx_track_contacts(algo, pos, cnt);
+--- a/drivers/input/touchscreen/hx-algo.c
++++ b/drivers/input/touchscreen/hx-algo.c
+@@ -81,7 +81,134 @@ void hx_algo_init_defaults(struct hx_algo *algo)
+ 	algo->pen_confirm_frames = 3;
+ 	algo->pen_lost_frames    = 10;
+ 	/*
+-	 * Sub-cell centroid, 2 cells (5x5 window).
++	 * Latch gate (0053).
++	 *
++	 * The path used to latch on three consecutive candidates, and that is why
++	 * roughly one stray mark every ten seconds appeared on the panel.  Of the
++	 * 10016 captured pen frames below, 116 candidate streaks were not strokes
++	 * at all: their median in-streak travel is 0.0 cells, they sit on a fixed
++	 * cell and recur there for the whole session (e.g. cell (1,58) at frame
++	 * 687 and again at 45708) -- a stationary per-node offset in raw_frame,
++	 * which the finger path never sees because CMF and the IIR remove it but
++	 * this path reads the grid before either runs.
++	 *
++	 * Measured on that capture (116 ghost streaks vs 42 real strokes):
++	 *
++	 *	rule			ghosts kept	real strokes lost	latency
++	 *	confirm>=3 (old)	70/92		0/42			3 fr = 25 ms
++	 *	travel >= 1 cell	27/92		0/42			13 fr = 108 ms
++	 *	travel >= 2 cells	 5/92		0/42			25 fr = 208 ms
++	 *
++	 * So a pen is believed when it *moves* 2 cells (8.5 mm), and a stationary
++	 * touch is believed only after 30 frames (0.25 s) -- a dot still works,
++	 * a drift never becomes one, because a drift does not move.
++	 *
++	 * The delay is paid in appearance, not in geometry: on the latch frame the
++	 * position emitted is the streak's *first* candidate, so the stroke still
++	 * begins exactly where the pen landed (see pen->replay_start below).
++	 */
++	algo->pen_latch_travel   = 512;   /* 2 cells */
++	algo->pen_hold_frames    = 30;    /* 0.25 s   */
++	/*
++	 * A latched pen cannot teleport: it is one object in contact with the
++	 * panel, so its position can only change as fast as a hand moves.  The
++	 * capture had 34 frames whose step exceeded 3 cells and 25 exceeding
++	 * 6 cells, up to 11290 units = 188 mm in 8 ms -- all of them the argmax
++	 * briefly landing on another offset elsewhere in the grid.  6 cells =
++	 * 25.6 mm/frame = 3 m/s at 120 Hz, ten times the p99 step of a real
++	 * stroke (1.4 cells), so those frames hold the previous position.
++	 */
++	algo->pen_max_step       = 1536;  /* 6 cells */
++	/*
++	 * A *tap* is a stationary touch, so it used to have to survive
++	 * pen_hold_frames (30 frames = 250 ms) before the path would believe it.
++	 * That is exactly the "click needs a short hold" complaint.
++	 *
++	 * The amplitudes separate, and this is the first place in this driver
++	 * where the two populations can be told apart on something other than
++	 * time.  Measured over the 2026-09-30 capture (111 stationary offsets vs
++	 * 47 real strokes), value at the latch decision (frame 3):
++	 *
++	 *	stationary offset	 p10 158  p50 196  p75 236  p90 340
++	 *	real stroke peak	 p0  249  p10 311  p25 355  p50 461
++	 *
++	 * So a stationary touch whose peak reaches 300 is a contact, not a drift:
++	 * it latches at pen_confirm_frames (~25 ms) instead of after 250 ms.
++	 * Cost, stated honestly: 15 of those 111 offsets (14%) also reach 300 and
++	 * come back -- they are the strong ones (a rejected palm or hand, 400..
++	 * 2900 in amplitude), i.e. the P5 case, not the weak-drift case the gate
++	 * was built for.  Raise this to 400 to cut that to 8%, or set 0 to go
++	 * back to hold-only.  It is a sysfs knob precisely because this is a
++	 * judgement about the user's own hand, not something to settle offline.
++	 *
++	 * 0056 update -- 300 was measured WRONG on this panel.  It sits just
++	 * above the real quick-tap peak, so *every* light tap failed by_amp and
++	 * fell through to the 250 ms hold path (or produced nothing at all):
++	 * user tapping 10x gave latch_amp +0, ghost_runs +96.  That run's
++	 * refused set splits cleanly:
++	 *
++	 *	stationary offset	best <= 185
++	 *	real quick tap		best 211..294
++	 *
++	 * 198 is the geometric mean of that gap (0% leak, 0% loss), and it is
++	 * paired with pen_min_nbr8 = 367 so the amplitude test no longer has to
++	 * carry the whole discrimination on a drift-prone quantity.
++	 */
++	algo->pen_tap_level      = 198;
++	/*
++	 * Spatial discriminator, off by default because it has never been
++	 * measured -- and the one recording that exists cannot answer it (it
++	 * stores the argmax and its value, not the neighbourhood).  It is here so
++	 * the next capture *can*: npix/nbr8 are recorded per frame, and the
++	 * question "does a real tap lift more than one node while a stationary
++	 * offset lifts exactly one?" is decided by those two columns.
++	 */
++	algo->pen_min_pixels     = 0;
++	/*
++	 * 0055/0056: neighbour-lift gate for the **tap** path, 0 = off.
++	 *
++	 * Measured 2026-09-30 (user tapping 10x + resting; the refused set splits
++	 * into two populations on this quantity with a 2.4x gap):
++	 *
++	 *	stationary offset	nbr8 <= 239   best <= 185   npix = 1
++	 *	real tap		nbr8 >= 565   best 211..294
++	 *
++	 * 367 is the geometric mean of that gap -- 0% offset leak, 0% tap loss.
++	 * Verified: 5 taps all latched at conf=3 (25 ms) with ghost_runs +0.
++	 *
++	 * It applies to the amplitude branch ONLY (see by_amp in hx_pen_scan):
++	 * gating the candidate entry with it also drops stroke frames, which
++	 * resets the streak and breaks the move path.
++	 */
++	algo->pen_min_nbr8       = 367;
++	/*
++	 * Sub-cell centroid, 1 cell (3x3 window).  Changed from 2 by the
++	 * 2026-09-30 same-frame capture, which is the first measurement able to
++	 * rank the four windows: all four arms saw byte-identical input, so the
++	 * hand cancels exactly.
++	 *
++	 * Error against a local quadratic fit of the same trace (the intended
++	 * path, +/-33 ms window), 42 real strokes / 8797 frames:
++	 *
++	 *	win	X median	X p90	Y median	Y p90	2D rms
++	 *	0	0.129		1.588	0.000		0.935	2.080
++	 *	1	0.209		0.747	0.159		0.505	1.928
++	 *	2	0.293		0.876	0.241		0.704	1.951
++	 *	3	0.370		1.073	0.282		0.895	1.996
++	 *
++	 * win=0 (pure argmax) is *quiet* -- it holds one cell and therefore has a
++	 * zero median -- but its p90 is twice win=1's: the visible error is the
++	 * rare half-cell snap, and that is what the centroid removes.  The window
++	 * must not grow: 3 x 3 is the sweet spot, wider integrates more of the
++	 * noise than it recovers sub-cell phase.  Direct check of that phase:
++	 * regressing (x_win - x_argmax) on the true offset inside the cell gives
++	 * +141 units/cell for win=1 against an ideal +256, with corr 0.65 --
++	 * i.e. the centroid really does recover about half the quantisation, and
++	 * win=2/3 recover no more (corr 0.53/0.42).
++	 *
++	 * The earlier "no difference between the windows" reading came from a
++	 * metric that detrended each whole stroke, which is blind to exactly this
++	 * (the residual was dominated by hand curvature, not by the estimator).
+ 	 *
+ 	 * Why: the argmax estimate is quantised to whichever cell it sits in, so it
+ 	 * carries a *bias* of up to half a cell -- 42.67/2 output units = 2.13 mm --
+@@ -105,7 +232,7 @@ void hx_algo_init_defaults(struct hx_algo *algo)
+ 	 * (within one cell of the argmax), which is also why a broad low bump
+ 	 * elsewhere on the panel cannot move the reported tip.
+ 	 */
+-	algo->pen_centroid_win   = 2;
++	algo->pen_centroid_win   = 1;
+ }
+ 
+ /* ======================================================================== */
+@@ -1400,12 +1527,33 @@ bool hx_pen_scan(struct hx_algo *algo)
+ {
+ 	struct hx_pen_path *pen = &algo->pen;
+ 	s16 best = SHRT_MIN;
++	s16 thr;
++	s32 px, py;
++	s32 sum;
+ 	int br = 0, bc = 0;
+ 	int r, c;
++	int n_pix = 0;
++	s16 nbr8 = 0;
++	bool latched = false;
++
++	/*
++	 * Transient, valid for this frame only: hx_pen_scan() runs, then the
++	 * caller stores a capture record for the same frame, and the record is
++	 * the only place the *reason* for emitting survives.
++	 *
++	 * 0055: cleared before the pen_enabled check, not after.  With the path
++	 * off, frame_flags would otherwise keep the previous frame's bits, and
++	 * the caller now reads them to decide whether to record -- a stale
++	 * HX_PEN_SCAN_F_CAND would fill the ring with frames that never had a
++	 * candidate at all.
++	 */
++	pen->frame_flags = 0;
+ 
+ 	if (!algo->pen_enabled)
+ 		return false;
+ 
++	thr = algo->pen_threshold;
++	n_pix = 0;
+ 	for (r = 0; r < HX_ROWS; r++) {
+ 		for (c = 0; c < HX_COLS; c++) {
+ 			s16 v = algo->raw_frame[r][c];
+@@ -1415,10 +1563,43 @@ bool hx_pen_scan(struct hx_algo *algo)
+ 				br = r;
+ 				bc = c;
+ 			}
++			if (v >= thr)
++				n_pix++;
++		}
++	}
++
++	/*
++	 * How much does the argmax's neighbourhood move with it?  The finger path
++	 * answers the same question for its own peaks (iso_nbr_ratio_q8): a real
++	 * contact lifts its neighbours, a lone node does not.  Recorded, not yet
++	 * gated -- see pen_min_pixels.
++	 */
++	{
++		int i;
++		static const s8 off[8][2] = {
++			{ -1, -1 }, { -1, 0 }, { -1, 1 }, { 0, -1 },
++			{ 0, 1 }, { 1, -1 }, { 1, 0 }, { 1, 1 }
++		};
++
++		for (i = 0, sum = 0; i < 8; i++) {
++			int rr = br + off[i][0];
++			int cc = bc + off[i][1];
++			s16 v;
++
++			if (rr < 0 || rr >= HX_ROWS || cc < 0 || cc >= HX_COLS)
++				continue;
++			v = algo->raw_frame[rr][cc];
++			if (v > 0)
++				sum += v;
+ 		}
++		nbr8 = sum > S16_MAX ? S16_MAX : (s16)sum;
+ 	}
+ 
+-	if (best < algo->pen_threshold) {
++	pen->n_pix = n_pix;
++	pen->nbr8 = nbr8;
++
++	if (best < thr || (algo->pen_min_pixels &&
++			   n_pix < (int)algo->pen_min_pixels)) {
+ 		/*
+ 		 * No candidate.  Tolerate a gap: one dropped frame in the middle
+ 		 * of a stroke must not cost a re-confirmation.
+@@ -1426,24 +1607,65 @@ bool hx_pen_scan(struct hx_algo *algo)
+ 		if (pen->miss < U16_MAX)
+ 			pen->miss++;
+ 		if (pen->miss > algo->pen_lost_frames) {
++			/*
++			 * A streak that dies without ever being believed is a stray
++			 * coupling, not a pen -- count it so the gate can be checked
++			 * against the panel instead of against a theory.
++			 */
++			if (pen->has && !pen->active)
++				pen->ghost_runs++;
+ 			pen->active = false;
+ 			pen->conf = 0;
+ 			pen->has = false;
++			pen->start_valid = false;
+ 		}
+ 		return false;
+ 	}
+ 
+ 	pen->frames_cand++;
+-
+-	if (!pen->has) {
++	/*
++	 * 0055: remember the contact, not the frame.  The gate is evaluated on
++	 * every frame from confirmation onwards, so it should be decided on the
++	 * streak it is deciding about -- a tap whose amplitude peaks on its
++	 * first frames must not be judged by a later, weaker one.
++	 */
++	pen->frame_flags |= HX_PEN_SCAN_F_CAND;
++	pen->z = best;
++	if (best > pen->best_streak)
++		pen->best_streak = best;
++	if (nbr8 > pen->nbr8_streak)
++		pen->nbr8_streak = nbr8;
++
++	if (!pen->has ||
++	    abs(br - (int)pen->last_r) > algo->pen_jump_max ||
++	    abs(bc - (int)pen->last_c) > algo->pen_jump_max) {
++		/*
++		 * New streak (or the candidate jumped far enough to be a
++		 * different object).  Remember where it started: the latch gate
++		 * delays the *decision*, and this is what keeps the stroke from
++		 * losing its entry.
++		 */
+ 		pen->conf = 1;
+-	} else if (abs(br - (int)pen->last_r) <= algo->pen_jump_max &&
+-		   abs(bc - (int)pen->last_c) <= algo->pen_jump_max) {
++		pen->best_streak = best;
++		pen->nbr8_streak = nbr8;
++		pen->min_r = pen->max_r = (u8)br;
++		pen->min_c = pen->max_c = (u8)bc;
++		hx_pen_positions(algo, br, bc, algo->pen_centroid_win,
++				 &px, &py);
++		pen->first_x = px;
++		pen->first_y = py;
++		pen->start_valid = true;
++	} else {
+ 		if (pen->conf < S16_MAX)
+ 			pen->conf++;
+-	} else {
+-		/* Jumped: a different object, or noise.  Restart the streak. */
+-		pen->conf = 1;
++		if ((u8)br < pen->min_r)
++			pen->min_r = (u8)br;
++		if ((u8)br > pen->max_r)
++			pen->max_r = (u8)br;
++		if ((u8)bc < pen->min_c)
++			pen->min_c = (u8)bc;
++		if ((u8)bc > pen->max_c)
++			pen->max_c = (u8)bc;
+ 	}
+ 
+ 	pen->last_r = br;
+@@ -1451,41 +1673,157 @@ bool hx_pen_scan(struct hx_algo *algo)
+ 	pen->has = true;
+ 	pen->miss = 0;
+ 
+-	if (pen->conf >= algo->pen_confirm_frames)
+-		pen->active = true;
++	{
++		u8 dr = pen->max_r - pen->min_r;
++		u8 dc = pen->max_c - pen->min_c;
+ 
+-	if (!pen->active)
+-		return false;
++		pen->travel = dr > dc ? dr : dc;
++	}
+ 
+ 	/*
+-	 * Sub-cell refinement.
++	 * Latch decision.  Three ways to be believed:
+ 	 *
+-	 * Up to here the position is the integer grid cell of the largest pixel,
+-	 * which quantises to +/-0.5 cell -- measured on the panel as a median
+-	 * deviation of 0.6..1.3 mm on a 20 cm straight line, with occasional
+-	 * single-cell excursions of 3..5 mm.  Those excursions are the argmax
+-	 * hopping between two nearly equal cells; averaging the neighbourhood
+-	 * keeps the answer between them instead of jumping.
++	 *   moving    -- the streak has covered pen_latch_travel; a stationary
++	 *		 offset never will, because it does not move;
++	 *   a contact -- the peak is at or above pen_tap_level, which a drift
++	 *		 rarely reaches (see the defaults).  This is the tap path,
++	 *		 and it answers at pen_confirm_frames, i.e. ~25 ms;
++	 *   held      -- the streak lasted pen_hold_frames; the slow fallback for
++	 *		 a genuinely gentle press.
+ 	 *
+-	 * Weight is the clamped raw value, same convention as hx_frame_at():
+-	 * the pen's skirt is only 40..80 against a peak of ~490, so a
+-	 * peak-relative gate would admit the peak alone and interpolate nothing.
+-	 * A plain positive weighting lets the (slightly asymmetric) skirt move
+-	 * the answer off the cell centre, which is the sub-cell information
+-	 * that exists.
++	 * The two *stationary* ways (contact / held) additionally require
++	 * spatial_ok -- pen_min_nbr8, the neighbour lift the streak reached.
++	 * Motion is already unambiguous; a stationary contact is not, and the
++	 * quantity that separates it from a stationary offset is spatial, not
++	 * temporal and not amplitude (amplitude drifts with the panel, see
++	 * pen_min_nbr8 in hx_algo_init_defaults).
+ 	 *
+-	 * The result is clamped to within one cell of the argmax: this is a
+-	 * refinement, not a relocation.  Without that guard a broad low bump
+-	 * somewhere else on the panel -- a resting hand, charger coupling --
+-	 * could drag the centroid away from the pen tip.
+-	 *
+-	 * The trajectory gate above stays on the argmax on purpose: that is the
+-	 * quantity whose continuity was measured, and mixing a smoothed position
+-	 * into the gate would change what the thresholds mean.
++	 * pen_latch_travel = 0 restores the old "confirmed is enough" rule.
++	 */
++	if (!pen->active && pen->conf >= algo->pen_confirm_frames) {
++		bool by_move = algo->pen_latch_travel <= 0 ||
++			       (s32)pen->travel * 256 >= algo->pen_latch_travel;
++		/*
++		 * 0055: judged on the streak's peak, not on this frame's value.
++		 * The gate is re-evaluated every frame; using the instantaneous
++		 * amplitude meant a tap was believed only if its strongest frame
++		 * happened to be one where confirmation was already complete.
++		 *
++		 * 0056: the neighbour test (`pen_min_nbr8`) belongs HERE, not at
++		 * the candidate gate.  A tap is a *stationary* contact that has to
++		 * be told apart from a *stationary* offset, and neighbour lift is
++		 * the quantity a single-node offset cannot fake.  But gating the
++		 * candidate entry with it also starves the **move** path: a stroke
++		 * accumulates `travel` inside one uninterrupted streak, so
++		 * dropping the frames whose nbr8 dips resets the streak and the
++		 * stroke never latches.  The two paths have different needs --
++		 * move needs continuity, tap needs a spatial discriminator --
++		 * so the spatial test belongs to the tap branch alone.
++		 *
++		 * 0057: ... and to the hold branch, which is the other *stationary*
++		 * way in.  Measured with it missing: an offset at (37,2) -- near
++		 * the bottom edge, nbr8 298..329, never moving -- sat as a
++		 * candidate for 36 frames and then latched via by_hold, twice.
++		 * Stated as a rule rather than a special case: **any latch not
++		 * justified by motion must be spatially real.**  Move stays free
++		 * of it, because a moving contact is already unambiguous and
++		 * because it must keep its streak intact.
++		 */
++		bool spatial_ok = algo->pen_min_nbr8 <= 0 ||
++				  pen->nbr8_streak >= algo->pen_min_nbr8;
++		bool by_amp = algo->pen_tap_level > 0 &&
++			      pen->best_streak >= algo->pen_tap_level &&
++			      spatial_ok;
++		bool by_hold = algo->pen_hold_frames > 0 &&
++			       pen->conf >= (s16)algo->pen_hold_frames &&
++			       spatial_ok;
++
++		if (by_move || by_amp || by_hold) {
++			pen->active = true;
++			latched = true;
++			pen->replay_start = pen->start_valid;
++			if (by_move) {
++				pen->latch_move++;
++			} else if (by_amp) {
++				pen->latch_amp++;
++				pen->frame_flags |= HX_PEN_SCAN_F_AMP;
++			} else {
++				pen->latch_hold++;
++				pen->frame_flags |= HX_PEN_SCAN_F_HOLD;
++			}
++		}
++	}
++
++	if (!pen->active) {
++		/*
++		 * 0055: the capture keeps this frame.  A tap that never latched
++		 * used to leave no trace at all -- it was counted in ghost_runs
++		 * and otherwise invisible, which is why "the click is not
++		 * sensitive" could not be diagnosed from the dump.
++		 */
++		pen->frame_flags |= HX_PEN_SCAN_F_NOLATCH;
++		return false;
++	}
++
++	/*
++	 * First emitted frame after latching: send the point the pen landed on.
++	 * Without this the gate would cost up to 8.5 mm of the stroke's entry
++	 * (2 cells of travel + one frame of catch-up) instead of costing only
++	 * the time it took to make the decision.
+ 	 */
+-	hx_pen_positions(algo, br, bc, algo->pen_centroid_win,
+-			 &pen->x, &pen->y);
++	if (latched && pen->replay_start) {
++		pen->replay_start = false;
++		pen->frame_flags |= HX_PEN_SCAN_F_REPLAY;
++		pen->x = pen->first_x;
++		pen->y = pen->first_y;
++		pen->z = best;
++		pen->emitted = true;
++		pen->frames_emit++;
++		return true;
++	}
++
++	hx_pen_positions(algo, br, bc, algo->pen_centroid_win, &px, &py);
++
++	/*
++	 * Reject an impossible step: hold the previous position instead.  See
++	 * pen_max_step for why 6 cells (3 m/s) cannot clip a real pen.
++	 */
++	if (algo->pen_max_step > 0 && pen->emitted) {
++		s64 dx = (s64)px - (s64)pen->x;
++		s64 dy = (s64)py - (s64)pen->y;
++		s64 lim = (s64)algo->pen_max_step;
++
++		if (dx * dx + dy * dy > lim * lim) {
++			pen->rej_jump++;
++			pen->frame_flags |= HX_PEN_SCAN_F_JUMP;
++			/*
++			 * Holding the previous position is right for a one-frame
++			 * outlier, but wrong if it persists: the reported point
++			 * would freeze until the pen lifts, and every later frame
++			 * would be measured against the same stale origin.  After
++			 * a few frames of disagreement the new position is the
++			 * only one that can be true, so resynchronise.
++			 */
++			if (++pen->rej_run >= 4) {
++				pen->x = px;
++				pen->y = py;
++				pen->rej_run = 0;
++			}
++		} else {
++			pen->x = px;
++			pen->y = py;
++			pen->rej_run = 0;
++		}
++		pen->emitted = true;
++		pen->z = best;
++		pen->frames_emit++;
++		return true;
++	}
+ 
++	pen->x = px;
++	pen->y = py;
++	pen->emitted = true;
++	pen->rej_run = 0;
+ 	pen->z = best;
+ 	pen->frames_emit++;
+ 	return true;
+--- a/drivers/input/touchscreen/hx-algo.h
++++ b/drivers/input/touchscreen/hx-algo.h
+@@ -195,6 +195,31 @@ struct hx_pen_path {
+ 	s32  z;
+ 	u32  frames_cand;
+ 	u32  frames_emit;
++
++	/* ---- 0053: latch gate ---- */
++	u8   min_r, max_r, min_c, max_c;  /* bounding box of the current streak */
++	u8   travel;                      /* its larger extent, in grid cells   */
++	s32  first_x, first_y;            /* Q8.8 estimate at the streak start  */
++	bool start_valid;
++	bool replay_start;                /* next emitted point is the start    */
++	bool emitted;                     /* x/y hold a position already sent   */
++	u8   frame_flags;                 /* this frame only; read by the capture */
++	u32  ghost_runs;                  /* streaks the gate refused to latch  */
++	u32  latch_move;                  /* latched by travel                  */
++	u32  latch_hold;                  /* latched by the hold path           */
++	u32  rej_jump;                    /* frames whose step was impossible   */
++	u8   rej_run;                     /* consecutive such frames (resync)   */
++	u32  latch_amp;                   /* latched by amplitude (a tap)       */
++	u16  n_pix;                       /* pixels at/above pen_threshold      */
++	s16  nbr8;                        /* argmax's 8-neighbour sum, >=0      */
++
++	/* ---- 0055: streak maxima, so the gate can be judged on the contact
++	 *      rather than on whichever frame it happened to be evaluated on --
++	 *      and so the tap path does not depend on the amplitude being at
++	 *      its highest on the very frame confirmation completes.
++	 */
++	s16  best_streak;                 /* max amplitude over this streak     */
++	s16  nbr8_streak;                 /* max nbr8 over this streak          */
+ };
+ 
+ /**
+@@ -286,6 +311,34 @@ struct hx_algo {
+ 	s16  pen_jump_max;         /* per-axis move allowed between frames */
+ 	s16  pen_confirm_frames;   /* streak length that latches the path  */
+ 	u16  pen_lost_frames;      /* candidate-less frames before release */
++	s16  pen_latch_travel;     /* Q8.8 (1/256 cell): travel the streak
++				    * must show before it is believed to be
++				    * a pen.  0 = latch on confirmation
++				    * alone (pre-0053 behaviour)         */
++	u16  pen_hold_frames;      /* streak length that latches a *stationary*
++				    * touch (a dot); 0 = no hold path    */
++	s32  pen_max_step;         /* Q8.8: largest per-frame step a latched
++				    * pen can make; 0 = no limit         */
++	s16  pen_tap_level;        /* amplitude at/above which a *stationary*
++				    * touch is believed at confirmation alone
++				    * -- that is what a tap needs.  0 = off */
++	u8   pen_min_pixels;       /* candidates need this many pixels at or
++				    * above pen_threshold;  0 = off.  The
++				    * spatial test a tap and a stationary
++				    * offset are supposed to differ in.   */
++	s16  pen_min_nbr8;         /* 0055/0056: neighbour lift the streak must
++				    * reach for the **amplitude (tap)** path to
++				    * believe it -- sum of the 8 raw values
++				    * around the argmax;  0 = off.
++				    *
++				    * A tap is a *stationary* contact that has to
++				    * be told from a *stationary* offset, and
++				    * neighbour lift is what a single-node offset
++				    * cannot fake.  It must NOT gate the candidate
++				    * entry: a stroke accumulates `travel` inside
++				    * one uninterrupted streak, so dropping
++				    * low-nbr8 frames resets the streak and breaks
++				    * the move path (measured 2026-09-30).      */
+ 	u8   pen_centroid_win;     /* sub-cell centroid radius in cells;
+ 	                            * 0 = report the argmax cell itself      */
+ 	struct hx_pen_path pen;
+@@ -329,6 +382,26 @@ int hx_count_stable_tracks(struct hx_algo *algo);
+  * Returns true when the path is latched and @algo->pen holds the position to
+  * report (Q8.8 grid coordinates, same convention as struct hx_contact).
+  */
++/*
++ * Why a pen frame was emitted, valid for that frame only.  himax-spi-core.c
++ * stores a capture record right after hx_pen_scan() returns, and this is the
++ * only surviving trace of which gate path fired -- without it the next
++ * measurement cannot tell a latch-by-travel from a latch-by-hold.
++ */
++#define HX_PEN_SCAN_F_HOLD	0x1	/* latch came from the hold path  */
++#define HX_PEN_SCAN_F_REPLAY	0x2	/* frame carries the streak start */
++#define HX_PEN_SCAN_F_JUMP	0x4	/* step held back as impossible   */
++#define HX_PEN_SCAN_F_AMP	0x8	/* latch came from the amplitude path */
++/*
++ * 0055: a candidate existed on this frame.  The capture used to store only
++ * emitted frames, so the gate's *input* was never on disk -- and that is
++ * exactly what has to be looked at to decide whether a tap that never latched
++ * was a weak contact or a drift.  Emitted frames carry CAND too; a frame that
++ * was refused carries CAND | NOLATCH.
++ */
++#define HX_PEN_SCAN_F_CAND	0x10	/* candidate present this frame   */
++#define HX_PEN_SCAN_F_NOLATCH	0x20	/* candidate present, gate refused */
++
+ bool hx_pen_scan(struct hx_algo *algo);
+ 
+ /**

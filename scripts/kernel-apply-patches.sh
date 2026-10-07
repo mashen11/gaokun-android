@@ -205,6 +205,24 @@ KPATCHES=(
     # 0076：【本地，v7.2.9 起】撤回 stable 的 Revert "drm/msm: dsi: fix PLL init in bonded mode"（5de981b7db）——
     #    没有它本机双 DSI 绑定面板黑屏（触摸中断 0/s）；有它 118/s 有画面。2026-10-05 二分定案。
     0076-drm-msm-dsi-phy-7nm-reapply-bonded-pll-init-reverting-5de981b7db.patch
+    # ★★ 0078–0082（手写笔 / Huawei M-Pencil）：给这块面板上本来跑不起来的笔一条独立通路。
+    #    背景：hx-algo.c 是幅度驱动的流水线，指腹（4×5 格、峰值 ~3800）成立，
+    #    笔尖（核心 2×2 格、峰值 492）不可能 —— 出厂 peak_threshold=800 > 492，
+    #    连通域根本起不来。放宽闸门的路线已用实测否掉，改为在 raw_frame 上另开一条通路。
+    #    ⚠️ 这五条【依次叠加，顺序不能换】（同一条 latch 逻辑被反复改；重排会打不上）。
+    #    ⚠️ 它们只碰 drivers/input/touchscreen/{himax-spi-core.c,hx-algo.c,hx-algo.h}；
+    #      上游 0048 起没有任何补丁碰过这三个文件（0037–0047 与本仓逐字节相同），
+    #      所以这一系列与本仓同号补丁只差编号。
+    # 0078：笔的独立通路 —— raw 网格 + 格内加权质心 + 独立轨迹（默认关；debugfs 整帧导出上限可调）。
+    0078-Input-himax-spi-add-stylus-raw-grid-path.patch
+    # 0079：笔触点判据 —— 幽灵剔除（行程 / 空间闸门）与"点一下"的幅度闸门。
+    0079-Input-himax-spi-stylus-contact-gates-and-tap.patch
+    # 0080：系统集成 —— 申报 ABS_MT_TOOL_TYPE（MT_TOOL_PEN）、笔/指轨迹隔离、笔通路改默认开。
+    0080-Input-himax-spi-stylus-tool-type-and-enable-by-default.patch
+    # 0081：边缘点击的空间补偿（tap 幅度门 198→160）、笔路可观测性、单点镜像去重。
+    0081-Input-himax-spi-stylus-edge-compensation-observability-identity.patch
+    # 0082：修「一指变两指」幽灵 —— 手指轨道还在宽限期内时不许新建笔轨道（出生条件 bug，非阈值）。
+    0082-Input-himax-spi-stylus-no-new-track-while-finger-live.patch
 )
 
 # ⚠️ 诊断补丁【不进发版内核】：只在带 --with-diag 时打。顺序有依赖：0028/0029 依赖 0023，
