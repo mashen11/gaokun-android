@@ -10,6 +10,48 @@
 | `capture-ab.sh` | 在设备上跑。录 `/dev/input/event7` 原始流，**按收到多少数据**切换 A/B 预设 |
 | `evdev-strokes.py` | 在本机跑。解码成轨迹：轨迹数 / 每条帧数 / 速度分布 / **相邻轨迹间隔**（见下） |
 | `tracker-sim.c` | 在本机跑。`hx_track_contacts()` 的逐行复刻，不用硬件就能验证跟踪器的改动 |
+| `pen-multitouch-analyze.py` | 在本机跑。**幽灵触点**：逐帧 slot 快照，揪出「同帧 ≥2 个活动 slot 且两点 <60 px」的帧，并按工具组合分类 |
+| `pen-line-analyze.py` | 在本机跑。按工具（笔 / 手指）分开统计采样率 / 帧间隔 / 每帧步长 / 笔划碎片化 |
+| `pen-ghost-ab.sh` | 在主机跑（一条命令）。清零计数器 → 抓 evdev → 回读计数器 → 跑分析器 |
+| `check-pen-android.sh` | 在设备上跑。**三层判定「Android 到底认不认这支笔」** |
+
+## 手写笔（M-Pencil，`patches/0078`–`0082`）
+
+笔在这块面板上走一条**独立于手指的流水线**。手指那条链是幅度驱动的 ——
+指腹 4×5 格、峰值 ~3800 过得了 `peak_threshold=800`，而笔尖核心只有 2×2 格、峰值 **492**，
+连通域根本起不来。所以笔改从 `raw_frame` 上另开一条路。
+
+四个工具围绕两个问题：**认不认**，和**有没有幽灵**。
+
+* **先判"认不认"** —— `check-pen-android.sh`（推到设备上跑）：
+
+  ```sh
+  adb push scripts/touch/check-pen-android.sh /data/local/tmp/
+  adb shell su -c 'sh /data/local/tmp/check-pen-android.sh --capture 8'   # 期间用笔划两下
+  ```
+
+  三层从硬到软：L1 `dumpsys input` 的设备 `Sources:` 含 `SOURCE_STYLUS`；
+  L2 该事件节点有 `ABS_MT_TOOL_TYPE` 能力位；L3 实抓事件里出现 `ABS_MT_TOOL_TYPE = MT_TOOL_PEN`。
+  **L3 才是终判**，三层全过 ⇒ 应用里 `MotionEvent.getToolType()` 才会是 `TOOL_TYPE_STYLUS`。
+
+  ⚠️ `touch.deviceType = stylus` 是**无效值**（合法取值只有 touchScreen / touchPad / pointer / default），
+  `.idc` 对「这是不是笔」没有任何影响 —— 唯一的来源是内核事件。
+
+* **再判"有没有幽灵"** —— `pen-ghost-ab.sh`（主机一条命令）：
+
+  ```sh
+  DEVHOST=192.168.31.177:5555 bash scripts/touch/pen-ghost-ab.sh 60 "nbr8=150"
+  ```
+
+  跑的时候**把笔放远**，做纯手指手势（图片应用里单指捏合、从底边上滑、全屏视频里纵划）。
+  笔路不该生出任何轨道 ⇒ `slots_born_pen ≈ 0`，也不该出现「同帧两点 <60 px」的帧。
+  有幽灵时的指纹：`slots_born_pen` 非 0，且那些帧的工具组合是 `finger/pen`
+  （**从不是** `finger/finger` —— 后者是真的两指）。
+
+* **笔划质量** —— `pen-line-analyze.py` 按工具分开看采样率与每帧步长，
+  用来验证 `pen_centroid_win` 的格内插值（看「位移为 0 的帧」占比）。
+
+背景、判决与死路都在 [`docs/stylus.md`](../../docs/stylus.md)。
 
 ## 驱动侧的可观测接口（内核 **#23** 起，`patches/0043`）
 
