@@ -132,10 +132,12 @@ bool Device::init()
 	 *        value in clockwise direction whereas libcamera specifies the
 	 *        rotation property in anticlockwise direction."
 	 *
-	 *   ★ 本机设备树：后摄 180（2026-09-24 用户目视确认，patches/0049 只去掉了 FIXME）、
-	 *     前摄 0（待目视）⇒ SENSOR_ORIENTATION 后 180 / 前 0。0 和 180 在这个换算下自反，
+	 *   ★ 本机设备树：后摄 180、前摄 0 ⇒ SENSOR_ORIENTATION 后 180 / 前 0
+	 *     （2026-09-24 目视确认，patches/0049 只去掉了 FIXME）。0 和 180 在这个换算下自反，
 	 *     所以换算方向错了在本机看不出来 —— 一旦哪颗标成 90/270，错了就立刻差 180°。
-	 *     ⚠️ PR #6 描述里的"前 90 / 后 270"与目视结论相反，别照它改。
+	 *   ⚠️ 2026-10-12 在同一台机上重新标定，结论相反：后摄 270 / 前摄 90（逆时针，
+	 *     即 PR #6 描述里的那组）取景才正。两次都是目视、差 90°，设备树暂不改，
+	 *     记录与复现步骤见 docs/camera-orientation-2026-10-12.md。
 	 */
 	auto rot = props.get(libcamera::properties::Rotation);
 	const int32_t rawRotation = rot ? *rot : 0;
@@ -159,7 +161,8 @@ bool Device::init()
 	 *      免得标定时多做一次 360-x 的心算：
 	 *        setprop debug.gaokun3.camera.orientation.rear 270
 	 *      标定完把属性清空，并把值写进设备树 —— 正确的位置是设备树。
-	 *      步骤见 docs/camera-photo-rotation-2026-09-19.md。
+	 *      步骤见 docs/camera-photo-rotation-2026-09-19.md；2026-10-12 的实测值见
+	 *      docs/camera-orientation-2026-10-12.md。
 	 */
 	const char *prop = facts_.frontFacing
 				   ? "debug.gaokun3.camera.orientation.front"
